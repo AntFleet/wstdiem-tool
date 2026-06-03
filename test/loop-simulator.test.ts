@@ -4,6 +4,7 @@ import { simulateMorphoAuthorization } from "../src/loop/authorization.js";
 import { buildLoopRebalanceParams } from "../src/loop/params.js";
 import { runLoopPreflight, type LoopPreflightClient } from "../src/loop/preflight.js";
 import { simulateLoopExecutorCall, type LoopSimulationClient } from "../src/loop/simulator.js";
+import { WAD } from "../src/metrics/math.js";
 import type { Address, AppConfig, Hex } from "../src/types/domain.js";
 
 const owner = "0x0000000000000000000000000000000000000009" as const;
@@ -41,6 +42,10 @@ class MockPreflightClient implements LoopPreflightClient {
       vaultAsset?: Address;
       authorized?: boolean;
       marketParams?: readonly [Address, Address, Address, Address, bigint];
+      positionCollateral?: bigint;
+      curveDiemBalance?: bigint;
+      curveWstDiemBalance?: bigint;
+      navWad?: bigint;
     } = {},
   ) {}
 
@@ -52,12 +57,24 @@ class MockPreflightClient implements LoopPreflightClient {
     return this.options.code ?? "0x01";
   }
 
-  async readContract(args: { functionName: string }): Promise<unknown> {
+  async readContract(args: { functionName: string; args?: readonly unknown[] }): Promise<unknown> {
     if (args.functionName === "asset") {
       return this.options.vaultAsset ?? DEFAULT_CONFIG.contracts.diem;
     }
+    if (args.functionName === "convertToAssets") {
+      const shares = BigInt(args.args?.[0] as bigint | number | string);
+      return (shares * (this.options.navWad ?? WAD)) / WAD;
+    }
+    if (args.functionName === "balances") {
+      return args.args?.[0] === 0n
+        ? (this.options.curveDiemBalance ?? 500n * WAD)
+        : (this.options.curveWstDiemBalance ?? 500n * WAD);
+    }
     if (args.functionName === "isAuthorized") {
       return this.options.authorized ?? true;
+    }
+    if (args.functionName === "position") {
+      return [0n, 0n, this.options.positionCollateral ?? 100n * WAD];
     }
     if (args.functionName === "idToMarketParams") {
       return (
@@ -184,7 +201,47 @@ describe("loop preflight and simulation", () => {
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain(
       "projected-health-factor:pass",
     );
-    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("curve-depth:fail");
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("curve-depth:pass");
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("net-apy:fail");
+  });
+
+  it("fails Curve depth when projected position exceeds 20 percent of pool TVL", async () => {
+    const config = completeConfig();
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      client: new MockSimulationClient({
+        positionCollateral: 100n * WAD,
+        curveDiemBalance: 200n * WAD,
+        curveWstDiemBalance: 0n,
+      }),
+    });
+    const curveDepth = result.preflightChecks.find((check) => check.key === "curve-depth");
+    expect(curveDepth?.status).toBe("fail");
+    expect(curveDepth?.message).toContain("max is 20.00%");
+  });
+
+  it("fails Curve depth when pool TVL is zero", async () => {
+    const config = completeConfig();
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      client: new MockSimulationClient({
+        curveDiemBalance: 0n,
+        curveWstDiemBalance: 0n,
+      }),
+    });
+    const curveDepth = result.preflightChecks.find((check) => check.key === "curve-depth");
+    expect(curveDepth?.status).toBe("fail");
+    expect(curveDepth?.message).toContain("TVL is zero");
   });
 
   it("blocks live simulation without a transaction sender", async () => {

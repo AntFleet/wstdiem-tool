@@ -1,3 +1,4 @@
+import { curvePoolAbi } from "../abi/curvePool.js";
 import { inferenceVaultAbi } from "../abi/inferenceVault.js";
 import { morphoAbi } from "../abi/morpho.js";
 import { missingDeploymentKeys } from "../config/load.js";
@@ -11,6 +12,10 @@ interface ReadMorphoMarketParams {
   oracle: Address;
   irm: Address;
   lltv: bigint;
+}
+
+interface ReadMorphoPosition {
+  collateral: bigint;
 }
 
 export interface LoopPreflightClient {
@@ -97,8 +102,30 @@ function parseMorphoMarketParams(value: unknown): ReadMorphoMarketParams | null 
   return null;
 }
 
+function parseMorphoPosition(value: unknown): ReadMorphoPosition | null {
+  if (Array.isArray(value) && value.length >= 3) {
+    return {
+      collateral: BigInt(value[2] as bigint | number | string),
+    };
+  }
+  if (value && typeof value === "object") {
+    const entry = value as Record<string, unknown>;
+    if (entry.collateral !== undefined) {
+      return {
+        collateral: BigInt(entry.collateral as bigint | number | string),
+      };
+    }
+  }
+  return null;
+}
+
 function numberToWad(value: number): bigint {
   return BigInt(Math.round(value * 1_000_000)) * (WAD / 1_000_000n);
+}
+
+function formatPercentWad(value: bigint, precision = 2): string {
+  const percent = value * 100n;
+  return `${formatWadDecimal(percent, precision)}%`;
 }
 
 function formatWadDecimal(value: bigint, precision = 4): string {
@@ -213,6 +240,85 @@ function checkProjectedHealthFactor(config: AppConfig, context?: LoopPreflightCo
   );
 }
 
+async function projectedPositionNotionalDiem(input: {
+  config: AppConfig;
+  owner: Address | null;
+  client: LoopPreflightClient;
+  context?: LoopPreflightContext;
+}): Promise<bigint | null> {
+  if (input.context?.action === "open" && input.context.params !== null) {
+    const params = input.context.params as LoopOpenParams;
+    return params.initialDiem + params.flashDiem;
+  }
+  if (input.owner === null || input.config.morpho.marketId === null || input.config.contracts.inferenceVault === null) {
+    return null;
+  }
+  const position = parseMorphoPosition(
+    await input.client.readContract({
+      address: input.config.contracts.morphoBlue,
+      abi: morphoAbi,
+      functionName: "position",
+      args: [input.config.morpho.marketId, input.owner],
+    }),
+  );
+  if (position === null) {
+    return null;
+  }
+  return (await input.client.readContract({
+    address: input.config.contracts.inferenceVault,
+    abi: inferenceVaultAbi,
+    functionName: "convertToAssets",
+    args: [position.collateral],
+  })) as bigint;
+}
+
+async function checkCurveDepth(input: {
+  config: AppConfig;
+  owner: Address | null;
+  client: LoopPreflightClient;
+  context?: LoopPreflightContext;
+}): Promise<PreflightCheck> {
+  if (input.config.contracts.curvePool === null || input.config.contracts.inferenceVault === null) {
+    return check("curve-depth", "fail", "curvePool and inferenceVault are required for Curve depth validation");
+  }
+  const positionNotionalDiem = await projectedPositionNotionalDiem(input);
+  if (positionNotionalDiem === null) {
+    return check("curve-depth", "fail", "unable to determine projected position notional for Curve depth validation");
+  }
+  const diemBalance = (await input.client.readContract({
+    address: input.config.contracts.curvePool,
+    abi: curvePoolAbi,
+    functionName: "balances",
+    args: [0n],
+  })) as bigint;
+  const wstDiemBalance = (await input.client.readContract({
+    address: input.config.contracts.curvePool,
+    abi: curvePoolAbi,
+    functionName: "balances",
+    args: [1n],
+  })) as bigint;
+  const wstDiemValue = (await input.client.readContract({
+    address: input.config.contracts.inferenceVault,
+    abi: inferenceVaultAbi,
+    functionName: "convertToAssets",
+    args: [wstDiemBalance],
+  })) as bigint;
+  const curveTvlDiem = diemBalance + wstDiemValue;
+  if (curveTvlDiem === 0n) {
+    return check("curve-depth", "fail", "Curve depth unavailable because Curve pool TVL is zero");
+  }
+
+  const ratioWad = (positionNotionalDiem * WAD) / curveTvlDiem;
+  const maxRatioWad = numberToWad(input.config.thresholds.curveDepthCritical);
+  return check(
+    "curve-depth",
+    ratioWad <= maxRatioWad ? "pass" : "fail",
+    ratioWad <= maxRatioWad
+      ? `projected position is ${formatPercentWad(ratioWad)} of Curve depth`
+      : `projected position is ${formatPercentWad(ratioWad)} of Curve depth; max is ${formatPercentWad(maxRatioWad)}`,
+  );
+}
+
 export async function runLoopPreflight(
   config: AppConfig,
   owner: Address | null,
@@ -296,9 +402,9 @@ export async function runLoopPreflight(
 
   checks.push(await checkMorphoMarketParams(config, client));
   checks.push(checkProjectedHealthFactor(config, context));
+  checks.push(await checkCurveDepth({ config, owner, client, context }));
 
   const unavailableStrategyGates = [
-    ["curve-depth", "Curve depth and position-size check is not implemented"],
     ["net-apy", "target leverage net APY check is not implemented"],
     ["oracle-deviation", "Morpho oracle deviation check is not implemented"],
     ["route-slippage", "route quote and slippage protection check is not implemented"],
