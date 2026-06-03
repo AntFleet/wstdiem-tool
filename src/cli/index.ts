@@ -7,6 +7,7 @@ import { makeEmptySnapshot } from "../metrics/math.js";
 import { Storage } from "../storage/sqlite.js";
 import { createViemLoopSimulationClient } from "../contracts/loopSimulationClient.js";
 import { simulateMorphoAuthorization } from "../loop/authorization.js";
+import { buildConfiguredLoopSafetyEvidence } from "../loop/safetyEvidence.js";
 import { simulateLoopExecutorCall } from "../loop/simulator.js";
 import type { AppConfig, Severity } from "../types/domain.js";
 import { CliError, toCliError } from "./errors.js";
@@ -241,6 +242,7 @@ loop
         owner,
         from,
         params,
+        safetyEvidence: buildConfiguredLoopSafetyEvidence(config),
         client: client ?? undefined,
       });
       const data = {
