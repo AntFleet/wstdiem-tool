@@ -2,7 +2,7 @@ import { loopExecutorAbi } from "../abi/loopExecutor.js";
 import type { Address, AppConfig, Hex } from "../types/domain.js";
 import { encodeLoopExecutorCall } from "./params.js";
 import { hasPreflightFailures, runLoopPreflight, type LoopPreflightClient } from "./preflight.js";
-import type { LoopAction, LoopExecutorParams, LoopSimulationResult } from "./types.js";
+import type { LoopAction, LoopExecutorParams, LoopSafetyEvidence, LoopSimulationResult } from "./types.js";
 
 export interface LoopSimulationClient extends LoopPreflightClient {
   simulateContract(args: {
@@ -27,7 +27,7 @@ export async function simulateLoopExecutorCall(input: {
   owner: Address | null;
   from: Address | null;
   params: LoopExecutorParams | null;
-  baseApy?: number;
+  safetyEvidence?: LoopSafetyEvidence;
   client?: LoopSimulationClient;
 }): Promise<LoopSimulationResult> {
   let preflightChecks: Awaited<ReturnType<typeof runLoopPreflight>>;
@@ -35,7 +35,7 @@ export async function simulateLoopExecutorCall(input: {
     preflightChecks = await runLoopPreflight(input.config, input.owner, input.client, {
       action: input.action,
       params: input.params,
-      baseApy: input.baseApy,
+      safetyEvidence: input.safetyEvidence,
     });
   } catch (error) {
     return {
@@ -67,6 +67,17 @@ export async function simulateLoopExecutorCall(input: {
       key: "tx-sender",
       status: "fail",
       message: "transaction sender --from is required for live simulation",
+    });
+  } else {
+    const signer = input.safetyEvidence?.signer;
+    const signerMatches = signer?.address.toLowerCase() === input.from.toLowerCase();
+    preflightChecks.push({
+      key: "tx-signer",
+      status: signer?.verified === true && signerMatches ? "pass" : "fail",
+      message:
+        signer?.verified === true && signerMatches
+          ? "verified signer evidence matches transaction sender"
+          : "verified signer evidence matching --from is required for live simulation",
     });
   }
   if (input.client === undefined) {

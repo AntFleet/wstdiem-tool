@@ -23,82 +23,113 @@ const hexSchema = z
   .regex(/^0x[a-fA-F0-9]+$/)
   .transform((value) => value as `0x${string}`);
 
-const configSchema = z.object({
-  chainId: z.number().int().positive(),
-  rpc: z.object({
-    primaryUrl: z.string().url().nullable(),
-    fallbackUrls: z.array(z.string().url()),
-    timeoutMs: z.number().int().positive(),
-  }),
-  contracts: z.object({
-    diem: addressSchema,
-    weth: addressSchema,
-    vvv: addressSchema,
-    vvvStaking: addressSchema,
-    morphoBlue: addressSchema,
-    adaptiveCurveIrm: addressSchema,
-    curveFactory: addressSchema,
-    uniswapV4PoolManager: addressSchema,
-    inferenceVault: nullableAddressSchema,
-    feeRouter: nullableAddressSchema,
-    curvePool: nullableAddressSchema,
-    morphoOracle: nullableAddressSchema,
-    loopExecutor: nullableAddressSchema,
-    autoDeleverageExecutor: nullableAddressSchema,
-  }),
-  morpho: z.object({
-    marketId: z
-      .union([hexSchema, z.null()])
-      .optional()
-      .transform((value) => value ?? null),
-    lltvWad: z.string().regex(/^[0-9]+$/),
-  }),
-  wallet: z.object({
-    privateKeyEnv: z.string().min(1),
-    hardware: z.object({
-      enabled: z.boolean(),
-      derivationPath: z.string().min(1),
+const configSchema = z
+  .object({
+    chainId: z.number().int().positive(),
+    rpc: z.object({
+      primaryUrl: z.string().url().nullable(),
+      fallbackUrls: z.array(z.string().url()),
+      timeoutMs: z.number().int().positive(),
     }),
-  }),
-  position: z.object({
-    owner: nullableAddressSchema,
-  }),
-  thresholds: z.object({
-    healthFactorWarn: z.number().positive(),
-    healthFactorCritical: z.number().positive(),
-    minPostLoopHealthFactor: z.number().positive(),
-    spreadWarnNetApy35: z.number(),
-    spreadCriticalNetApy35: z.number(),
-    curveDepthWarn: z.number().positive(),
-    curveDepthCritical: z.number().positive(),
-    harvestSilenceWarnDays: z.number().positive(),
-    harvestSilenceCriticalDays: z.number().positive(),
-    oracleDeviationCritical: z.number().positive(),
-    borrowSpikeBaseApyRatio: z.number().positive(),
-    riskFreeRate: z.number().nonnegative(),
-  }),
-  alerts: z.object({
-    webhookUrls: z.array(z.string().url()),
-    telegram: z.object({
-      botTokenEnv: z.string().min(1),
-      chatId: z.string().nullable(),
+    contracts: z.object({
+      diem: addressSchema,
+      weth: addressSchema,
+      vvv: addressSchema,
+      vvvStaking: addressSchema,
+      morphoBlue: addressSchema,
+      adaptiveCurveIrm: addressSchema,
+      curveFactory: addressSchema,
+      uniswapV4PoolManager: addressSchema,
+      inferenceVault: nullableAddressSchema,
+      feeRouter: nullableAddressSchema,
+      curvePool: nullableAddressSchema,
+      morphoOracle: nullableAddressSchema,
+      loopExecutor: nullableAddressSchema,
+      autoDeleverageExecutor: nullableAddressSchema,
     }),
-  }),
-  automation: z.object({
-    provider: z.enum(["gelato", "chainlink"]),
-    gelatoTaskId: z.string().nullable(),
-    chainlinkUpkeepId: z.string().nullable(),
-  }),
-  storage: z.object({
-    sqlitePath: z.string().min(1),
-  }),
-  execution: z.object({
-    defaultSlippageBps: z.number().int().min(0),
-    maxSlippageBps: z.number().int().min(0),
-    maxCurvePriceImpactBps: z.number().int().min(0),
-    transactionDeadlineSeconds: z.number().int().positive(),
-  }),
-});
+    morpho: z.object({
+      marketId: z
+        .union([hexSchema, z.null()])
+        .optional()
+        .transform((value) => value ?? null),
+      lltvWad: z.string().regex(/^[0-9]+$/),
+    }),
+    wallet: z.object({
+      privateKeyEnv: z.string().min(1),
+      hardware: z.object({
+        enabled: z.boolean(),
+        derivationPath: z.string().min(1),
+      }),
+    }),
+    position: z.object({
+      owner: nullableAddressSchema,
+    }),
+    thresholds: z.object({
+      healthFactorWarn: z.number().min(1.6),
+      healthFactorCritical: z.number().min(1.4),
+      minPostLoopHealthFactor: z.number().min(1.7),
+      spreadWarnNetApy35: z.number().min(0.08),
+      spreadCriticalNetApy35: z.number().min(0.08),
+      curveDepthWarn: z.number().positive().max(0.2),
+      curveDepthCritical: z.number().positive().max(0.2),
+      harvestSilenceWarnDays: z.number().positive(),
+      harvestSilenceCriticalDays: z.number().positive(),
+      oracleDeviationCritical: z.number().positive().max(0.01),
+      borrowSpikeBaseApyRatio: z.number().positive(),
+      riskFreeRate: z.number().nonnegative(),
+    }),
+    alerts: z.object({
+      webhookUrls: z.array(z.string().url()),
+      telegram: z.object({
+        botTokenEnv: z.string().min(1),
+        chatId: z.string().nullable(),
+      }),
+    }),
+    automation: z.object({
+      provider: z.enum(["gelato", "chainlink"]),
+      gelatoTaskId: z.string().nullable(),
+      chainlinkUpkeepId: z.string().nullable(),
+    }),
+    storage: z.object({
+      sqlitePath: z.string().min(1),
+    }),
+    execution: z.object({
+      defaultSlippageBps: z.number().int().min(0).max(300),
+      maxSlippageBps: z.number().int().min(0).max(300),
+      maxCurvePriceImpactBps: z.number().int().min(0).max(100),
+      transactionDeadlineSeconds: z.number().int().positive(),
+    }),
+  })
+  .superRefine((config, ctx) => {
+    if (config.execution.defaultSlippageBps > config.execution.maxSlippageBps) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["execution", "defaultSlippageBps"],
+        message: "defaultSlippageBps must be less than or equal to maxSlippageBps",
+      });
+    }
+    if (config.thresholds.healthFactorCritical > config.thresholds.healthFactorWarn) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["thresholds", "healthFactorCritical"],
+        message: "healthFactorCritical must be less than or equal to healthFactorWarn",
+      });
+    }
+    if (config.thresholds.curveDepthWarn > config.thresholds.curveDepthCritical) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["thresholds", "curveDepthWarn"],
+        message: "curveDepthWarn must be less than or equal to curveDepthCritical",
+      });
+    }
+    if (config.thresholds.spreadCriticalNetApy35 > config.thresholds.spreadWarnNetApy35) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["thresholds", "spreadCriticalNetApy35"],
+        message: "spreadCriticalNetApy35 must be less than or equal to spreadWarnNetApy35",
+      });
+    }
+  });
 
 export interface LoadConfigOptions {
   configPath?: string;

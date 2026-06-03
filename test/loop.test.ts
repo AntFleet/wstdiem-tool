@@ -11,6 +11,7 @@ describe("loop safety behavior", () => {
       dryRun: true,
     });
     expect(projection.blocked).toBe(true);
+    expect(projection.safeToProceed).toBe(false);
     expect(projection.kind).toBe("projection");
     expect(projection.simulation.status).toBe("not_run");
     expect(projection.executorParamsAvailable).toBe(false);

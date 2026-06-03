@@ -1,13 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { simulateMorphoAuthorization } from "../src/loop/authorization.js";
-import { buildLoopRebalanceParams } from "../src/loop/params.js";
+import { buildConfiguredMarketParams, buildLoopRebalanceParams } from "../src/loop/params.js";
 import { runLoopPreflight, type LoopPreflightClient } from "../src/loop/preflight.js";
 import { simulateLoopExecutorCall, type LoopSimulationClient } from "../src/loop/simulator.js";
+import type { LoopSafetyEvidence } from "../src/loop/types.js";
 import { WAD } from "../src/metrics/math.js";
 import type { Address, AppConfig, Hex } from "../src/types/domain.js";
 
 const owner = "0x0000000000000000000000000000000000000009" as const;
+
+function safetyEvidence(baseApy = 0.2): LoopSafetyEvidence {
+  return {
+    signer: {
+      source: "test",
+      address: owner,
+      verified: true,
+    },
+    baseApy: {
+      source: "test",
+      chainId: 8453,
+      blockNumber: 1n,
+      windowSeconds: 604_800,
+      baseApy,
+      valid: true,
+    },
+  };
+}
 
 function completeConfig(): AppConfig {
   return {
@@ -43,6 +62,9 @@ class MockPreflightClient implements LoopPreflightClient {
       authorized?: boolean;
       marketParams?: readonly [Address, Address, Address, Address, bigint];
       positionCollateral?: bigint;
+      positionBorrowShares?: bigint;
+      marketTotalBorrowAssets?: bigint;
+      marketTotalBorrowShares?: bigint;
       curveDiemBalance?: bigint;
       curveWstDiemBalance?: bigint;
       navWad?: bigint;
@@ -75,10 +97,17 @@ class MockPreflightClient implements LoopPreflightClient {
       return this.options.authorized ?? true;
     }
     if (args.functionName === "position") {
-      return [0n, 0n, this.options.positionCollateral ?? 100n * WAD];
+      return [0n, this.options.positionBorrowShares ?? 0n, this.options.positionCollateral ?? 100n * WAD];
     }
     if (args.functionName === "market") {
-      return [1_000n * WAD, 1_000n * WAD, 100n * WAD, 100n * WAD, 0n, 0n];
+      return [
+        1_000n * WAD,
+        1_000n * WAD,
+        this.options.marketTotalBorrowAssets ?? 100n * WAD,
+        this.options.marketTotalBorrowShares ?? 100n * WAD,
+        0n,
+        0n,
+      ];
     }
     if (args.functionName === "borrowRateView") {
       return this.options.borrowRatePerSecond ?? 0n;
@@ -221,7 +250,7 @@ describe("loop preflight and simulation", () => {
       owner,
       from: owner,
       params,
-      baseApy: 0.2,
+      safetyEvidence: safetyEvidence(0.2),
       client: new MockSimulationClient({ borrowRatePerSecond: 0n }),
     });
     expect(result.status).toBe("blocked");
@@ -238,7 +267,7 @@ describe("loop preflight and simulation", () => {
       owner,
       from: owner,
       params,
-      baseApy: 0.02,
+      safetyEvidence: safetyEvidence(0.02),
       client: new MockSimulationClient({ borrowRatePerSecond: 0n }),
     });
     const netApy = result.preflightChecks.find((check) => check.key === "net-apy");
@@ -255,6 +284,7 @@ describe("loop preflight and simulation", () => {
       owner,
       from: owner,
       params,
+      safetyEvidence: safetyEvidence(),
       client: new MockSimulationClient({
         positionCollateral: 100n * WAD,
         curveDiemBalance: 200n * WAD,
@@ -264,6 +294,51 @@ describe("loop preflight and simulation", () => {
     const curveDepth = result.preflightChecks.find((check) => check.key === "curve-depth");
     expect(curveDepth?.status).toBe("fail");
     expect(curveDepth?.message).toContain("max is 20.00%");
+  });
+
+  it("fails Curve depth against projected target notional instead of current collateral", async () => {
+    const config = completeConfig();
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      safetyEvidence: safetyEvidence(),
+      client: new MockSimulationClient({
+        positionCollateral: 100n * WAD,
+        curveDiemBalance: 600n * WAD,
+        curveWstDiemBalance: 0n,
+      }),
+    });
+    const curveDepth = result.preflightChecks.find((check) => check.key === "curve-depth");
+    expect(curveDepth?.status).toBe("fail");
+    expect(curveDepth?.message).toContain("28.33%");
+  });
+
+  it("uses position equity for Curve depth when a rebalance reduces gross notional", async () => {
+    const config = completeConfig();
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      safetyEvidence: safetyEvidence(),
+      client: new MockSimulationClient({
+        positionCollateral: 500n * WAD,
+        positionBorrowShares: 300n * WAD,
+        marketTotalBorrowAssets: 300n * WAD,
+        marketTotalBorrowShares: 300n * WAD,
+        curveDiemBalance: 1_800n * WAD,
+        curveWstDiemBalance: 0n,
+      }),
+    });
+    const curveDepth = result.preflightChecks.find((check) => check.key === "curve-depth");
+    expect(curveDepth?.status).toBe("pass");
+    expect(curveDepth?.message).toContain("18.88%");
   });
 
   it("fails Curve depth when pool TVL is zero", async () => {
@@ -298,6 +373,59 @@ describe("loop preflight and simulation", () => {
     });
     expect(result.status).toBe("blocked");
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("tx-sender:fail");
+  });
+
+  it("blocks live simulation without verified signer evidence matching the transaction sender", async () => {
+    const config = completeConfig();
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      safetyEvidence: {
+        ...safetyEvidence(),
+        signer: {
+          source: "test",
+          address: "0x0000000000000000000000000000000000000010",
+          verified: true,
+        },
+      },
+      client: new MockSimulationClient(),
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("tx-signer:fail");
+  });
+
+  it("fails direct open simulation until collateral and debt bound evidence exists", async () => {
+    const config = completeConfig();
+    const marketParams = buildConfiguredMarketParams(config);
+    expect(marketParams).not.toBeNull();
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "open",
+      owner,
+      from: owner,
+      params:
+        marketParams === null
+          ? null
+          : {
+              owner,
+              marketParams,
+              initialDiem: 100n * WAD,
+              flashDiem: 70n * WAD,
+              minWstDiemReceived: 169n * WAD,
+              minBorrowedDiem: 70n * WAD,
+              maxCurvePriceImpactBps: 100n,
+              deadline: 301n,
+            },
+      safetyEvidence: safetyEvidence(),
+      client: new MockSimulationClient(),
+    });
+    const healthFactor = result.preflightChecks.find((check) => check.key === "projected-health-factor");
+    expect(healthFactor?.status).toBe("fail");
+    expect(healthFactor?.message).toContain("collateral and debt bound evidence");
   });
 
   it("returns structured failure when RPC-backed preflight reads fail", async () => {

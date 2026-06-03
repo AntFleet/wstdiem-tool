@@ -3,9 +3,17 @@ import { inferenceVaultAbi } from "../abi/inferenceVault.js";
 import { morphoIrmAbi } from "../abi/morphoIrm.js";
 import { morphoAbi } from "../abi/morpho.js";
 import { missingDeploymentKeys } from "../config/load.js";
-import { computeBorrowRate, computeNetApy, WAD } from "../metrics/math.js";
+import { computeBorrowedDiem, computeBorrowRate, computeNetApy, WAD } from "../metrics/math.js";
 import type { Address, AppConfig, Hex, MorphoMarket } from "../types/domain.js";
-import type { LoopAction, LoopExecutorParams, LoopOpenParams, LoopRebalanceParams, PreflightCheck } from "./types.js";
+import type {
+  BaseApyEvidence,
+  LoopAction,
+  LoopExecutorParams,
+  LoopOpenParams,
+  LoopRebalanceParams,
+  LoopSafetyEvidence,
+  PreflightCheck,
+} from "./types.js";
 
 interface ReadMorphoMarketParams {
   loanToken: Address;
@@ -16,6 +24,7 @@ interface ReadMorphoMarketParams {
 }
 
 interface ReadMorphoPosition {
+  borrowShares: bigint;
   collateral: bigint;
 }
 
@@ -33,7 +42,7 @@ export interface LoopPreflightClient {
 export interface LoopPreflightContext {
   action: LoopAction;
   params: LoopExecutorParams | null;
-  baseApy?: number;
+  safetyEvidence?: LoopSafetyEvidence;
 }
 
 function check(key: string, status: PreflightCheck["status"], message: string): PreflightCheck {
@@ -107,13 +116,15 @@ function parseMorphoMarketParams(value: unknown): ReadMorphoMarketParams | null 
 function parseMorphoPosition(value: unknown): ReadMorphoPosition | null {
   if (Array.isArray(value) && value.length >= 3) {
     return {
+      borrowShares: BigInt(value[1] as bigint | number | string),
       collateral: BigInt(value[2] as bigint | number | string),
     };
   }
   if (value && typeof value === "object") {
     const entry = value as Record<string, unknown>;
-    if (entry.collateral !== undefined) {
+    if (entry.borrowShares !== undefined && entry.collateral !== undefined) {
       return {
+        borrowShares: BigInt(entry.borrowShares as bigint | number | string),
         collateral: BigInt(entry.collateral as bigint | number | string),
       };
     }
@@ -232,14 +243,6 @@ function projectedHealthFactorWad(input: {
     }
     return (lltv * leverage) / (leverage - WAD);
   }
-  if (input.action === "open") {
-    const params = input.params as LoopOpenParams;
-    const collateralValueDiem = params.initialDiem + params.flashDiem;
-    if (params.minBorrowedDiem === 0n) {
-      return null;
-    }
-    return (collateralValueDiem * lltv) / params.minBorrowedDiem;
-  }
   return null;
 }
 
@@ -256,6 +259,13 @@ function checkProjectedHealthFactor(config: AppConfig, context?: LoopPreflightCo
       "projected-health-factor",
       "skip",
       "exit projected health factor requires live position unwind sizing before validation",
+    );
+  }
+  if (context.action === "open") {
+    return check(
+      "projected-health-factor",
+      "fail",
+      "open projected health factor requires verified collateral and debt bound evidence",
     );
   }
   const projected = projectedHealthFactorWad({
@@ -293,6 +303,28 @@ function targetLeverage(input: LoopPreflightContext): number | null {
   return null;
 }
 
+function validateBaseApyEvidence(config: AppConfig, evidence: BaseApyEvidence | undefined): string | null {
+  if (evidence === undefined) {
+    return "base APY evidence is required for target leverage net APY validation";
+  }
+  if (!evidence.valid) {
+    return "base APY evidence is marked invalid";
+  }
+  if (evidence.chainId !== config.chainId) {
+    return `base APY evidence chainId ${evidence.chainId} does not match config chainId ${config.chainId}`;
+  }
+  if (!Number.isInteger(evidence.windowSeconds) || evidence.windowSeconds <= 0) {
+    return "base APY evidence must include a positive integer windowSeconds";
+  }
+  if (evidence.blockNumber < 0n) {
+    return "base APY evidence blockNumber must be non-negative";
+  }
+  if (!Number.isFinite(evidence.baseApy) || evidence.baseApy < 0) {
+    return "base APY evidence must include a finite non-negative baseApy";
+  }
+  return null;
+}
+
 async function readMorphoMarket(config: AppConfig, client: LoopPreflightClient): Promise<MorphoMarket | null> {
   if (config.morpho.marketId === null) {
     return null;
@@ -315,8 +347,10 @@ async function checkNetApy(input: {
   if (input.context === undefined || input.context.params === null) {
     return check("net-apy", "fail", "exact LoopExecutor params are required for net APY validation");
   }
-  if (input.context.baseApy === undefined || !Number.isFinite(input.context.baseApy)) {
-    return check("net-apy", "fail", "base APY evidence is required for target leverage net APY validation");
+  const baseApyEvidence = input.context.safetyEvidence?.baseApy;
+  const evidenceError = validateBaseApyEvidence(input.config, baseApyEvidence);
+  if (evidenceError !== null || baseApyEvidence === undefined) {
+    return check("net-apy", "fail", evidenceError ?? "base APY evidence is required");
   }
   const leverage = targetLeverage(input.context);
   if (leverage === null) {
@@ -346,7 +380,7 @@ async function checkNetApy(input: {
     args: [marketParams, market],
   })) as bigint;
   const borrowRate = computeBorrowRate(borrowRatePerSecond);
-  const netApy = computeNetApy(leverage, input.context.baseApy, borrowRate);
+  const netApy = computeNetApy(leverage, baseApyEvidence.baseApy, borrowRate);
   const minimum = input.config.thresholds.spreadCriticalNetApy35;
   return check(
     "net-apy",
@@ -363,11 +397,14 @@ async function projectedPositionNotionalDiem(input: {
   client: LoopPreflightClient;
   context?: LoopPreflightContext;
 }): Promise<bigint | null> {
-  if (input.context?.action === "open" && input.context.params !== null) {
-    const params = input.context.params as LoopOpenParams;
-    return params.initialDiem + params.flashDiem;
+  if (input.context?.action !== "rebalance" || input.context.params === null) {
+    return null;
   }
   if (input.owner === null || input.config.morpho.marketId === null || input.config.contracts.inferenceVault === null) {
+    return null;
+  }
+  const market = await readMorphoMarket(input.config, input.client);
+  if (market === null) {
     return null;
   }
   const position = parseMorphoPosition(
@@ -381,12 +418,22 @@ async function projectedPositionNotionalDiem(input: {
   if (position === null) {
     return null;
   }
-  return (await input.client.readContract({
+  const collateralDiem = (await input.client.readContract({
     address: input.config.contracts.inferenceVault,
     abi: inferenceVaultAbi,
     functionName: "convertToAssets",
     args: [position.collateral],
   })) as bigint;
+  const borrowedDiem = computeBorrowedDiem(market, { borrowShares: position.borrowShares });
+  if (collateralDiem <= borrowedDiem) {
+    return null;
+  }
+  const equityDiem = collateralDiem - borrowedDiem;
+  const targetLeverageWad = (input.context.params as LoopRebalanceParams).targetLeverageWad;
+  if (targetLeverageWad <= WAD) {
+    return null;
+  }
+  return (equityDiem * targetLeverageWad) / WAD;
 }
 
 async function checkCurveDepth(input: {

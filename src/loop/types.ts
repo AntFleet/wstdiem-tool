@@ -47,6 +47,26 @@ export interface PreflightCheck {
   message: string;
 }
 
+export interface BaseApyEvidence {
+  source: "metrics-snapshot" | "test";
+  chainId: number;
+  blockNumber: bigint;
+  windowSeconds: number;
+  baseApy: number;
+  valid: boolean;
+}
+
+export interface SignerEvidence {
+  source: "configured-wallet" | "hardware-wallet" | "test";
+  address: Address;
+  verified: boolean;
+}
+
+export interface LoopSafetyEvidence {
+  baseApy?: BaseApyEvidence;
+  signer?: SignerEvidence;
+}
+
 export interface LoopSimulationRequest {
   action: LoopAction;
   owner: Address;

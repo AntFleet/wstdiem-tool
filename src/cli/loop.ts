@@ -31,6 +31,7 @@ export interface LoopProjection {
   slippageBps: number;
   maxCurvePriceImpactBps: number;
   blocked: boolean;
+  safeToProceed: boolean;
   blockers: string[];
   authorizationCalldata?: {
     to: Address;
@@ -203,6 +204,7 @@ export function projectLoopCommand(config: AppConfig, options: LoopCommandOption
       ? encodeLoopExecutorCall(options.action, executorParams)
       : undefined;
 
+  const blocked = blockers.length > 0;
   return {
     kind: "projection",
     action: options.action,
@@ -220,7 +222,8 @@ export function projectLoopCommand(config: AppConfig, options: LoopCommandOption
     projectedPositionNotionalDiemWei,
     slippageBps,
     maxCurvePriceImpactBps: config.execution.maxCurvePriceImpactBps,
-    blocked: blockers.length > 0,
+    blocked,
+    safeToProceed: !blocked,
     blockers,
     authorizationCalldata: buildAuthorizationCalldata(config, owner),
   };
