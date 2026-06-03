@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
-import { buildLoopOpenParams } from "../src/loop/params.js";
+import { simulateMorphoAuthorization } from "../src/loop/authorization.js";
+import { buildLoopRebalanceParams } from "../src/loop/params.js";
 import { runLoopPreflight, type LoopPreflightClient } from "../src/loop/preflight.js";
 import { simulateLoopExecutorCall, type LoopSimulationClient } from "../src/loop/simulator.js";
 import type { Address, AppConfig, Hex } from "../src/types/domain.js";
@@ -108,38 +109,117 @@ describe("loop preflight and simulation", () => {
 
   it("blocks simulation when no client is provided", async () => {
     const config = completeConfig();
-    const params = buildLoopOpenParams({ config, owner, targetLeverage: 2, initialDiem: "10", nowSeconds: 1 });
-    const result = await simulateLoopExecutorCall({ config, action: "open", owner, params });
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 2, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({ config, action: "rebalance", owner, from: owner, params });
     expect(result.status).toBe("blocked");
     expect(result.error?.code).toBe("SIMULATION_CLIENT_MISSING");
   });
 
-  it("returns passed simulation and gas estimate when preflight and client pass", async () => {
+  it("blocks live simulation until SPEC001 strategy risk gates are implemented", async () => {
     const config = completeConfig();
-    const params = buildLoopOpenParams({ config, owner, targetLeverage: 2, initialDiem: "10", nowSeconds: 1 });
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 2, slippageBps: 25, nowSeconds: 1 });
     const result = await simulateLoopExecutorCall({
       config,
-      action: "open",
+      action: "rebalance",
       owner,
+      from: owner,
       params,
       client: new MockSimulationClient({ gas: 999n }),
     });
-    expect(result.status).toBe("passed");
-    expect(result.gasEstimate).toBe("999");
-    expect(result.calldata?.startsWith("0x")).toBe(true);
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("PREFLIGHT_FAILED");
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain(
+      "projected-health-factor:fail",
+    );
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("route-slippage:fail");
   });
 
-  it("returns failed simulation when simulateContract reverts", async () => {
+  it("blocks live simulation without a transaction sender", async () => {
     const config = completeConfig();
-    const params = buildLoopOpenParams({ config, owner, targetLeverage: 2, initialDiem: "10", nowSeconds: 1 });
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 2, slippageBps: 25, nowSeconds: 1 });
     const result = await simulateLoopExecutorCall({
       config,
-      action: "open",
+      action: "rebalance",
       owner,
+      from: null,
       params,
-      client: new MockSimulationClient({ simulateError: new Error("execution reverted") }),
+      client: new MockSimulationClient(),
     });
-    expect(result.status).toBe("failed");
-    expect(result.error?.code).toBe("SIMULATION_FAILED");
+    expect(result.status).toBe("blocked");
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("tx-sender:fail");
+  });
+
+  it("returns structured failure when RPC-backed preflight reads fail", async () => {
+    const config = completeConfig();
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 2, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      client: new MockSimulationClient({ chainId: 8453, simulateError: new Error("unused") }),
+    });
+    expect(result.status).toBe("blocked");
+
+    const readFailure = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      client: {
+        async getChainId() {
+          throw new Error("rpc timeout");
+        },
+        async getCode() {
+          return "0x01" as Hex;
+        },
+        async readContract() {
+          return true;
+        },
+        async simulateContract() {
+          return {};
+        },
+        async estimateContractGas() {
+          return 1n;
+        },
+      },
+    });
+    expect(readFailure.status).toBe("failed");
+    expect(readFailure.error?.code).toBe("PREFLIGHT_READ_FAILED");
+  });
+
+  it("blocks live authorization when no simulation client is provided", async () => {
+    const config = completeConfig();
+    const result = await simulateMorphoAuthorization({ config, owner });
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("SIMULATION_CLIENT_MISSING");
+    expect(result.authorizationCalldata?.data.startsWith("0x")).toBe(true);
+  });
+
+  it("reads existing authorization before simulating setAuthorization", async () => {
+    const config = completeConfig();
+    const result = await simulateMorphoAuthorization({
+      config,
+      owner,
+      client: new MockSimulationClient({ authorized: true }),
+    });
+    expect(result.status).toBe("passed");
+    expect(result.alreadyAuthorized).toBe(true);
+    expect(result.gasEstimate).toBeUndefined();
+  });
+
+  it("simulates authorization calldata and gas when not already authorized", async () => {
+    const config = completeConfig();
+    const result = await simulateMorphoAuthorization({
+      config,
+      owner,
+      client: new MockSimulationClient({ authorized: false, gas: 888n }),
+    });
+    expect(result.status).toBe("passed");
+    expect(result.alreadyAuthorized).toBe(false);
+    expect(result.gasEstimate).toBe("888");
+    expect(result.authorizationCalldata?.to).toBe(config.contracts.morphoBlue);
   });
 });

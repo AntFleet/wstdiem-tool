@@ -14,7 +14,7 @@ import type { Address, AppConfig, Hex } from "../types/domain.js";
 import { CliError } from "./errors.js";
 
 export interface LoopProjection {
-  kind: "projection";
+  kind: "projection" | "live_passed" | "live_blocked" | "live_failed";
   action: "open" | "rebalance" | "exit";
   dryRun: boolean;
   simulation: {
@@ -47,11 +47,14 @@ export interface LoopCommandOptions {
   slippageBps?: number;
   dryRun?: boolean;
   owner?: Address;
+  from?: Address;
   force?: boolean;
+  nowSeconds?: number;
 }
 
 export interface BuiltLoopExecutorParams {
   owner: Address | null;
+  from: Address | null;
   params: LoopExecutorParams | null;
 }
 
@@ -104,43 +107,51 @@ export function buildLoopExecutorParamsForCommand(
 ): BuiltLoopExecutorParams {
   const slippageBps = options.slippageBps ?? config.execution.defaultSlippageBps;
   const owner = options.owner ?? config.position.owner;
+  const from = options.from ?? owner;
   if (owner === null) {
-    return { owner, params: null };
+    return { owner, from: null, params: null };
   }
   if (options.action === "open" && options.targetLeverage !== undefined && options.initialDiem !== undefined) {
     return {
       owner,
+      from,
       params: buildLoopOpenParams({
         config,
         owner,
         targetLeverage: options.targetLeverage,
         initialDiem: options.initialDiem,
+        slippageBps,
+        nowSeconds: options.nowSeconds,
       }),
     };
   }
   if (options.action === "rebalance" && options.targetLeverage !== undefined) {
     return {
       owner,
+      from,
       params: buildLoopRebalanceParams({
         config,
         owner,
         targetLeverage: options.targetLeverage,
         slippageBps,
+        nowSeconds: options.nowSeconds,
       }),
     };
   }
   if (options.action === "exit") {
     return {
       owner,
+      from,
       params: buildLoopExitParams({
         config,
         owner,
         slippageBps,
         force: options.force,
+        nowSeconds: options.nowSeconds,
       }),
     };
   }
-  return { owner, params: null };
+  return { owner, from, params: null };
 }
 
 export function projectLoopCommand(config: AppConfig, options: LoopCommandOptions): LoopProjection {

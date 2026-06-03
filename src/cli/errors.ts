@@ -3,6 +3,7 @@ export class CliError extends Error {
     readonly code: string,
     message: string,
     readonly causeText?: string,
+    readonly data?: unknown,
   ) {
     super(message);
   }

@@ -128,5 +128,17 @@ export async function runLoopPreflight(
     );
   }
 
+  const unavailableStrategyGates = [
+    ["morpho-market-params", "Morpho market idToMarketParams/LLTV validation is not implemented"],
+    ["projected-health-factor", "projected post-loop health factor check is not implemented"],
+    ["curve-depth", "Curve depth and position-size check is not implemented"],
+    ["net-apy", "target leverage net APY check is not implemented"],
+    ["oracle-deviation", "Morpho oracle deviation check is not implemented"],
+    ["route-slippage", "route quote and slippage protection check is not implemented"],
+  ] as const;
+  for (const [key, message] of unavailableStrategyGates) {
+    checks.push(check(key, "fail", message));
+  }
+
   return checks;
 }

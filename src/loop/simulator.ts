@@ -8,15 +8,15 @@ export interface LoopSimulationClient extends LoopPreflightClient {
   simulateContract(args: {
     address: Address;
     abi: unknown;
-    functionName: LoopAction;
-    args: readonly [LoopExecutorParams];
+    functionName: string;
+    args?: readonly unknown[];
     account: Address;
   }): Promise<unknown>;
   estimateContractGas(args: {
     address: Address;
     abi: unknown;
-    functionName: LoopAction;
-    args: readonly [LoopExecutorParams];
+    functionName: string;
+    args?: readonly unknown[];
     account: Address;
   }): Promise<bigint>;
 }
@@ -25,10 +25,24 @@ export async function simulateLoopExecutorCall(input: {
   config: AppConfig;
   action: LoopAction;
   owner: Address | null;
+  from: Address | null;
   params: LoopExecutorParams | null;
   client?: LoopSimulationClient;
 }): Promise<LoopSimulationResult> {
-  const preflightChecks = await runLoopPreflight(input.config, input.owner, input.client);
+  let preflightChecks: Awaited<ReturnType<typeof runLoopPreflight>>;
+  try {
+    preflightChecks = await runLoopPreflight(input.config, input.owner, input.client);
+  } catch (error) {
+    return {
+      status: "failed",
+      action: input.action,
+      preflightChecks: [],
+      error: {
+        code: "PREFLIGHT_READ_FAILED",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
   if (input.params === null) {
     preflightChecks.push({
       key: "executor-params",
@@ -41,6 +55,13 @@ export async function simulateLoopExecutorCall(input: {
       key: "loop-executor",
       status: "fail",
       message: "loopExecutor address is required",
+    });
+  }
+  if (input.from === null) {
+    preflightChecks.push({
+      key: "tx-sender",
+      status: "fail",
+      message: "transaction sender --from is required for live simulation",
     });
   }
   if (input.client === undefined) {
@@ -56,6 +77,7 @@ export async function simulateLoopExecutorCall(input: {
   }
   if (
     input.owner === null ||
+    input.from === null ||
     input.params === null ||
     input.config.contracts.loopExecutor === null ||
     hasPreflightFailures(preflightChecks)
@@ -78,14 +100,14 @@ export async function simulateLoopExecutorCall(input: {
       abi: loopExecutorAbi,
       functionName: input.action,
       args: [input.params],
-      account: input.owner,
+      account: input.from,
     });
     const gas = await input.client.estimateContractGas({
       address: input.config.contracts.loopExecutor,
       abi: loopExecutorAbi,
       functionName: input.action,
       args: [input.params],
-      account: input.owner,
+      account: input.from,
     });
     return {
       status: "passed",

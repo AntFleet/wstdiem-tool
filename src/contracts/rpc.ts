@@ -9,6 +9,10 @@ export interface RpcBlockStatus {
   rpcName: string;
 }
 
+export interface RpcEndpointSelection extends RpcBlockStatus {
+  url: string;
+}
+
 function configuredRpcUrls(config: AppConfig): Array<{ name: string; url: string }> {
   const urls: Array<{ name: string; url: string }> = [];
   if (config.rpc.primaryUrl !== null) {
@@ -27,13 +31,13 @@ function clientFor(url: string, timeoutMs: number) {
   });
 }
 
-export async function readBestRpcBlockStatus(config: AppConfig, maxAttempts = 5): Promise<RpcBlockStatus> {
+export async function selectBestRpcEndpoint(config: AppConfig, maxAttempts = 5): Promise<RpcEndpointSelection> {
   const urls = configuredRpcUrls(config);
   if (urls.length === 0) {
     throw new Error("No RPC URLs configured");
   }
 
-  const successful: RpcBlockStatus[] = [];
+  const successful: RpcEndpointSelection[] = [];
   const failures: string[] = [];
   for (const entry of urls) {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -48,6 +52,7 @@ export async function readBestRpcBlockStatus(config: AppConfig, maxAttempts = 5)
           blockNumber: block.number ?? 0n,
           blockTimestamp: timestamp,
           rpcName: entry.name,
+          url: entry.url,
         });
         break;
       } catch (error) {
@@ -67,4 +72,14 @@ export async function readBestRpcBlockStatus(config: AppConfig, maxAttempts = 5)
     throw new Error(`All RPC reads failed: ${failures.join("; ")}`);
   }
   return best;
+}
+
+export async function readBestRpcBlockStatus(config: AppConfig, maxAttempts = 5): Promise<RpcBlockStatus> {
+  const selection = await selectBestRpcEndpoint(config, maxAttempts);
+  return {
+    chainId: selection.chainId,
+    blockNumber: selection.blockNumber,
+    blockTimestamp: selection.blockTimestamp,
+    rpcName: selection.rpcName,
+  };
 }

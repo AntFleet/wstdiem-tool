@@ -6,6 +6,7 @@ import { evaluateAlerts } from "../alerts/evaluate.js";
 import { makeEmptySnapshot } from "../metrics/math.js";
 import { Storage } from "../storage/sqlite.js";
 import { createViemLoopSimulationClient } from "../contracts/loopSimulationClient.js";
+import { simulateMorphoAuthorization } from "../loop/authorization.js";
 import { simulateLoopExecutorCall } from "../loop/simulator.js";
 import type { AppConfig, Severity } from "../types/domain.js";
 import { CliError, toCliError } from "./errors.js";
@@ -22,6 +23,10 @@ interface GlobalOptions {
 function configFor(command: Command): AppConfig {
   const opts = command.optsWithGlobals<GlobalOptions>();
   return loadConfig({ configPath: opts.config });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function runAction<T>(
@@ -49,6 +54,7 @@ async function runAction<T>(
         ok: false,
         command: commandName,
         chainId,
+        data: cliError.data,
         error: {
           code: cliError.code,
           message: cliError.message,
@@ -122,7 +128,8 @@ function addLoopAction(name: "open" | "rebalance" | "exit"): Command {
   cmd
     .option("--slippage-bps <bps>", "slippage tolerance in bps")
     .option("--dry-run", "simulate only", false)
-    .option("--owner <address>", "owner override");
+    .option("--owner <address>", "owner override")
+    .option("--from <address>", "transaction sender/operator override");
   if (name === "exit") {
     cmd.option("--force", "skip slippage guard only; simulation still mandatory", false);
   }
@@ -134,8 +141,10 @@ function addLoopAction(name: "open" | "rebalance" | "exit"): Command {
         slippageBps?: string;
         dryRun?: boolean;
         owner?: string;
+        from?: string;
         force?: boolean;
       }>();
+      const nowSeconds = Math.floor(Date.now() / 1000);
       const projection = projectLoopCommand(config, {
         action: name,
         targetLeverage:
@@ -147,7 +156,9 @@ function addLoopAction(name: "open" | "rebalance" | "exit"): Command {
           opts.slippageBps === undefined ? undefined : parseStrictInteger(opts.slippageBps, "--slippage-bps"),
         dryRun: opts.dryRun,
         owner: opts.owner === undefined ? undefined : parseAddress(opts.owner, "--owner"),
+        from: opts.from === undefined ? undefined : parseAddress(opts.from, "--from"),
         force: opts.force,
+        nowSeconds,
       });
       if (!opts.dryRun) {
         assertBroadcastNotAllowed(projection);
@@ -169,6 +180,7 @@ loop
   .option("--initial-diem <amount>", "initial DIEM amount")
   .option("--slippage-bps <bps>", "slippage bps")
   .option("--owner <address>", "owner override")
+  .option("--from <address>", "transaction sender/operator override")
   .option("--live", "run RPC-backed preflight and executor simulation when config allows", false)
   .action(async function (this: Command) {
     await runAction(this, "loop simulate", async (config) => {
@@ -178,11 +190,13 @@ loop
         initialDiem?: string;
         slippageBps?: string;
         owner?: string;
+        from?: string;
         live?: boolean;
       }>();
       if (!["open", "rebalance", "exit"].includes(opts.action)) {
         throw new CliError("INVALID_INPUT", "--action must be open, rebalance, or exit");
       }
+      const nowSeconds = Math.floor(Date.now() / 1000);
       const commandOptions = {
         action: opts.action,
         targetLeverage:
@@ -193,25 +207,61 @@ loop
         slippageBps:
           opts.slippageBps === undefined ? undefined : parseStrictInteger(opts.slippageBps, "--slippage-bps"),
         owner: opts.owner === undefined ? undefined : parseAddress(opts.owner, "--owner"),
+        from: opts.from === undefined ? undefined : parseAddress(opts.from, "--from"),
         dryRun: true,
+        nowSeconds,
       };
       const projection = projectLoopCommand(config, commandOptions);
       if (!opts.live) {
         return projection;
       }
-      const { owner, params } = buildLoopExecutorParamsForCommand(config, commandOptions);
-      const client = createViemLoopSimulationClient(config);
+      const { owner, from, params } = buildLoopExecutorParamsForCommand(config, commandOptions);
+      let client: Awaited<ReturnType<typeof createViemLoopSimulationClient>>;
+      try {
+        client = await createViemLoopSimulationClient(config);
+      } catch (error) {
+        const data = {
+          ...projection,
+          kind: "live_blocked" as const,
+          liveSimulation: {
+            status: "blocked" as const,
+            action: opts.action,
+            preflightChecks: projection.preflightChecks,
+            error: {
+              code: "RPC_CLIENT_UNAVAILABLE",
+              message: errorMessage(error),
+            },
+          },
+        };
+        throw new CliError("LIVE_SIMULATION_BLOCKED", errorMessage(error), undefined, data);
+      }
       const liveSimulation = await simulateLoopExecutorCall({
         config,
         action: opts.action,
         owner,
+        from,
         params,
         client: client ?? undefined,
       });
-      return {
+      const data = {
         ...projection,
+        kind:
+          liveSimulation.status === "passed"
+            ? ("live_passed" as const)
+            : liveSimulation.status === "failed"
+              ? ("live_failed" as const)
+              : ("live_blocked" as const),
         liveSimulation,
       };
+      if (liveSimulation.status !== "passed") {
+        throw new CliError(
+          liveSimulation.status === "failed" ? "LIVE_SIMULATION_FAILED" : "LIVE_SIMULATION_BLOCKED",
+          liveSimulation.error?.message ?? "Live simulation did not pass",
+          undefined,
+          data,
+        );
+      }
+      return data;
     });
   });
 
@@ -219,16 +269,19 @@ loop
   .command("authorize-executor")
   .description("Build Morpho executor authorization")
   .option("--owner <address>", "owner override")
+  .option("--live", "read current authorization and simulate setAuthorization with gas estimate", false)
   .option("--dry-run", "simulate only", false)
   .action(async function (this: Command) {
-    await runAction(this, "loop authorize-executor", (config) => {
-      const ownerOption = this.opts<{ owner?: string }>().owner;
+    await runAction(this, "loop authorize-executor", async (config) => {
+      const opts = this.opts<{ owner?: string; live?: boolean }>();
+      const ownerOption = opts.owner;
       const owner = ownerOption === undefined ? config.position.owner : parseAddress(ownerOption, "--owner");
       const projection = projectLoopCommand(config, {
         action: "rebalance",
         targetLeverage: 1.7,
         dryRun: true,
         owner: owner ?? undefined,
+        nowSeconds: Math.floor(Date.now() / 1000),
       });
       if (projection.authorizationCalldata === undefined) {
         throw new CliError(
@@ -236,11 +289,59 @@ loop
           "loopExecutor and owner are required to build Morpho setAuthorization calldata",
         );
       }
-      return {
-        alreadyAuthorized: null,
+      if (!opts.live) {
+        return {
+          alreadyAuthorized: null,
+          dryRun: true,
+          note: "RPC authorization read/simulation is required before broadcast.",
+          authorizationCalldata: projection.authorizationCalldata,
+        };
+      }
+
+      let client: Awaited<ReturnType<typeof createViemLoopSimulationClient>>;
+      try {
+        client = await createViemLoopSimulationClient(config);
+      } catch (error) {
+        const data = {
+          dryRun: true,
+          broadcastAvailable: false,
+          authorization: {
+            status: "blocked" as const,
+            owner,
+            loopExecutor: config.contracts.loopExecutor,
+            alreadyAuthorized: null,
+            authorizationCalldata: projection.authorizationCalldata,
+            error: {
+              code: "RPC_CLIENT_UNAVAILABLE",
+              message: errorMessage(error),
+            },
+          },
+        };
+        throw new CliError("AUTHORIZATION_LIVE_BLOCKED", errorMessage(error), undefined, data);
+      }
+      const authorization = await simulateMorphoAuthorization({
+        config,
+        owner,
+        client: client ?? undefined,
+      });
+      const data = {
         dryRun: true,
-        note: "RPC authorization read/simulation is required before broadcast.",
-        authorizationCalldata: projection.authorizationCalldata,
+        broadcastAvailable: false,
+        authorization,
+      };
+      if (authorization.status !== "passed") {
+        throw new CliError(
+          authorization.status === "failed" ? "AUTHORIZATION_LIVE_FAILED" : "AUTHORIZATION_LIVE_BLOCKED",
+          authorization.error?.message ?? "Authorization simulation did not pass",
+          undefined,
+          data,
+        );
+      }
+      return {
+        alreadyAuthorized: authorization.alreadyAuthorized,
+        dryRun: true,
+        broadcastAvailable: false,
+        authorization,
       };
     });
   });

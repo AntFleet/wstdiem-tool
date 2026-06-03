@@ -2,19 +2,16 @@ import { createPublicClient, http } from "viem";
 import { base } from "viem/chains";
 import type { Address, AppConfig, Hex } from "../types/domain.js";
 import type { LoopSimulationClient } from "../loop/simulator.js";
+import { selectBestRpcEndpoint } from "./rpc.js";
 
-function firstRpcUrl(config: AppConfig): string | null {
-  return config.rpc.primaryUrl ?? config.rpc.fallbackUrls[0] ?? null;
-}
-
-export function createViemLoopSimulationClient(config: AppConfig): LoopSimulationClient | null {
-  const url = firstRpcUrl(config);
-  if (url === null) {
+export async function createViemLoopSimulationClient(config: AppConfig): Promise<LoopSimulationClient | null> {
+  if (config.rpc.primaryUrl === null && config.rpc.fallbackUrls.length === 0) {
     return null;
   }
+  const selection = await selectBestRpcEndpoint(config);
   const client = createPublicClient({
     chain: base,
-    transport: http(url, { timeout: config.rpc.timeoutMs }),
+    transport: http(selection.url, { timeout: config.rpc.timeoutMs }),
   });
   return {
     async getChainId(): Promise<number> {

@@ -5,21 +5,26 @@ import { describe, expect, it } from "vitest";
 const execFileAsync = promisify(execFile);
 
 describe("compiled CLI live simulation mode", () => {
-  it("returns a blocked liveSimulation when no RPC URL is configured", async () => {
+  it("returns ok:false with blocked liveSimulation details when no RPC URL is configured", async () => {
     await execFileAsync("npm", ["run", "build"]);
-    const { stdout } = await execFileAsync("node", [
-      "dist/cli/index.js",
-      "--json",
-      "loop",
-      "simulate",
-      "--action",
-      "open",
-      "--target-leverage",
-      "3",
-      "--initial-diem",
-      "100",
-      "--live",
-    ]);
+    let stdout = "";
+    try {
+      await execFileAsync("node", [
+        "dist/cli/index.js",
+        "--json",
+        "loop",
+        "simulate",
+        "--action",
+        "open",
+        "--target-leverage",
+        "3",
+        "--initial-diem",
+        "100",
+        "--live",
+      ]);
+    } catch (error) {
+      stdout = (error as { stdout: string }).stdout;
+    }
     const parsed = JSON.parse(stdout) as {
       ok: boolean;
       data: {
@@ -28,9 +33,11 @@ describe("compiled CLI live simulation mode", () => {
           error: { code: string };
         };
       };
+      error: { code: string };
     };
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.code).toBe("LIVE_SIMULATION_BLOCKED");
     expect(parsed.data.liveSimulation.status).toBe("blocked");
     expect(parsed.data.liveSimulation.error.code).toBe("SIMULATION_CLIENT_MISSING");
-  });
+  }, 15_000);
 });

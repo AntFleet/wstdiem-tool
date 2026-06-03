@@ -1,7 +1,7 @@
 import { encodeFunctionData } from "viem";
 import { loopExecutorAbi } from "../abi/loopExecutor.js";
 import type { AppConfig, Address, Hex } from "../types/domain.js";
-import { parseDecimalToUnits, WAD } from "../metrics/math.js";
+import { WAD } from "../metrics/math.js";
 import type {
   LoopAction,
   LoopExecutorParams,
@@ -33,28 +33,17 @@ export function buildLoopOpenParams(input: {
   owner: Address;
   targetLeverage: number;
   initialDiem: string;
+  slippageBps: number;
   nowSeconds?: number;
 }): LoopOpenParams | null {
   const marketParams = buildConfiguredMarketParams(input.config);
   if (marketParams === null) {
     return null;
   }
-  const initialDiem = parseDecimalToUnits(input.initialDiem);
-  const leverageUnits = BigInt(Math.round(input.targetLeverage * 10_000));
-  const flashDiem = (initialDiem * (leverageUnits - 10_000n)) / 10_000n;
-  const deadline =
-    BigInt(input.nowSeconds ?? Math.floor(Date.now() / 1000)) +
-    BigInt(input.config.execution.transactionDeadlineSeconds);
-  return {
-    owner: input.owner,
-    marketParams,
-    initialDiem,
-    flashDiem,
-    minWstDiemReceived: 0n,
-    minBorrowedDiem: flashDiem,
-    maxCurvePriceImpactBps: BigInt(input.config.execution.maxCurvePriceImpactBps),
-    deadline,
-  };
+  // SPEC001 requires protected min-out/min-borrow bounds derived from live route quotes.
+  // Until those quote inputs exist, do not emit open calldata with zero protection.
+  void input.slippageBps;
+  return null;
 }
 
 export function buildLoopRebalanceParams(input: {
@@ -91,18 +80,13 @@ export function buildLoopExitParams(input: {
   if (marketParams === null) {
     return null;
   }
-  const deadline =
-    BigInt(input.nowSeconds ?? Math.floor(Date.now() / 1000)) +
-    BigInt(input.config.execution.transactionDeadlineSeconds);
-  return {
-    owner: input.owner,
-    marketParams,
-    repayAmountDiem: 0n,
-    maxWstDiemToSell: 0n,
-    minDiemOut: 0n,
-    force: input.force ?? false,
-    deadline,
-  };
+  // SPEC001 requires repay/sell/min-out bounds from live position and Curve quote state.
+  // Until those inputs exist, do not emit no-op or unprotected exit calldata.
+  void input.owner;
+  void input.slippageBps;
+  void input.force;
+  void input.nowSeconds;
+  return null;
 }
 
 export function encodeLoopExecutorCall(action: LoopAction, params: LoopExecutorParams): Hex {

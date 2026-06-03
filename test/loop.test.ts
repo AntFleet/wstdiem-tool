@@ -71,7 +71,7 @@ describe("loop safety behavior", () => {
     expect(projection.authorizationCalldata?.data.startsWith("0x")).toBe(true);
   });
 
-  it("builds typed executor params for configured open commands", () => {
+  it("does not build unprotected open or exit calldata without live quote bounds", () => {
     const config = {
       ...DEFAULT_CONFIG,
       contracts: {
@@ -89,10 +89,38 @@ describe("loop safety behavior", () => {
       initialDiem: "100",
     });
     expect(built.owner).toBe(config.position.owner);
+    expect(built.params).toBeNull();
+
+    const exit = buildLoopExecutorParamsForCommand(config, {
+      action: "exit",
+    });
+    expect(exit.params).toBeNull();
+  });
+
+  it("builds typed executor params for configured rebalance commands", () => {
+    const config = {
+      ...DEFAULT_CONFIG,
+      contracts: {
+        ...DEFAULT_CONFIG.contracts,
+        inferenceVault: "0x0000000000000000000000000000000000000001" as const,
+        morphoOracle: "0x0000000000000000000000000000000000000004" as const,
+      },
+      position: {
+        owner: "0x0000000000000000000000000000000000000006" as const,
+      },
+    };
+    const built = buildLoopExecutorParamsForCommand(config, {
+      action: "rebalance",
+      targetLeverage: 2,
+      slippageBps: 25,
+      nowSeconds: 100,
+    });
+    expect(built.owner).toBe(config.position.owner);
     expect(built.params).toMatchObject({
       owner: config.position.owner,
-      initialDiem: 100_000_000_000_000_000_000n,
-      flashDiem: 200_000_000_000_000_000_000n,
+      targetLeverageWad: 2_000_000_000_000_000_000n,
+      maxSlippageBps: 25n,
+      deadline: 400n,
     });
   });
 
