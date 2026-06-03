@@ -27,6 +27,7 @@ export async function simulateLoopExecutorCall(input: {
   owner: Address | null;
   from: Address | null;
   params: LoopExecutorParams | null;
+  baseApy?: number;
   client?: LoopSimulationClient;
 }): Promise<LoopSimulationResult> {
   let preflightChecks: Awaited<ReturnType<typeof runLoopPreflight>>;
@@ -34,6 +35,7 @@ export async function simulateLoopExecutorCall(input: {
     preflightChecks = await runLoopPreflight(input.config, input.owner, input.client, {
       action: input.action,
       params: input.params,
+      baseApy: input.baseApy,
     });
   } catch (error) {
     return {

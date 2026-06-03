@@ -1,9 +1,10 @@
 import { curvePoolAbi } from "../abi/curvePool.js";
 import { inferenceVaultAbi } from "../abi/inferenceVault.js";
+import { morphoIrmAbi } from "../abi/morphoIrm.js";
 import { morphoAbi } from "../abi/morpho.js";
 import { missingDeploymentKeys } from "../config/load.js";
-import { WAD } from "../metrics/math.js";
-import type { Address, AppConfig, Hex } from "../types/domain.js";
+import { computeBorrowRate, computeNetApy, WAD } from "../metrics/math.js";
+import type { Address, AppConfig, Hex, MorphoMarket } from "../types/domain.js";
 import type { LoopAction, LoopExecutorParams, LoopOpenParams, LoopRebalanceParams, PreflightCheck } from "./types.js";
 
 interface ReadMorphoMarketParams {
@@ -32,6 +33,7 @@ export interface LoopPreflightClient {
 export interface LoopPreflightContext {
   action: LoopAction;
   params: LoopExecutorParams | null;
+  baseApy?: number;
 }
 
 function check(key: string, status: PreflightCheck["status"], message: string): PreflightCheck {
@@ -113,6 +115,40 @@ function parseMorphoPosition(value: unknown): ReadMorphoPosition | null {
     if (entry.collateral !== undefined) {
       return {
         collateral: BigInt(entry.collateral as bigint | number | string),
+      };
+    }
+  }
+  return null;
+}
+
+function parseMorphoMarket(value: unknown): MorphoMarket | null {
+  if (Array.isArray(value) && value.length >= 6) {
+    return {
+      totalSupplyAssets: BigInt(value[0] as bigint | number | string),
+      totalSupplyShares: BigInt(value[1] as bigint | number | string),
+      totalBorrowAssets: BigInt(value[2] as bigint | number | string),
+      totalBorrowShares: BigInt(value[3] as bigint | number | string),
+      lastUpdate: BigInt(value[4] as bigint | number | string),
+      fee: BigInt(value[5] as bigint | number | string),
+    };
+  }
+  if (value && typeof value === "object") {
+    const entry = value as Record<string, unknown>;
+    if (
+      entry.totalSupplyAssets !== undefined &&
+      entry.totalSupplyShares !== undefined &&
+      entry.totalBorrowAssets !== undefined &&
+      entry.totalBorrowShares !== undefined &&
+      entry.lastUpdate !== undefined &&
+      entry.fee !== undefined
+    ) {
+      return {
+        totalSupplyAssets: BigInt(entry.totalSupplyAssets as bigint | number | string),
+        totalSupplyShares: BigInt(entry.totalSupplyShares as bigint | number | string),
+        totalBorrowAssets: BigInt(entry.totalBorrowAssets as bigint | number | string),
+        totalBorrowShares: BigInt(entry.totalBorrowShares as bigint | number | string),
+        lastUpdate: BigInt(entry.lastUpdate as bigint | number | string),
+        fee: BigInt(entry.fee as bigint | number | string),
       };
     }
   }
@@ -237,6 +273,87 @@ function checkProjectedHealthFactor(config: AppConfig, context?: LoopPreflightCo
     projected >= minimum
       ? `projected post-loop HF ${formatWadDecimal(projected)} >= ${config.thresholds.minPostLoopHealthFactor}`
       : `projected post-loop HF ${formatWadDecimal(projected)} below required ${config.thresholds.minPostLoopHealthFactor}`,
+  );
+}
+
+function targetLeverage(input: LoopPreflightContext): number | null {
+  if (input.params === null) {
+    return null;
+  }
+  if (input.action === "rebalance") {
+    return Number((input.params as LoopRebalanceParams).targetLeverageWad) / Number(WAD);
+  }
+  if (input.action === "open") {
+    const params = input.params as LoopOpenParams;
+    if (params.initialDiem === 0n) {
+      return null;
+    }
+    return Number(params.initialDiem + params.flashDiem) / Number(params.initialDiem);
+  }
+  return null;
+}
+
+async function readMorphoMarket(config: AppConfig, client: LoopPreflightClient): Promise<MorphoMarket | null> {
+  if (config.morpho.marketId === null) {
+    return null;
+  }
+  return parseMorphoMarket(
+    await client.readContract({
+      address: config.contracts.morphoBlue,
+      abi: morphoAbi,
+      functionName: "market",
+      args: [config.morpho.marketId],
+    }),
+  );
+}
+
+async function checkNetApy(input: {
+  config: AppConfig;
+  client: LoopPreflightClient;
+  context?: LoopPreflightContext;
+}): Promise<PreflightCheck> {
+  if (input.context === undefined || input.context.params === null) {
+    return check("net-apy", "fail", "exact LoopExecutor params are required for net APY validation");
+  }
+  if (input.context.baseApy === undefined || !Number.isFinite(input.context.baseApy)) {
+    return check("net-apy", "fail", "base APY evidence is required for target leverage net APY validation");
+  }
+  const leverage = targetLeverage(input.context);
+  if (leverage === null) {
+    return check("net-apy", "fail", "unable to determine target leverage for net APY validation");
+  }
+  if (input.config.morpho.marketId === null) {
+    return check("net-apy", "fail", "marketId is required for borrow-rate validation");
+  }
+  const market = await readMorphoMarket(input.config, input.client);
+  if (market === null) {
+    return check("net-apy", "fail", "Morpho market returned an unsupported shape");
+  }
+  const marketParams = {
+    loanToken: input.config.contracts.diem,
+    collateralToken: input.config.contracts.inferenceVault,
+    oracle: input.config.contracts.morphoOracle,
+    irm: input.config.contracts.adaptiveCurveIrm,
+    lltv: BigInt(input.config.morpho.lltvWad),
+  };
+  if (marketParams.collateralToken === null || marketParams.oracle === null) {
+    return check("net-apy", "fail", "inferenceVault and morphoOracle are required for borrow-rate validation");
+  }
+  const borrowRatePerSecond = (await input.client.readContract({
+    address: input.config.contracts.adaptiveCurveIrm,
+    abi: morphoIrmAbi,
+    functionName: "borrowRateView",
+    args: [marketParams, market],
+  })) as bigint;
+  const borrowRate = computeBorrowRate(borrowRatePerSecond);
+  const netApy = computeNetApy(leverage, input.context.baseApy, borrowRate);
+  const minimum = input.config.thresholds.spreadCriticalNetApy35;
+  return check(
+    "net-apy",
+    netApy > minimum ? "pass" : "fail",
+    netApy > minimum
+      ? `target ${leverage.toFixed(2)}x net APY ${(netApy * 100).toFixed(2)}% > ${(minimum * 100).toFixed(2)}%`
+      : `target ${leverage.toFixed(2)}x net APY ${(netApy * 100).toFixed(2)}% <= required ${(minimum * 100).toFixed(2)}%`,
   );
 }
 
@@ -403,9 +520,9 @@ export async function runLoopPreflight(
   checks.push(await checkMorphoMarketParams(config, client));
   checks.push(checkProjectedHealthFactor(config, context));
   checks.push(await checkCurveDepth({ config, owner, client, context }));
+  checks.push(await checkNetApy({ config, client, context }));
 
   const unavailableStrategyGates = [
-    ["net-apy", "target leverage net APY check is not implemented"],
     ["oracle-deviation", "Morpho oracle deviation check is not implemented"],
     ["route-slippage", "route quote and slippage protection check is not implemented"],
   ] as const;

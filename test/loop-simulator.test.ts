@@ -46,6 +46,7 @@ class MockPreflightClient implements LoopPreflightClient {
       curveDiemBalance?: bigint;
       curveWstDiemBalance?: bigint;
       navWad?: bigint;
+      borrowRatePerSecond?: bigint;
     } = {},
   ) {}
 
@@ -75,6 +76,12 @@ class MockPreflightClient implements LoopPreflightClient {
     }
     if (args.functionName === "position") {
       return [0n, 0n, this.options.positionCollateral ?? 100n * WAD];
+    }
+    if (args.functionName === "market") {
+      return [1_000n * WAD, 1_000n * WAD, 100n * WAD, 100n * WAD, 0n, 0n];
+    }
+    if (args.functionName === "borrowRateView") {
+      return this.options.borrowRatePerSecond ?? 0n;
     }
     if (args.functionName === "idToMarketParams") {
       return (
@@ -203,6 +210,40 @@ describe("loop preflight and simulation", () => {
     );
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("curve-depth:pass");
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("net-apy:fail");
+  });
+
+  it("passes net APY when base APY evidence covers live borrow rate", async () => {
+    const config = completeConfig();
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      baseApy: 0.2,
+      client: new MockSimulationClient({ borrowRatePerSecond: 0n }),
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("net-apy:pass");
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("oracle-deviation:fail");
+  });
+
+  it("fails net APY when target leverage carry is compressed", async () => {
+    const config = completeConfig();
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      baseApy: 0.02,
+      client: new MockSimulationClient({ borrowRatePerSecond: 0n }),
+    });
+    const netApy = result.preflightChecks.find((check) => check.key === "net-apy");
+    expect(netApy?.status).toBe("fail");
+    expect(netApy?.message).toContain("required 8.00%");
   });
 
   it("fails Curve depth when projected position exceeds 20 percent of pool TVL", async () => {
