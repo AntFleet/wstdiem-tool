@@ -1,6 +1,6 @@
 import { privateKeyToAccount } from "viem/accounts";
-import type { AppConfig, Hex } from "../types/domain.js";
-import type { LoopSafetyEvidence, SignerEvidence } from "./types.js";
+import type { AppConfig, Hex, MetricSnapshot } from "../types/domain.js";
+import type { BaseApyEvidence, LoopSafetyEvidence, SignerEvidence } from "./types.js";
 
 export function buildConfiguredSignerEvidence(config: AppConfig): SignerEvidence | undefined {
   if (config.wallet.hardware.enabled) {
@@ -21,8 +21,29 @@ export function buildConfiguredSignerEvidence(config: AppConfig): SignerEvidence
   };
 }
 
-export function buildConfiguredLoopSafetyEvidence(config: AppConfig): LoopSafetyEvidence {
+export function buildBaseApyEvidenceFromSnapshot(
+  config: AppConfig,
+  snapshot: MetricSnapshot,
+): BaseApyEvidence | undefined {
+  if (!snapshot.validity.yieldWindow || !snapshot.validity.vault || !snapshot.validity.rpcFreshness) {
+    return undefined;
+  }
+  if (snapshot.blockNumber < 0n || !Number.isFinite(snapshot.baseApy) || snapshot.baseApy < 0) {
+    return undefined;
+  }
   return {
+    source: "metrics-snapshot",
+    chainId: config.chainId,
+    blockNumber: snapshot.blockNumber,
+    windowSeconds: 7 * 24 * 60 * 60,
+    baseApy: snapshot.baseApy,
+    valid: true,
+  };
+}
+
+export function buildConfiguredLoopSafetyEvidence(config: AppConfig, snapshot?: MetricSnapshot): LoopSafetyEvidence {
+  return {
+    baseApy: snapshot === undefined ? undefined : buildBaseApyEvidenceFromSnapshot(config, snapshot),
     signer: buildConfiguredSignerEvidence(config),
   };
 }
