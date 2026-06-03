@@ -4,6 +4,14 @@ import { missingDeploymentKeys } from "../config/load.js";
 import type { Address, AppConfig, Hex } from "../types/domain.js";
 import type { PreflightCheck } from "./types.js";
 
+interface ReadMorphoMarketParams {
+  loanToken: Address;
+  collateralToken: Address;
+  oracle: Address;
+  irm: Address;
+  lltv: bigint;
+}
+
 export interface LoopPreflightClient {
   getChainId(): Promise<number>;
   getCode(address: Address): Promise<Hex>;
@@ -46,6 +54,86 @@ export function staticLoopPreflight(config: AppConfig, owner: Address | null): P
     ),
   );
   return checks;
+}
+
+function addressEqual(left: Address, right: Address): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+function parseMorphoMarketParams(value: unknown): ReadMorphoMarketParams | null {
+  if (Array.isArray(value) && value.length >= 5) {
+    return {
+      loanToken: value[0] as Address,
+      collateralToken: value[1] as Address,
+      oracle: value[2] as Address,
+      irm: value[3] as Address,
+      lltv: BigInt(value[4] as bigint | number | string),
+    };
+  }
+  if (value && typeof value === "object") {
+    const entry = value as Record<string, unknown>;
+    if (
+      typeof entry.loanToken === "string" &&
+      typeof entry.collateralToken === "string" &&
+      typeof entry.oracle === "string" &&
+      typeof entry.irm === "string" &&
+      entry.lltv !== undefined
+    ) {
+      return {
+        loanToken: entry.loanToken as Address,
+        collateralToken: entry.collateralToken as Address,
+        oracle: entry.oracle as Address,
+        irm: entry.irm as Address,
+        lltv: BigInt(entry.lltv as bigint | number | string),
+      };
+    }
+  }
+  return null;
+}
+
+async function checkMorphoMarketParams(config: AppConfig, client: LoopPreflightClient): Promise<PreflightCheck> {
+  if (config.morpho.marketId === null || config.contracts.inferenceVault === null || config.contracts.morphoOracle === null) {
+    return check(
+      "morpho-market-params",
+      "fail",
+      "marketId, inferenceVault, and morphoOracle are required for Morpho market validation",
+    );
+  }
+  const params = parseMorphoMarketParams(
+    await client.readContract({
+      address: config.contracts.morphoBlue,
+      abi: morphoAbi,
+      functionName: "idToMarketParams",
+      args: [config.morpho.marketId],
+    }),
+  );
+  if (params === null) {
+    return check("morpho-market-params", "fail", "Morpho idToMarketParams returned an unsupported shape");
+  }
+
+  const mismatches: string[] = [];
+  if (!addressEqual(params.loanToken, config.contracts.diem)) {
+    mismatches.push("loanToken");
+  }
+  if (!addressEqual(params.collateralToken, config.contracts.inferenceVault)) {
+    mismatches.push("collateralToken");
+  }
+  if (!addressEqual(params.oracle, config.contracts.morphoOracle)) {
+    mismatches.push("oracle");
+  }
+  if (!addressEqual(params.irm, config.contracts.adaptiveCurveIrm)) {
+    mismatches.push("irm");
+  }
+  if (params.lltv !== BigInt(config.morpho.lltvWad)) {
+    mismatches.push("lltv");
+  }
+  return check(
+    "morpho-market-params",
+    mismatches.length === 0 ? "pass" : "fail",
+    mismatches.length === 0
+      ? "Morpho market params match configured DIEM/wstDIEM market"
+      : `Morpho market params mismatch: ${mismatches.join(", ")}`,
+  );
 }
 
 export async function runLoopPreflight(
@@ -128,8 +216,9 @@ export async function runLoopPreflight(
     );
   }
 
+  checks.push(await checkMorphoMarketParams(config, client));
+
   const unavailableStrategyGates = [
-    ["morpho-market-params", "Morpho market idToMarketParams/LLTV validation is not implemented"],
     ["projected-health-factor", "projected post-loop health factor check is not implemented"],
     ["curve-depth", "Curve depth and position-size check is not implemented"],
     ["net-apy", "target leverage net APY check is not implemented"],

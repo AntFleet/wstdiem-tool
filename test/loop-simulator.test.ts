@@ -40,6 +40,7 @@ class MockPreflightClient implements LoopPreflightClient {
       code?: Hex;
       vaultAsset?: Address;
       authorized?: boolean;
+      marketParams?: readonly [Address, Address, Address, Address, bigint];
     } = {},
   ) {}
 
@@ -57,6 +58,17 @@ class MockPreflightClient implements LoopPreflightClient {
     }
     if (args.functionName === "isAuthorized") {
       return this.options.authorized ?? true;
+    }
+    if (args.functionName === "idToMarketParams") {
+      return (
+        this.options.marketParams ?? [
+          DEFAULT_CONFIG.contracts.diem,
+          "0x0000000000000000000000000000000000000001",
+          "0x0000000000000000000000000000000000000004",
+          DEFAULT_CONFIG.contracts.adaptiveCurveIrm,
+          BigInt(DEFAULT_CONFIG.morpho.lltvWad),
+        ]
+      );
     }
     throw new Error(`unexpected readContract ${args.functionName}`);
   }
@@ -105,6 +117,26 @@ describe("loop preflight and simulation", () => {
     );
     expect(checks.map((check) => `${check.key}:${check.status}`)).toContain("vault-asset:pass");
     expect(checks.map((check) => `${check.key}:${check.status}`)).toContain("morpho-authorization:fail");
+    expect(checks.map((check) => `${check.key}:${check.status}`)).toContain("morpho-market-params:pass");
+  });
+
+  it("fails preflight when Morpho market params do not match config", async () => {
+    const checks = await runLoopPreflight(
+      completeConfig(),
+      owner,
+      new MockPreflightClient({
+        marketParams: [
+          DEFAULT_CONFIG.contracts.weth,
+          "0x0000000000000000000000000000000000000001",
+          "0x0000000000000000000000000000000000000004",
+          DEFAULT_CONFIG.contracts.adaptiveCurveIrm,
+          BigInt(DEFAULT_CONFIG.morpho.lltvWad),
+        ],
+      }),
+    );
+    const marketCheck = checks.find((check) => check.key === "morpho-market-params");
+    expect(marketCheck?.status).toBe("fail");
+    expect(marketCheck?.message).toContain("loanToken");
   });
 
   it("blocks simulation when no client is provided", async () => {
@@ -130,6 +162,9 @@ describe("loop preflight and simulation", () => {
     expect(result.error?.code).toBe("PREFLIGHT_FAILED");
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain(
       "projected-health-factor:fail",
+    );
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain(
+      "morpho-market-params:pass",
     );
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("route-slippage:fail");
   });
