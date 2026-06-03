@@ -89,6 +89,9 @@ export function computeLeverage(collateralValueDiem: bigint, borrowedDiem: bigin
 }
 
 export function computeNetApy(leverage: number, baseApy: number, borrowRate: number): number {
+  if (!Number.isFinite(leverage)) {
+    return Number.NEGATIVE_INFINITY;
+  }
   return leverage * baseApy - (leverage - 1) * borrowRate;
 }
 

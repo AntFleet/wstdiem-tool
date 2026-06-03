@@ -1,6 +1,7 @@
 import Table from "cli-table3";
 import type { AppConfig, CliJsonOutput, MetricSnapshot } from "../types/domain.js";
 import { formatWad } from "../metrics/math.js";
+import type { LoopReadinessResult } from "../loop/readiness.js";
 
 export function stringifyJson(value: unknown): string {
   return JSON.stringify(
@@ -68,6 +69,47 @@ export function renderStatusTable(snapshot: MetricSnapshot, readiness: string[])
     ],
     ["Risk", `oracleDeviation ${(snapshot.oracleDeviation * 100).toFixed(2)}%`],
     ["Readiness", readiness.length === 0 ? "ready" : readiness.join("; ")],
+  );
+  return table.toString();
+}
+
+export function renderLoopReadinessTable(result: LoopReadinessResult): string {
+  const table = new Table({
+    head: ["Area", "Status"],
+    wordWrap: true,
+  });
+  table.push(
+    ["Overall", `${result.status}; broadcast ${result.broadcastAvailable ? "available" : "disabled"}; audit required ${result.auditRequired}`],
+    [
+      "Curve",
+      result.curve === undefined
+        ? "unavailable"
+        : `DIEM ${formatWad(result.curve.diemBalance)}, wstDIEM ${formatWad(result.curve.wstDiemBalance)}, TVL ${formatWad(result.curve.tvlDiem)} DIEM`,
+    ],
+    [
+      "Morpho",
+      result.morpho === undefined
+        ? "unavailable"
+        : `supply ${formatWad(result.morpho.totalSupplyAssets)} DIEM, borrow ${formatWad(result.morpho.totalBorrowAssets)} DIEM`,
+    ],
+    [
+      "Executor",
+      result.executor === undefined
+        ? "unavailable"
+        : `${result.executor.address}; code ${result.executor.hasCode ? "yes" : "no"}; config ${
+            result.executor.verified ? "verified" : "not verified"
+          }`,
+    ],
+    [
+      "Owner",
+      result.owner === undefined
+        ? "unavailable"
+        : `${result.owner.address}; collateral ${formatWad(result.owner.collateralWstDiem)} wstDIEM, debt ${formatWad(
+            result.owner.borrowedDiem,
+          )} DIEM, authorized ${result.owner.executorAuthorized === true ? "yes" : "no"}`,
+    ],
+    ["Checks", result.checks.map((entry) => `${entry.key}:${entry.status}`).join("; ")],
+    ["Blockers", result.blockers.length === 0 ? "none" : result.blockers.join("; ")],
   );
   return table.toString();
 }

@@ -76,22 +76,55 @@ export interface RouteSlippageEvidence {
   valid: boolean;
 }
 
+export interface FlashLoanLiquidityEvidence {
+  source: "uniswap-v3-pool-balance";
+  provider: "uniswap-v3";
+  chainId: number;
+  blockNumber: bigint;
+  factory: Address;
+  pool: Address;
+  loanToken: Address;
+  requestedLoan: bigint;
+  availableLoan: bigint;
+  valid: boolean;
+}
+
 export interface LoopSafetyEvidence {
   baseApy?: BaseApyEvidence;
+  flashLoanLiquidity?: FlashLoanLiquidityEvidence;
   routeSlippage?: RouteSlippageEvidence;
   signer?: SignerEvidence;
 }
 
 export interface ExitFlashFeeProof {
   repayAmountDiem?: string;
-  flashFee: "unresolved";
-  flashFeeSource: "unresolved";
-  flashLoanProvider: "unconfigured";
-  totalFlashRepaymentDiem: "unresolved";
+  flashFee: string | "unresolved";
+  flashFeeSource: "uniswap-v3-fee-tier" | "unresolved";
+  flashLoanProvider: "uniswap-v3" | "unconfigured";
+  flashLoanPool?: Address;
+  flashLoanFactory?: Address;
+  flashLoanFeeTier?: number;
+  flashLoanLiquidityBlockNumber?: string;
+  flashLoanAvailableDiem?: string;
+  flashLoanRequestedDiem?: string;
+  flashLoanLiquidityCovered?: boolean;
+  totalFlashRepaymentDiem: string | "unresolved";
   minDiemOut?: string;
   morphoRepayCovered?: boolean;
-  feeInclusiveRepayCovered: "blocked";
+  feeInclusiveRepayCovered: boolean | "blocked";
   reason: string;
+}
+
+export interface ExitExecutionEvidence {
+  source: "executor-event-log";
+  owner: Address;
+  repayAmountDiem: bigint;
+  flashFee: bigint;
+  totalFlashRepaymentDiem: bigint;
+  wstDiemSold: bigint;
+  diemReceived: bigint;
+  diemDustRefunded: bigint;
+  wstDiemDustRefunded: bigint;
 }
 
 export interface LoopSimulationRequest {
@@ -105,6 +138,7 @@ export interface LoopSimulationResult {
   action: LoopAction;
   preflightChecks: PreflightCheck[];
   exitFlashFeeProof?: ExitFlashFeeProof;
+  exitExecutionEvidence?: ExitExecutionEvidence;
   calldata?: `0x${string}`;
   gasEstimate?: string;
   error?: {

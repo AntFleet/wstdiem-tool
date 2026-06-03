@@ -29,4 +29,35 @@ describe("alert delivery safety", () => {
     expect(delivered.join(" ")).not.toContain("SECRET");
     expect(delivered.some((entry) => entry.startsWith("webhook:127.0.0.1:9#1:failed"))).toBe(true);
   });
+
+  it("reports configured Telegram delivery failures without reading or logging a token value", async () => {
+    delete process.env.WSTDIEM_TELEGRAM_BOT_TOKEN;
+    const delivered = await deliverConfiguredAlerts(
+      {
+        ...DEFAULT_CONFIG,
+        alerts: {
+          ...DEFAULT_CONFIG.alerts,
+          telegram: {
+            ...DEFAULT_CONFIG.alerts.telegram,
+            chatId: "123456",
+          },
+        },
+      },
+      [
+        {
+          alertKey: "test",
+          level: "INFO",
+          message: "test",
+          suggestedAction: "none",
+          cooldownSeconds: 0,
+          metrics: {},
+        },
+      ],
+      0n,
+      1,
+    );
+
+    expect(delivered).toContain("stderr");
+    expect(delivered.some((entry) => entry.startsWith("telegram:failed:missing bot token env"))).toBe(true);
+  });
 });

@@ -47,9 +47,12 @@ export async function selectBestRpcEndpoint(config: AppConfig, maxAttempts = 5):
         const block = await client.getBlock({ blockTag: "finalized" });
         const timestamp =
           typeof block.timestamp === "bigint" ? Number(block.timestamp) : Number(block.timestamp ?? 0);
+        if (block.number === null || block.number === undefined || block.number <= 0n || timestamp <= 0) {
+          throw new Error("finalized block returned missing or non-positive number/timestamp");
+        }
         successful.push({
           chainId,
-          blockNumber: block.number ?? 0n,
+          blockNumber: block.number,
           blockTimestamp: timestamp,
           rpcName: entry.name,
           url: entry.url,

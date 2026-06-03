@@ -1,13 +1,16 @@
 import { curvePoolAbi } from "../abi/curvePool.js";
 import { inferenceVaultAbi } from "../abi/inferenceVault.js";
+import { loopExecutorAbi } from "../abi/loopExecutor.js";
 import { morphoIrmAbi } from "../abi/morphoIrm.js";
 import { morphoOracleAbi } from "../abi/morphoOracle.js";
 import { morphoAbi } from "../abi/morpho.js";
 import { missingDeploymentKeys } from "../config/load.js";
 import { computeBorrowedDiem, computeBorrowRate, computeNetApy, computeOracleDeviation, WAD } from "../metrics/math.js";
 import type { Address, AppConfig, Hex, MorphoMarket } from "../types/domain.js";
+import { expectedUniswapV3FlashFee } from "./uniswapV3FlashFee.js";
 import type {
   BaseApyEvidence,
+  FlashLoanLiquidityEvidence,
   LoopAction,
   LoopExecutorParams,
   LoopExitParams,
@@ -47,6 +50,7 @@ export interface LoopPreflightContext {
   action: LoopAction;
   params: LoopExecutorParams | null;
   safetyEvidence?: LoopSafetyEvidence;
+  planningBlock?: bigint;
 }
 
 function check(key: string, status: PreflightCheck["status"], message: string): PreflightCheck {
@@ -193,7 +197,71 @@ function formatPercent(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
 }
 
-async function checkMorphoMarketParams(config: AppConfig, client: LoopPreflightClient): Promise<PreflightCheck> {
+async function checkExecutorFlashConfig(
+  config: AppConfig,
+  client: LoopPreflightClient,
+  blockNumber?: bigint,
+): Promise<PreflightCheck> {
+  if (
+    config.contracts.loopExecutor === null ||
+    config.flashLoan.provider !== "uniswap-v3" ||
+    config.flashLoan.pool === null ||
+    config.flashLoan.loanToken === null ||
+    config.flashLoan.pairToken === null ||
+    config.flashLoan.feeTier === null
+  ) {
+    return check("executor-flash-config", "fail", "loopExecutor and Uniswap V3 flash-loan config are required");
+  }
+
+  const [canonicalFlashPool, executorFee, loanTokenIsToken0] = await Promise.all([
+    client.readContract({
+      address: config.contracts.loopExecutor,
+      abi: loopExecutorAbi,
+      functionName: "canonicalFlashPool",
+      blockNumber,
+    }),
+    client.readContract({
+      address: config.contracts.loopExecutor,
+      abi: loopExecutorAbi,
+      functionName: "expectedFlashFee",
+      args: [50n * WAD],
+      blockNumber,
+    }),
+    client.readContract({
+      address: config.contracts.loopExecutor,
+      abi: loopExecutorAbi,
+      functionName: "loanTokenIsToken0",
+      blockNumber,
+    }),
+  ]);
+
+  const configuredFee = expectedUniswapV3FlashFee(50n * WAD, config.flashLoan.feeTier);
+  const configuredTokenSide = config.flashLoan.loanToken.toLowerCase() < config.flashLoan.pairToken.toLowerCase();
+  const mismatches: string[] = [];
+  if (!addressEqual(canonicalFlashPool as Address, config.flashLoan.pool)) {
+    mismatches.push("canonicalFlashPool");
+  }
+  if (configuredFee === null || BigInt(executorFee as bigint | number | string) !== configuredFee) {
+    mismatches.push("expectedFlashFee");
+  }
+  if (Boolean(loanTokenIsToken0) !== configuredTokenSide) {
+    mismatches.push("loanTokenIsToken0");
+  }
+
+  return check(
+    "executor-flash-config",
+    mismatches.length === 0 ? "pass" : "fail",
+    mismatches.length === 0
+      ? "loopExecutor flash config matches configured Uniswap V3 provider"
+      : `loopExecutor flash config mismatch: ${mismatches.join(", ")}`,
+  );
+}
+
+async function checkMorphoMarketParams(
+  config: AppConfig,
+  client: LoopPreflightClient,
+  blockNumber?: bigint,
+): Promise<PreflightCheck> {
   if (config.morpho.marketId === null || config.contracts.inferenceVault === null || config.contracts.morphoOracle === null) {
     return check(
       "morpho-market-params",
@@ -207,6 +275,7 @@ async function checkMorphoMarketParams(config: AppConfig, client: LoopPreflightC
       abi: morphoAbi,
       functionName: "idToMarketParams",
       args: [config.morpho.marketId],
+      blockNumber,
     }),
   );
   if (params === null) {
@@ -315,7 +384,11 @@ function targetLeverage(input: LoopPreflightContext): number | null {
   return null;
 }
 
-function validateBaseApyEvidence(config: AppConfig, evidence: BaseApyEvidence | undefined): string | null {
+function validateBaseApyEvidence(
+  config: AppConfig,
+  evidence: BaseApyEvidence | undefined,
+  planningBlock?: bigint,
+): string | null {
   if (evidence === undefined) {
     return "base APY evidence is required for target leverage net APY validation";
   }
@@ -330,6 +403,15 @@ function validateBaseApyEvidence(config: AppConfig, evidence: BaseApyEvidence | 
   }
   if (evidence.blockNumber < 0n) {
     return "base APY evidence blockNumber must be non-negative";
+  }
+  if (planningBlock !== undefined) {
+    if (evidence.blockNumber > planningBlock) {
+      return "base APY evidence blockNumber cannot be newer than the planning block";
+    }
+    const staleBlocks = planningBlock - evidence.blockNumber;
+    if (staleBlocks > BigInt(config.execution.maxBaseApyStalenessBlocks)) {
+      return `base APY evidence is ${staleBlocks.toString()} blocks old; max is ${config.execution.maxBaseApyStalenessBlocks}`;
+    }
   }
   if (!Number.isFinite(evidence.baseApy) || evidence.baseApy < 0) {
     return "base APY evidence must include a finite non-negative baseApy";
@@ -385,7 +467,59 @@ function validateRouteSlippageEvidence(
   return null;
 }
 
-async function readMorphoMarket(config: AppConfig, client: LoopPreflightClient): Promise<MorphoMarket | null> {
+function validateFlashLoanLiquidityEvidence(
+  config: AppConfig,
+  context: LoopPreflightContext,
+  evidence: FlashLoanLiquidityEvidence | undefined,
+): string | null {
+  if (context.action !== "exit") {
+    return null;
+  }
+  if (evidence === undefined) {
+    return "flash-loan liquidity evidence is required for live exit validation";
+  }
+  if (context.params === null) {
+    return "exact LoopExecutor params are required for flash-loan liquidity validation";
+  }
+  const params = context.params as LoopExitParams;
+  if (evidence.provider !== "uniswap-v3") {
+    return `flash-loan provider ${evidence.provider} is not supported for live exit validation`;
+  }
+  if (evidence.chainId !== config.chainId) {
+    return `flash-loan liquidity evidence chainId ${evidence.chainId} does not match config chainId ${config.chainId}`;
+  }
+  if (evidence.blockNumber < 0n) {
+    return "flash-loan liquidity evidence blockNumber must be non-negative";
+  }
+  if (context.safetyEvidence?.routeSlippage === undefined) {
+    return "route slippage evidence is required for same-block flash-loan liquidity validation";
+  }
+  if (evidence.blockNumber !== context.safetyEvidence.routeSlippage.blockNumber) {
+    return "flash-loan liquidity evidence blockNumber must match route quote blockNumber";
+  }
+  if (config.flashLoan.factory === null || !addressEqual(evidence.factory, config.flashLoan.factory)) {
+    return "flash-loan liquidity factory does not match config";
+  }
+  if (config.flashLoan.pool === null || !addressEqual(evidence.pool, config.flashLoan.pool)) {
+    return "flash-loan liquidity pool does not match config";
+  }
+  if (!addressEqual(evidence.loanToken, config.contracts.diem)) {
+    return "flash-loan liquidity loanToken does not match DIEM";
+  }
+  if (evidence.requestedLoan !== params.repayAmountDiem) {
+    return "flash-loan liquidity requestedLoan does not match repayAmountDiem";
+  }
+  if (!evidence.valid || evidence.availableLoan < evidence.requestedLoan) {
+    return "flash-loan liquidity does not cover requested loan";
+  }
+  return null;
+}
+
+async function readMorphoMarket(
+  config: AppConfig,
+  client: LoopPreflightClient,
+  blockNumber?: bigint,
+): Promise<MorphoMarket | null> {
   if (config.morpho.marketId === null) {
     return null;
   }
@@ -395,6 +529,7 @@ async function readMorphoMarket(config: AppConfig, client: LoopPreflightClient):
       abi: morphoAbi,
       functionName: "market",
       args: [config.morpho.marketId],
+      blockNumber,
     }),
   );
 }
@@ -408,7 +543,7 @@ async function checkNetApy(input: {
     return check("net-apy", "fail", "exact LoopExecutor params are required for net APY validation");
   }
   const baseApyEvidence = input.context.safetyEvidence?.baseApy;
-  const evidenceError = validateBaseApyEvidence(input.config, baseApyEvidence);
+  const evidenceError = validateBaseApyEvidence(input.config, baseApyEvidence, input.context.planningBlock);
   if (evidenceError !== null || baseApyEvidence === undefined) {
     return check("net-apy", "fail", evidenceError ?? "base APY evidence is required");
   }
@@ -419,7 +554,7 @@ async function checkNetApy(input: {
   if (input.config.morpho.marketId === null) {
     return check("net-apy", "fail", "marketId is required for borrow-rate validation");
   }
-  const market = await readMorphoMarket(input.config, input.client);
+  const market = await readMorphoMarket(input.config, input.client, input.context.planningBlock);
   if (market === null) {
     return check("net-apy", "fail", "Morpho market returned an unsupported shape");
   }
@@ -438,6 +573,7 @@ async function checkNetApy(input: {
     abi: morphoIrmAbi,
     functionName: "borrowRateView",
     args: [marketParams, market],
+    blockNumber: input.context.planningBlock,
   })) as bigint;
   const borrowRate = computeBorrowRate(borrowRatePerSecond);
   const netApy = computeNetApy(leverage, baseApyEvidence.baseApy, borrowRate);
@@ -463,7 +599,7 @@ async function projectedPositionNotionalDiem(input: {
   if (input.owner === null || input.config.morpho.marketId === null || input.config.contracts.inferenceVault === null) {
     return null;
   }
-  const market = await readMorphoMarket(input.config, input.client);
+  const market = await readMorphoMarket(input.config, input.client, input.context.planningBlock);
   if (market === null) {
     return null;
   }
@@ -473,6 +609,7 @@ async function projectedPositionNotionalDiem(input: {
       abi: morphoAbi,
       functionName: "position",
       args: [input.config.morpho.marketId, input.owner],
+      blockNumber: input.context.planningBlock,
     }),
   );
   if (position === null) {
@@ -483,6 +620,7 @@ async function projectedPositionNotionalDiem(input: {
     abi: inferenceVaultAbi,
     functionName: "convertToAssets",
     args: [position.collateral],
+    blockNumber: input.context.planningBlock,
   })) as bigint;
   const borrowedDiem = computeBorrowedDiem(market, { borrowShares: position.borrowShares });
   if (collateralDiem <= borrowedDiem) {
@@ -514,18 +652,21 @@ async function checkCurveDepth(input: {
     abi: curvePoolAbi,
     functionName: "balances",
     args: [0n],
+    blockNumber: input.context?.planningBlock,
   })) as bigint;
   const wstDiemBalance = (await input.client.readContract({
     address: input.config.contracts.curvePool,
     abi: curvePoolAbi,
     functionName: "balances",
     args: [1n],
+    blockNumber: input.context?.planningBlock,
   })) as bigint;
   const wstDiemValue = (await input.client.readContract({
     address: input.config.contracts.inferenceVault,
     abi: inferenceVaultAbi,
     functionName: "convertToAssets",
     args: [wstDiemBalance],
+    blockNumber: input.context?.planningBlock,
   })) as bigint;
   const curveTvlDiem = diemBalance + wstDiemValue;
   if (curveTvlDiem === 0n) {
@@ -546,6 +687,7 @@ async function checkCurveDepth(input: {
 async function checkOracleDeviation(input: {
   config: AppConfig;
   client: LoopPreflightClient;
+  context?: LoopPreflightContext;
 }): Promise<PreflightCheck> {
   if (input.config.contracts.morphoOracle === null || input.config.contracts.inferenceVault === null) {
     return check("oracle-deviation", "fail", "morphoOracle and inferenceVault are required for oracle deviation validation");
@@ -554,12 +696,14 @@ async function checkOracleDeviation(input: {
     address: input.config.contracts.morphoOracle,
     abi: morphoOracleAbi,
     functionName: "price",
+    blockNumber: input.context?.planningBlock,
   })) as bigint;
   const oneWstDiemAssets = (await input.client.readContract({
     address: input.config.contracts.inferenceVault,
     abi: inferenceVaultAbi,
     functionName: "convertToAssets",
     args: [WAD],
+    blockNumber: input.context?.planningBlock,
   })) as bigint;
   if (oneWstDiemAssets === 0n) {
     return check("oracle-deviation", "fail", "InferenceVault.convertToAssets(1e18) returned zero");
@@ -595,6 +739,19 @@ function checkRouteSlippage(config: AppConfig, context?: LoopPreflightContext): 
   );
 }
 
+function checkFlashLoanLiquidity(config: AppConfig, context?: LoopPreflightContext): PreflightCheck {
+  if (context?.action !== "exit") {
+    return check("flash-loan-liquidity", "skip", "flash-loan liquidity is only required for exit");
+  }
+  const evidence = context.safetyEvidence?.flashLoanLiquidity;
+  const evidenceError = validateFlashLoanLiquidityEvidence(config, context, evidence);
+  return check(
+    "flash-loan-liquidity",
+    evidenceError === null ? "pass" : "fail",
+    evidenceError === null ? "flash-loan liquidity evidence covers the requested DIEM loan" : evidenceError,
+  );
+}
+
 export async function runLoopPreflight(
   config: AppConfig,
   owner: Address | null,
@@ -616,6 +773,7 @@ export async function runLoopPreflight(
   }
 
   const chainId = await client.getChainId();
+  const blockNumber = context?.planningBlock;
   checks.push(
     check(
       "chain-id",
@@ -648,6 +806,7 @@ export async function runLoopPreflight(
       address: config.contracts.inferenceVault,
       abi: inferenceVaultAbi,
       functionName: "asset",
+      blockNumber,
     })) as Address;
     checks.push(
       check(
@@ -666,6 +825,7 @@ export async function runLoopPreflight(
       abi: morphoAbi,
       functionName: "isAuthorized",
       args: [owner, config.contracts.loopExecutor],
+      blockNumber,
     })) as boolean;
     checks.push(
       check(
@@ -676,8 +836,9 @@ export async function runLoopPreflight(
     );
   }
 
-  checks.push(await checkMorphoMarketParams(config, client));
+  checks.push(await checkMorphoMarketParams(config, client, blockNumber));
   if (context?.action === "exit") {
+    checks.push(await checkExecutorFlashConfig(config, client, blockNumber));
     checks.push(
       check(
         "projected-health-factor",
@@ -694,8 +855,18 @@ export async function runLoopPreflight(
     checks.push(await checkCurveDepth({ config, owner, client, context }));
     checks.push(await checkNetApy({ config, client, context }));
   }
-  checks.push(await checkOracleDeviation({ config, client }));
+  checks.push(await checkOracleDeviation({ config, client, context }));
   checks.push(checkRouteSlippage(config, context));
+  checks.push(checkFlashLoanLiquidity(config, context));
+  if (context !== undefined && context.action !== "exit") {
+    checks.push(
+      check(
+        "executor-action",
+        "fail",
+        `LoopExecutor action ${context.action} is unsupported by the deployed exit-only executor`,
+      ),
+    );
+  }
 
   return checks;
 }

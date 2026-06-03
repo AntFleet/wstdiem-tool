@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { encodeAbiParameters, pad, toEventHash } from "viem";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { simulateMorphoAuthorization } from "../src/loop/authorization.js";
 import { buildLiveLoopExitPlan } from "../src/loop/exitPlan.js";
@@ -69,6 +70,47 @@ function completeConfig(): AppConfig {
   };
 }
 
+function loopExitExecutedSimulationResult(args: {
+  repayAmountDiem: bigint;
+  flashFee: bigint;
+  totalFlashRepaymentDiem: bigint;
+  wstDiemSold: bigint;
+  diemReceived: bigint;
+  diemDustRefunded: bigint;
+  wstDiemDustRefunded: bigint;
+}): { logs: Array<{ data: Hex; topics: Hex[] }> } {
+  return {
+    logs: [
+      {
+        data: encodeAbiParameters(
+          [
+            { name: "repayAmountDiem", type: "uint256" },
+            { name: "flashFee", type: "uint256" },
+            { name: "totalFlashRepaymentDiem", type: "uint256" },
+            { name: "wstDiemSold", type: "uint256" },
+            { name: "diemReceived", type: "uint256" },
+            { name: "diemDustRefunded", type: "uint256" },
+            { name: "wstDiemDustRefunded", type: "uint256" },
+          ],
+          [
+            args.repayAmountDiem,
+            args.flashFee,
+            args.totalFlashRepaymentDiem,
+            args.wstDiemSold,
+            args.diemReceived,
+            args.diemDustRefunded,
+            args.wstDiemDustRefunded,
+          ],
+        ),
+        topics: [
+          toEventHash("LoopExitExecuted(address,uint256,uint256,uint256,uint256,uint256,uint256,uint256)"),
+          pad(owner),
+        ],
+      },
+    ],
+  };
+}
+
 class MockPreflightClient implements LoopPreflightClient {
   constructor(
     private readonly options: {
@@ -85,6 +127,10 @@ class MockPreflightClient implements LoopPreflightClient {
       curveDiemBalance?: bigint;
       curveWstDiemBalance?: bigint;
       curveExitQuote?: bigint;
+      flashPoolDiemBalance?: bigint;
+      executorFlashPool?: Address;
+      executorFlashFee?: bigint;
+      executorLoanTokenIsToken0?: boolean;
       navWad?: bigint;
       borrowRatePerSecond?: bigint;
     } = {},
@@ -113,6 +159,18 @@ class MockPreflightClient implements LoopPreflightClient {
     }
     if (args.functionName === "get_dy") {
       return this.options.curveExitQuote ?? 99n * WAD;
+    }
+    if (args.functionName === "balanceOf") {
+      return this.options.flashPoolDiemBalance ?? 1_000n * WAD;
+    }
+    if (args.functionName === "canonicalFlashPool") {
+      return this.options.executorFlashPool ?? DEFAULT_CONFIG.flashLoan.pool;
+    }
+    if (args.functionName === "expectedFlashFee") {
+      return this.options.executorFlashFee ?? 500_000_000_000_000_000n;
+    }
+    if (args.functionName === "loanTokenIsToken0") {
+      return this.options.executorLoanTokenIsToken0 ?? false;
     }
     if (args.functionName === "isAuthorized") {
       return this.options.authorized ?? true;
@@ -155,29 +213,36 @@ class MockSimulationClient extends MockPreflightClient implements LoopSimulation
   constructor(
     options: ConstructorParameters<typeof MockPreflightClient>[0] & {
       simulateError?: Error;
+      simulationResult?: unknown;
       gas?: bigint;
     } = {},
   ) {
     super(options);
     this.simulateError = options.simulateError;
+    this.simulationResult = options.simulationResult ?? {};
     this.gas = options.gas ?? 123_456n;
   }
 
   private readonly simulateError: Error | undefined;
+  private readonly simulationResult: unknown;
   private readonly gas: bigint;
+  public lastSimulateBlockNumber: bigint | undefined;
+  public lastEstimateBlockNumber: bigint | undefined;
 
   async getBlockNumber(): Promise<bigint> {
     return 1n;
   }
 
-  async simulateContract(): Promise<unknown> {
+  async simulateContract(args?: { blockNumber?: bigint }): Promise<unknown> {
+    this.lastSimulateBlockNumber = args?.blockNumber;
     if (this.simulateError !== undefined) {
       throw this.simulateError;
     }
-    return {};
+    return this.simulationResult;
   }
 
-  async estimateContractGas(): Promise<bigint> {
+  async estimateContractGas(args?: { blockNumber?: bigint }): Promise<bigint> {
+    this.lastEstimateBlockNumber = args?.blockNumber;
     return this.gas;
   }
 }
@@ -228,9 +293,9 @@ describe("loop preflight and simulation", () => {
     expect(result.error?.code).toBe("SIMULATION_CLIENT_MISSING");
   });
 
-  it("blocks live simulation until SPEC001 strategy risk gates are implemented", async () => {
+  it("blocks live simulation until SPEC001 strategy risk gates and executor support are available", async () => {
     const config = completeConfig();
-    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 2, slippageBps: 25, nowSeconds: 1 });
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 2.1, slippageBps: 25, nowSeconds: 1 });
     const result = await simulateLoopExecutorCall({
       config,
       action: "rebalance",
@@ -240,7 +305,7 @@ describe("loop preflight and simulation", () => {
       client: new MockSimulationClient({ gas: 999n }),
     });
     expect(result.status).toBe("blocked");
-    expect(result.error?.code).toBe("PREFLIGHT_FAILED");
+    expect(result.error?.code).toBe("UNSUPPORTED_EXECUTOR_ACTION");
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain(
       "projected-health-factor:fail",
     );
@@ -287,6 +352,39 @@ describe("loop preflight and simulation", () => {
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("route-slippage:fail");
   });
 
+  it("fails net APY when base APY evidence is older than the planning block tolerance", async () => {
+    const config: AppConfig = {
+      ...completeConfig(),
+      execution: {
+        ...completeConfig().execution,
+        maxBaseApyStalenessBlocks: 0,
+      },
+    };
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      safetyEvidence: {
+        ...safetyEvidence(0.2),
+        baseApy: {
+          source: "test",
+          chainId: 8453,
+          blockNumber: 0n,
+          windowSeconds: 604_800,
+          baseApy: 0.2,
+          valid: true,
+        },
+      },
+      client: new MockSimulationClient({ borrowRatePerSecond: 0n }),
+    });
+    const netApy = result.preflightChecks.find((check) => check.key === "net-apy");
+    expect(netApy?.status).toBe("fail");
+    expect(netApy?.message).toContain("1 blocks old");
+  });
+
   it("fails net APY when target leverage carry is compressed", async () => {
     const config = completeConfig();
     const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
@@ -304,7 +402,7 @@ describe("loop preflight and simulation", () => {
     expect(netApy?.message).toContain("required 8.00%");
   });
 
-  it("passes live rebalance simulation when every implemented safety gate has evidence", async () => {
+  it("blocks live rebalance simulation even when every safety gate has evidence because the executor is exit-only", async () => {
     const config = completeConfig();
     const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
     const result = await simulateLoopExecutorCall({
@@ -316,9 +414,11 @@ describe("loop preflight and simulation", () => {
       safetyEvidence: safetyEvidenceWithRoute(0.2, 25),
       client: new MockSimulationClient({ gas: 999n, borrowRatePerSecond: 0n }),
     });
-    expect(result.status).toBe("passed");
-    expect(result.gasEstimate).toBe("999");
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("UNSUPPORTED_EXECUTOR_ACTION");
+    expect(result.gasEstimate).toBeUndefined();
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("route-slippage:pass");
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("executor-action:fail");
   });
 
   it("passes live exit simulation with exact exit params and route quote evidence", async () => {
@@ -328,6 +428,15 @@ describe("loop preflight and simulation", () => {
       positionBorrowShares: 50n * WAD,
       marketTotalBorrowAssets: 100n * WAD,
       marketTotalBorrowShares: 100n * WAD,
+      simulationResult: loopExitExecutedSimulationResult({
+        repayAmountDiem: 50n * WAD,
+        flashFee: 510_000_000_000_000_000n,
+        totalFlashRepaymentDiem: 51_510_000_000_000_000_000n,
+        wstDiemSold: 100n * WAD,
+        diemReceived: 98_752_500_000_000_000_000n,
+        diemDustRefunded: 48_242_500_000_000_000_000n,
+        wstDiemDustRefunded: 0n,
+      }),
     });
     const exitPlan = await buildLiveLoopExitPlan({
       config,
@@ -348,6 +457,7 @@ describe("loop preflight and simulation", () => {
       safetyEvidence: {
         ...safetyEvidence(0.2),
         routeSlippage: exitPlan.routeSlippage,
+        flashLoanLiquidity: exitPlan.flashLoanLiquidity,
       },
       client,
     });
@@ -355,22 +465,164 @@ describe("loop preflight and simulation", () => {
     expect(result.status).toBe("passed");
     expect(result.gasEstimate).toBe("999");
     expect(result.exitFlashFeeProof).toMatchObject({
-      repayAmountDiem: "50000000000000000000",
-      flashFee: "unresolved",
-      flashFeeSource: "unresolved",
-      flashLoanProvider: "unconfigured",
-      totalFlashRepaymentDiem: "unresolved",
+      repayAmountDiem: "51000000000000000000",
+      flashFee: "510000000000000000",
+      flashFeeSource: "uniswap-v3-fee-tier",
+      flashLoanProvider: "uniswap-v3",
+      flashLoanPool: "0x80d995189ecc593672aD4703b250a5e82672EB1D",
+      flashLoanFactory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+      flashLoanFeeTier: 10_000,
+      flashLoanLiquidityBlockNumber: "1",
+      flashLoanAvailableDiem: "1000000000000000000000",
+      flashLoanRequestedDiem: "51000000000000000000",
+      flashLoanLiquidityCovered: true,
+      totalFlashRepaymentDiem: "51510000000000000000",
       minDiemOut: "98752500000000000000",
       morphoRepayCovered: true,
-      feeInclusiveRepayCovered: "blocked",
+      feeInclusiveRepayCovered: true,
     });
-    expect(result.exitFlashFeeProof?.reason).toContain("fee-inclusive proof is blocked");
+    expect(result.exitExecutionEvidence).toMatchObject({
+      source: "executor-event-log",
+      owner,
+      repayAmountDiem: 50n * WAD,
+      flashFee: 510_000_000_000_000_000n,
+      totalFlashRepaymentDiem: 51_510_000_000_000_000_000n,
+      wstDiemSold: 100n * WAD,
+      diemReceived: 98_752_500_000_000_000_000n,
+      diemDustRefunded: 48_242_500_000_000_000_000n,
+      wstDiemDustRefunded: 0n,
+    });
+    expect(client.lastSimulateBlockNumber).toBe(1n);
+    expect(client.lastEstimateBlockNumber).toBe(1n);
+    expect(result.exitFlashFeeProof?.reason).toContain("computed from configured Uniswap V3 fee tier");
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain(
       "projected-health-factor:skip",
     );
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("curve-depth:skip");
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("net-apy:skip");
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("route-slippage:pass");
+  });
+
+  it("blocks live exit simulation when deployed executor flash config does not match CLI config", async () => {
+    const config = completeConfig();
+    const client = new MockSimulationClient({
+      gas: 999n,
+      positionBorrowShares: 50n * WAD,
+      marketTotalBorrowAssets: 100n * WAD,
+      marketTotalBorrowShares: 100n * WAD,
+      executorFlashPool: "0x00000000000000000000000000000000000000aa",
+    });
+    const exitPlan = await buildLiveLoopExitPlan({
+      config,
+      owner,
+      preflightClient: client,
+      routeQuoteClient: client,
+      slippageBps: 25,
+      nowSeconds: 1,
+    });
+
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "exit",
+      owner,
+      from: owner,
+      params: exitPlan.params,
+      safetyEvidence: {
+        ...safetyEvidence(0.2),
+        routeSlippage: exitPlan.routeSlippage,
+        flashLoanLiquidity: exitPlan.flashLoanLiquidity,
+      },
+      client,
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.preflightChecks).toContainEqual({
+      key: "executor-flash-config",
+      status: "fail",
+      message: "loopExecutor flash config mismatch: canonicalFlashPool",
+    });
+  });
+
+  it("fails live exit simulation when executor event fee conflicts with off-chain proof", async () => {
+    const config = completeConfig();
+    const client = new MockSimulationClient({
+      gas: 999n,
+      positionBorrowShares: 50n * WAD,
+      marketTotalBorrowAssets: 100n * WAD,
+      marketTotalBorrowShares: 100n * WAD,
+      simulationResult: loopExitExecutedSimulationResult({
+        repayAmountDiem: 50n * WAD,
+        flashFee: 1n,
+        totalFlashRepaymentDiem: 50_000_000_000_000_000_001n,
+        wstDiemSold: 100n * WAD,
+        diemReceived: 99n * WAD,
+        diemDustRefunded: 49n * WAD,
+        wstDiemDustRefunded: 0n,
+      }),
+    });
+    const exitPlan = await buildLiveLoopExitPlan({
+      config,
+      owner,
+      preflightClient: client,
+      routeQuoteClient: client,
+      slippageBps: 25,
+      nowSeconds: 1,
+    });
+
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "exit",
+      owner,
+      from: owner,
+      params: exitPlan.params,
+      safetyEvidence: {
+        ...safetyEvidence(0.2),
+        routeSlippage: exitPlan.routeSlippage,
+        flashLoanLiquidity: exitPlan.flashLoanLiquidity,
+      },
+      client,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.error?.code).toBe("EXIT_EXECUTION_EVIDENCE_MISMATCH");
+    expect(result.error?.message).toContain("flashFee does not match");
+  });
+
+  it("passes live exit simulation when standard eth_call returns no LoopExitExecuted logs", async () => {
+    const config = completeConfig();
+    const client = new MockSimulationClient({
+      gas: 999n,
+      positionBorrowShares: 50n * WAD,
+      marketTotalBorrowAssets: 100n * WAD,
+      marketTotalBorrowShares: 100n * WAD,
+      simulationResult: {},
+    });
+    const exitPlan = await buildLiveLoopExitPlan({
+      config,
+      owner,
+      preflightClient: client,
+      routeQuoteClient: client,
+      slippageBps: 25,
+      nowSeconds: 1,
+    });
+
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "exit",
+      owner,
+      from: owner,
+      params: exitPlan.params,
+      safetyEvidence: {
+        ...safetyEvidence(0.2),
+        routeSlippage: exitPlan.routeSlippage,
+        flashLoanLiquidity: exitPlan.flashLoanLiquidity,
+      },
+      client,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.error).toBeUndefined();
+    expect(result.exitExecutionEvidence).toBeUndefined();
   });
 
   it("passes forced live exit simulation when route impact exceeds the configured cap", async () => {
@@ -381,6 +633,15 @@ describe("loop preflight and simulation", () => {
       marketTotalBorrowAssets: 100n * WAD,
       marketTotalBorrowShares: 100n * WAD,
       curveExitQuote: 98n * WAD,
+      simulationResult: loopExitExecutedSimulationResult({
+        repayAmountDiem: 50n * WAD,
+        flashFee: 510_000_000_000_000_000n,
+        totalFlashRepaymentDiem: 51_510_000_000_000_000_000n,
+        wstDiemSold: 100n * WAD,
+        diemReceived: 97_755_000_000_000_000_000n,
+        diemDustRefunded: 47_245_000_000_000_000_000n,
+        wstDiemDustRefunded: 0n,
+      }),
     });
     const exitPlan = await buildLiveLoopExitPlan({
       config,
@@ -403,6 +664,7 @@ describe("loop preflight and simulation", () => {
       safetyEvidence: {
         ...safetyEvidence(0.2),
         routeSlippage: exitPlan.routeSlippage,
+        flashLoanLiquidity: exitPlan.flashLoanLiquidity,
       },
       client,
     });
@@ -410,8 +672,8 @@ describe("loop preflight and simulation", () => {
 
     expect(result.status).toBe("passed");
     expect(result.exitFlashFeeProof).toMatchObject({
-      flashFee: "unresolved",
-      feeInclusiveRepayCovered: "blocked",
+      flashFee: "510000000000000000",
+      feeInclusiveRepayCovered: true,
       morphoRepayCovered: true,
     });
     expect(routeSlippage?.status).toBe("pass");

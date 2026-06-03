@@ -36,6 +36,10 @@ describe("SPEC001 metric math", () => {
     expect(computeSpreadScore(0.5, 0.05)).toBeCloseTo(0.425);
   });
 
+  it("treats infinite leverage as worst-case carry for deleverage gates", () => {
+    expect(computeNetApy(Number.POSITIVE_INFINITY, 0.08, 0.08)).toBe(Number.NEGATIVE_INFINITY);
+  });
+
   it("computes borrow debt from Morpho shares", () => {
     expect(
       computeBorrowedDiem(

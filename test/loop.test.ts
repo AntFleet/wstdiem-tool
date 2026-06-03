@@ -66,8 +66,9 @@ describe("loop safety behavior", () => {
     });
     expect(projection.blocked).toBe(true);
     expect(projection.executorParamsAvailable).toBe(true);
-    expect(projection.executorCalldata?.startsWith("0x")).toBe(true);
+    expect(projection.executorCalldata).toBeUndefined();
     expect(projection.blockers.join(" ")).toContain("executor simulation unavailable");
+    expect(projection.blockers.join(" ")).toContain("unsupported by the deployed exit-only executor");
     expect(projection.authorizationCalldata?.to).toBe(DEFAULT_CONFIG.contracts.morphoBlue);
     expect(projection.authorizationCalldata?.data.startsWith("0x")).toBe(true);
   });

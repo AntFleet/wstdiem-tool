@@ -90,15 +90,13 @@ export function buildLoopExitParams(input: {
 }
 
 export function encodeLoopExecutorCall(action: LoopAction, params: LoopExecutorParams): Hex {
-  if (action === "open") {
-    return encodeFunctionData({ abi: loopExecutorAbi, functionName: "open", args: [params as LoopOpenParams] });
-  }
-  if (action === "rebalance") {
-    return encodeFunctionData({
-      abi: loopExecutorAbi,
-      functionName: "rebalance",
-      args: [params as LoopRebalanceParams],
-    });
+  const unsupported = unsupportedExecutorAction(action);
+  if (unsupported !== null) {
+    throw new Error(unsupported);
   }
   return encodeFunctionData({ abi: loopExecutorAbi, functionName: "exit", args: [params as LoopExitParams] });
+}
+
+export function unsupportedExecutorAction(action: LoopAction): string | null {
+  return action === "exit" ? null : `LoopExecutor action ${action} is unsupported by the deployed exit-only executor`;
 }

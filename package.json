@@ -12,6 +12,9 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "vitest run",
+    "test:contracts": "forge test --no-match-path 'test/foundry/*Fork.t.sol'",
+    "test:contracts:fork": "npm run test:contracts:fork:required",
+    "test:contracts:fork:required": "node -e \"if (!process.env.BASE_RPC_URL) { console.error('BASE_RPC_URL is required'); process.exit(1); }\" && forge test --match-path 'test/foundry/*Fork.t.sol'",
     "smoke": "node dist/cli/index.js alerts test --json --message smoke"
   },
   "engines": {

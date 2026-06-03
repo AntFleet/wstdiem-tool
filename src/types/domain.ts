@@ -19,6 +19,15 @@ export interface ContractsConfig {
   autoDeleverageExecutor: Address | null;
 }
 
+export interface FlashLoanConfig {
+  provider: "uniswap-v3" | "unconfigured";
+  factory: Address | null;
+  pool: Address | null;
+  loanToken: Address | null;
+  pairToken: Address | null;
+  feeTier: number | null;
+}
+
 export interface ThresholdConfig {
   healthFactorWarn: number;
   healthFactorCritical: number;
@@ -69,6 +78,7 @@ export interface AppConfig {
     gelatoTaskId: string | null;
     chainlinkUpkeepId: string | null;
   };
+  flashLoan: FlashLoanConfig;
   storage: {
     sqlitePath: string;
   };
@@ -76,6 +86,8 @@ export interface AppConfig {
     defaultSlippageBps: number;
     maxSlippageBps: number;
     maxCurvePriceImpactBps: number;
+    exitRepayBufferBps: number;
+    maxBaseApyStalenessBlocks: number;
     transactionDeadlineSeconds: number;
   };
 }

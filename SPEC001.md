@@ -383,7 +383,7 @@ Startup sequence:
 2. Verify Base `chainId == 8453`.
 3. Verify required addresses are nonzero and contracts have code.
 4. Verify `vault.asset() == DIEM`.
-5. Verify Morpho `idToMarketParams(marketId)` matches DIEM loan token, wstDIEM collateral, configured oracle, configured IRM, and `lltv == 77e16` unless explicitly overridden.
+5. Verify Morpho `idToMarketParams(marketId)` matches DIEM loan token, wstDIEM collateral, configured oracle, configured IRM, and configured LLTV. The discovered Base DIEM/wstDIEM market uses `lltv == 86e16`.
 6. If `loopExecutor` is configured, verify `morpho.isAuthorized(position.owner, loopExecutor) == true`; otherwise print the required authorization setup and mark loop tx commands unavailable.
 7. Backfill logs from `state.lastProcessedBlock + 1`.
 8. Load current position state and last persisted metrics.
@@ -532,7 +532,7 @@ netAPY(targetLeverage) > 0.08
 oracleDeviation <= 0.01
 rpcChainId == 8453
 vault.asset() == DIEM
-market.lltv == 0.77e18
+market.lltv == 0.86e18
 morpho.isAuthorized(owner, loopExecutor) == true
 simulation succeeds before broadcast
 ```
@@ -546,9 +546,10 @@ The CLI must not try to assemble this as multiple EOA transactions. It must call
 Current product slice flash-fee boundary:
 
 - `LoopExitParams` intentionally matches the current executor ABI and does not include a separate flash-fee field.
-- The committed CLI/config schema does not select a flash-loan provider and does not define a provider fee formula. `automation.provider` is for Gelato/Chainlink monitoring automation only and must not be interpreted as flash-loan provider selection.
-- Off-chain exit planning can currently prove only that protected Curve output covers computed Morpho repay: `minDiemOut >= repayAmountDiem`.
-- Fee-inclusive repayment proof, `minDiemOut >= repayAmountDiem + flashFee`, is blocked until the flash-loan provider/fee model or executor source is specified.
+- Flash-loan provider selection is separate from `automation.provider`; `automation.provider` is for Gelato/Chainlink monitoring automation only.
+- The selected exit flash provider is Uniswap V3 on Base, using a DIEM loan from the DIEM/WETH 1% pool when live pool DIEM balance can cover the requested repay amount.
+- Off-chain exit planning proves protected Curve output covers computed Morpho repay plus configured Uniswap V3 flash fee: `minDiemOut >= repayAmountDiem + flashFee`.
+- Fee-inclusive repayment proof is computed from the selected Uniswap V3 pool fee tier once flash-provider config is present; it remains blocked if provider config, same-block liquidity evidence, or deployed executor runtime config is missing, stale, or mismatched.
 - Live `simulateContract`/`eth_call` is mandatory for exit because executor-internal flash-fee handling is the only current validation surface.
 
 Required executor interface:
@@ -679,7 +680,7 @@ Behavior:
 
 Full atomic unwind sequence:
 
-1. Flash loan DIEM sufficient to repay Morpho debt; fee sizing is executor/provider-defined until a provider fee model is specified.
+1. Flash loan DIEM sufficient to repay Morpho debt from the configured Uniswap V3 Base DIEM/WETH 1% pool; the executor must fail closed when live pool DIEM balance cannot cover the requested loan.
 2. `morpho.repay(marketParams, repayAmount, 0, owner, data)`.
 3. `morpho.withdrawCollateral(marketParams, collateralAmount, owner, executor)`. This requires prior `owner -> LoopExecutor` Morpho authorization.
 4. Swap wstDIEM to DIEM through Curve `exchange(1, 0, dx, min_dy)`.
@@ -692,44 +693,64 @@ Current product slice behavior:
 - `loop simulate --action exit --live` builds exact exit params from live Morpho position state and a live Curve quote.
 - The CLI computes `repayAmountDiem` from Morpho market totals and the owner's `borrowShares`.
 - The CLI sets `maxWstDiemToSell` to the owner's current wstDIEM collateral and `minDiemOut` to the protected Curve quote after configured slippage.
-- The implemented off-chain guard rejects an exit plan when `minDiemOut < repayAmountDiem`.
-- The current ABI/config do not expose `flashFee`, a flash provider, or a provider-specific fee formula, so the CLI cannot currently prove `minDiemOut >= repayAmountDiem + flashFee`.
+- The implemented off-chain guard rejects an exit plan when `minDiemOut < repayAmountDiem + flashFee`, where `flashFee` is derived from the configured Uniswap V3 pool fee tier and live liquidity evidence is read at the same planning block as the Morpho debt and Curve quote evidence.
 - Non-live `loop exit` projection remains blocked from producing unprotected calldata; live simulation remains required before any future broadcast path.
+
+### `loop readiness`
+
+- Reads live Base state for Curve DIEM/wstDIEM liquidity, Morpho market supply/borrow state, optional owner debt/collateral, optional owner authorization, and deployed executor runtime config.
+- Verifies a configured executor exposes `canonicalFlashPool()`, `expectedFlashFee(amount)`, and `loanTokenIsToken0()` values matching the configured Uniswap V3 flash-provider surface.
+- Reports `blocked` when Curve or Morpho are empty, owner is not configured or has no exit-ready position, owner has not authorized the executor, executor config is missing/mismatched, RPC is unavailable, or the audit gate is active.
+- Production broadcast remains unavailable even when all live dependency checks pass; readiness must keep reporting `broadcastAvailable: false` and `auditRequired: true` until a production executor audit/review gate is explicitly cleared in a later spec update.
 
 Acceptance criteria for the current product slice:
 
 - `LoopExitParams` stays aligned with the committed ABI: `owner`, `marketParams`, `repayAmountDiem`, `maxWstDiemToSell`, `minDiemOut`, `force`, and `deadline`.
 - Live exit planning reads Morpho debt/collateral state, quotes the Curve exit route, and blocks when protected Curve output cannot cover computed Morpho repay.
 - Live exit simulation calls `simulateContract`/`eth_call` with the exact executor params and reports blocked/failed/passed status before any broadcast path can exist.
-- Tests may assert `minDiemOut >= repayAmountDiem`; they must not require fee-inclusive proof until a fee input/model exists.
+- Tests must assert both `minDiemOut >= repayAmountDiem` and `minDiemOut >= repayAmountDiem + flashFee` when flash-provider config is present; tests must still assert fee-inclusive proof is blocked when provider config is absent.
 
-Executor/provider amendment required before fee-inclusive off-chain proof:
+Selected flash provider for fee-inclusive off-chain proof:
 
 - Provider selection:
-  - The spec must add a dedicated flash-loan provider configuration surface separate from `automation.provider`.
-  - The selected provider must be named explicitly, with Base deployment address, token support for DIEM, callback entrypoint/signature, callback initiator/origin semantics, and the executor storage/config field that pins the provider address.
-  - The selected provider must be the only callback sender accepted for exit flash-loan repayment. If no provider is configured, the executor must revert and the CLI must report flash-fee proof as unavailable.
+  - Use a dedicated `flashLoan` configuration surface separate from `automation.provider`.
+  - Recommended provider: Uniswap V3 on Base, configured as `provider: "uniswap-v3"`, `factory: 0x33128a8fC17869897dcE68Ed026d694621f6FDfD`, `pool: 0x80d995189ecc593672aD4703b250a5e82672EB1D`, `loanToken: DIEM`, `pairToken: WETH`, `feeTier: 10000`.
+  - Deployed evidence pinned from Base block `46839394`: DIEM token `0xF4d97F2da56e8c3098f3a8D538DB630A2606a024` has 18 decimals; DIEM/WETH 1% pool `0x80d995189ecc593672aD4703b250a5e82672EB1D` held `69.135067981093439788` DIEM. This evidence proves provider viability only up to that pool balance and must be refreshed in live planning.
+  - The executor must pin the configured Uniswap V3 pool/factory and accept only the canonical pool callback sender for exit flash-loan repayment. If no provider is configured, the executor must revert and the CLI must report flash-fee proof as unavailable.
 - Fee derivation:
-  - The spec must define exactly how `flashFee` is derived for the selected provider: on-chain quote/read method, provider-supplied callback amount, deterministic bps formula, rounding direction, and token decimals.
-  - Once the provider is chosen, the implementation spec must decide whether `flashFee` is a CLI/config input, an executor-read internal value, or simulation-only output. The decision must identify the canonical source of truth and reject conflicting values.
-  - Off-chain planning may prove `minDiemOut >= repayAmountDiem + flashFee` only when the fee value is read or computed from that provider-specific rule at the same block as the Curve route quote and Morpho debt read.
-  - Rounding must be conservative: any division or provider bps formula must round the required repayment up, never down.
+  - Canonical executor fee source is the Uniswap V3 callback arguments `fee0` or `fee1` from `uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata data)`, matching whichever side is DIEM.
+  - Canonical CLI planning fee is the deterministic Uniswap V3 fee-tier formula: `flashFee = ceil(repayAmountDiem * feeTier / 1_000_000)`. For the selected 1% pool, `feeTier = 10000`; DIEM has 18 decimals; all arithmetic is integer wei arithmetic with rounding up.
+  - The CLI must reject conflicting configured pool/token/fee evidence and must prove `minDiemOut >= repayAmountDiem + flashFee` only when the provider config and live pool evidence are from the same block as the Curve route quote and Morpho debt read.
 - Executor callback validation:
-  - The executor must validate callback sender, loan token, loan amount, fee amount, callback initiator, encoded owner/action context, deadline, non-reentrancy, and Morpho owner authorization before continuing the exit path.
+  - The executor constructor must fail closed if the configured Uniswap V3 factory does not resolve `loanToken`/`pairToken`/`feeTier` to the configured flash pool, or if any required protocol address is zero.
+  - The executor constructor must reject non-contract addresses for the configured Uniswap V3 factory, flash pool, loan token, pair token, Morpho, Curve pool, and wstDIEM contract.
+  - The executor must validate `msg.sender` with the expected Uniswap V3 pool derived from factory, token0, token1, and fee tier; use `CallbackValidation.verifyCallback(factory, poolKey)` or equivalent canonical-pool derivation.
+  - The executor must not expose an external callback-arming function; flash callback context must be armed only inside the owner-authorized exit flow.
+  - A deployed executor must expose read-only config proof helpers for `canonicalFlashPool()`, `expectedFlashFee(amount)`, and `loanTokenIsToken0()` so fork tests and CLI readiness checks can verify runtime configuration without relying on deployment notes alone.
+  - The current exit executor must require `msg.sender == owner`; any keeper-operated version requires an explicit owner-signed intent or tightly scoped operator authorization before deployment.
+  - The executor must validate loan token, loan amount, fee amount, encoded owner/action context, deadline, nonce, non-reentrancy, and Morpho owner authorization before continuing the exit path.
   - The executor must repay flash principal plus fee atomically, refund remaining DIEM/wstDIEM dust to the owner, and revert if Curve output cannot cover `repayAmountDiem + flashFee`.
   - The executor must emit an exit event or expose a simulation-readable result that includes `repayAmountDiem`, `flashFee`, total flash repayment, wstDIEM sold, DIEM received, and dust refunded.
 - Simulation evidence:
-  - `loop simulate --action exit --live` must include provider identity, provider fee source, fee block number, Morpho debt block number, Curve quote block number, exact executor calldata, `simulateContract`/`eth_call` status, and gas estimate.
+  - `loop simulate --action exit --live` must include provider identity, provider fee source, fee block number, Morpho debt block number, Curve quote block number, Uniswap V3 pool DIEM balance evidence, exact executor calldata, `simulateContract`/`eth_call` status, and gas estimate.
+  - When executor event logs are available from a local/fork simulation harness, the simulator must decode `LoopExitExecuted` and fail closed if emitted `repayAmountDiem`, `flashFee`, or `totalFlashRepaymentDiem` conflict with the off-chain exit proof. Standard `eth_call` may not expose logs; absence of logs is not by itself a failure.
   - Simulation must fail closed when provider config is missing, callback validation cannot be proven by the executor source/ABI, fee evidence is stale relative to the route/debt reads, or `minDiemOut < repayAmountDiem + flashFee`.
   - A passed simulation is required before broadcast and is evidence of executor-internal callback validation; it is not a substitute for the off-chain fee inequality when the fee model is available.
 - CLI output:
-  - JSON output must expose `repayAmountDiem`, `flashFee`, `flashFeeSource`, `flashLoanProvider`, `totalFlashRepaymentDiem`, `minDiemOut`, `feeInclusiveRepayCovered`, route quote evidence, live simulation status, and gas estimate.
-  - Table output must show the same safety decision in operator-readable form and must print `flashFee: unresolved` until provider-specific fee derivation is configured.
+  - JSON output must expose `repayAmountDiem`, `flashFee`, `flashFeeSource`, `flashLoanProvider`, `totalFlashRepaymentDiem`, `minDiemOut`, `feeInclusiveRepayCovered`, route quote evidence, `liveMorphoDebtBlockNumber`, `liveFlashLoanLiquidity`, decoded `exitExecutionEvidence` when available, live simulation status, and gas estimate.
+  - Table output must show the same safety decision in operator-readable form and must print `flashFee: unresolved` only when provider-specific fee derivation is not configured or cannot be proven from same-block evidence.
   - The CLI must never print a concrete flash-fee amount inferred from an unspecified provider or from `automation.provider`.
+- Rejected providers:
+  - Morpho Blue Base `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb`: zero-fee `flashLoan(token, assets, data)` with callback `onMorphoFlashLoan(uint256 assets, bytes data)` is the cleanest primitive, but Base block `46839394` showed zero DIEM balance in Morpho, so it cannot fund DIEM exits until liquidity appears.
+  - Balancer V2 Vault Base `0xBA12222222228d8Ba445958a75a0704d566BF2C8`: standard `flashLoan` and `receiveFlashLoan` callback, but Base block `46839394` showed zero DIEM balance in the Vault.
+  - Uniswap V4 PoolManager Base `0x498581fF718922c3f8e6A244956aF099B2652b2b`: held `109.981805017303353942` DIEM at Base block `46839394`, but the singleton unlock/delta-settlement flow is materially more complex than V3 flash and is not the first executor target.
+  - Aerodrome Base-native: relevant Base venue, but the proven V2 DIEM/USDC pool held only `0.000000026763775930` DIEM at Base block `46839394`; Slipstream flash viability was not proven by official/deployed pool evidence.
+  - Aave V3 Base: DIEM reserve configuration returned zero at Base block `46839394`, so DIEM is not a configured flash-loan reserve.
 - Fork tests:
-  - Provider-specific fork tests must run against Base fork state with the selected provider address and must cover callback-sender rejection, wrong-token rejection, stale/deadline rejection, insufficient `minDiemOut` including fee, successful fee-inclusive repayment, owner dust refund, and no retained executor balances.
+  - Provider-specific fork tests must run against Base fork state with the selected Uniswap V3 factory/pool and must cover pool discovery, token-pair membership without assuming DIEM is token0, live DIEM balance cap, callback-sender rejection, wrong-token rejection, stale/deadline rejection, insufficient `minDiemOut` including fee, successful fee-inclusive repayment, owner dust refund, and no retained executor balances.
+  - Executor deployment fork tests must deploy the executor locally on a Base fork without broadcasting, using the configured Base Uniswap V3, Morpho, Curve, and wstDIEM addresses, and prove constructor config, canonical flash pool derivation, deterministic fee derivation, token side, and zero retained balances immediately after deployment.
   - Fork tests must assert the off-chain plan's `flashFee` equals the provider/executor fee observed during callback and that `minDiemOut >= repayAmountDiem + flashFee` gates calldata generation.
-  - Until the provider is selected and the executor source or verified ABI exposes fee/callback behavior, fork tests must assert that fee-inclusive proof remains blocked rather than assuming a provider.
+  - Fork tests must run at pinned block `46839394` and at latest block. Pinned-block tests prove deterministic behavior against known evidence; latest-block tests prove current liquidity and deployment assumptions still hold.
 
 Slippage protection:
 
@@ -818,16 +839,16 @@ contracts:
   curveFactory: "0xd2002373543Ce3527023C75e7518C274A51ce712"
   uniswapV4PoolManager: "0x498581fF718922c3f8e6A244956aF099B2652b2b"
 
-  inferenceVault: null
-  feeRouter: null
-  curvePool: null
-  morphoOracle: null
+  inferenceVault: "0x4751BA2b09374C1929FC01734a166e3c8cd75810"
+  feeRouter: "0x21fe048B10dC9bED2Ee0Ae76724C627CA7F35F61"
+  curvePool: "0x39A4b4779C71E1A18d500627639682c9583Ee86f"
+  morphoOracle: "0xBAEC9cccba9884d403dBcee15455e28781f1FD72"
   loopExecutor: null
   autoDeleverageExecutor: null
 
 morpho:
-  marketId: null
-  lltvWad: "770000000000000000"
+  marketId: "0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894"
+  lltvWad: "860000000000000000"
 
 wallet:
   privateKeyEnv: WSTDIEM_OPERATOR_PRIVATE_KEY
@@ -881,6 +902,7 @@ execution:
 | `status` | One-shot snapshot | `--config`, `--json`, `--owner` | Table or JSON |
 | `loop open` | Open leveraged position | `--target-leverage`, `--initial-diem`, `--slippage-bps`, `--dry-run`, `--json` | Simulation summary, confirmation, tx hash |
 | `loop rebalance` | Move to target leverage | `--target-leverage`, `--slippage-bps`, `--dry-run`, `--json` | Simulation summary, tx hash |
+| `loop readiness` | Live exit readiness checklist | `--owner`, `--json` | Curve, Morpho, executor, owner, and audit blockers |
 | `loop authorize-executor` | Authorize executor on Morpho | `--owner`, `--dry-run`, `--json` | Authorization status, tx hash |
 | `loop exit` | Full unwind | `--slippage-bps`, `--force`, `--dry-run`, `--json` | Exit quote, warning, tx hash |
 | `loop simulate` | Dry-run only | `--action open|rebalance|exit`, action flags | JSON or table projection |
@@ -981,18 +1003,33 @@ Testing split:
 
 - Unit tests: config parsing, decimal math, APY windows, alert thresholds, SQLite persistence, Morpho share-to-asset math, Curve TVL normalization.
 - Integration tests: mocked viem client, websocket reconnect, alert delivery.
-- Foundry fork tests: executor open/rebalance/exit, Curve slippage paths, Morpho HF invariants, auto-deleverager executor. Use:
+- Local Foundry tests: dependency-free Solidity harness for Uniswap V3 exit flash callback validation, including factory-derived canonical pool checks, mocked Morpho repay, mocked collateral withdraw, mocked Curve swap, flash repayment, and owner dust refund. Use:
 
 ```text
-forge test --fork-url $BASE_RPC_URL --match-path test/wstdiem-loop-manager/*.t.sol
+npm run test:contracts
 ```
+
+- Foundry fork tests: Base flash-provider evidence, local no-broadcast executor deployment readiness, and env-gated full-unwind readiness checks. Use:
+
+```text
+npm run test:contracts:fork
+```
+
+`BaseFlashProviderFork.t.sol` always runs when `BASE_RPC_URL` is set and proves the configured Uniswap V3 DIEM/WETH 1% provider deployment, token pair, fee tier, DIEM decimals, and nonzero DIEM inventory at both pinned and latest Base blocks. `BaseLoopExecutorDeployFork.t.sol` deploys the executor locally on a Base fork without broadcasting and proves the constructor/runtime config against the real provider and protocol addresses. `BaseFullUnwindReadinessFork.t.sol` always proves the known wstDIEM vault, Curve pool, Morpho oracle, and Morpho market deployment wiring when `BASE_RPC_URL` is set. It skips full-unwind readiness until at least one full-unwind env var is provided; once configured, it requires all of:
+
+```text
+WSTDIEM_FORK_LOOP_EXECUTOR
+WSTDIEM_FORK_OWNER
+```
+
+The readiness fork uses the configured wstDIEM vault, Curve pool, Morpho oracle, and market id by default, checks deployed code, vault asset/NAV, Curve balances and exit quote, Morpho market params, owner debt/collateral, and `owner -> loopExecutor` Morpho authorization before any full exit fork should be attempted. Optional `WSTDIEM_FORK_INFERENCE_VAULT`, `WSTDIEM_FORK_CURVE_POOL`, `WSTDIEM_FORK_MORPHO_ORACLE`, and `WSTDIEM_FORK_MARKET_ID` env vars may override the known defaults for alternate deployment checks.
 
 ## Open Questions
 
-1. Actual Base mainnet addresses for `InferenceVault`, `FeeRouter`, `Curve DIEM/wstDIEM pool`, `Morpho oracle`, `marketId`, and executor contracts are not committed in the current top-level `broadcast/` tree.
-2. Flash-loan provider and fee model must be selected: Balancer, Morpho flash liquidity, Uniswap, or another Base provider. Once selected, decide whether flash fee is a CLI/config input, executor-read internal value, or simulation-only output. Until this is specified, fee-inclusive off-chain proof for `minDiemOut >= repayAmountDiem + flashFee` remains blocked.
+1. Base mainnet addresses for `InferenceVault`/wstDIEM, `FeeRouter`, Curve DIEM/wstDIEM, Morpho oracle, and Morpho market id are now configured from deployed evidence. The Morpho market id `0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894` resolves to DIEM loan token, wstDIEM collateral, oracle `0xBAEC9cccba9884d403dBcee15455e28781f1FD72`, adaptive Curve IRM, and `86e16` LLTV. Live reads showed nonzero vault assets/supply but zero Curve DIEM/wstDIEM balances and zero Morpho supply/borrow totals, so full unwind remains blocked on Curve liquidity, Morpho liquidity/position state, and a funded/authorized owner position.
+2. Flash-loan provider and fee model are selected: Uniswap V3 Base DIEM/WETH 1% with deterministic fee-tier planning and callback-supplied executor repayment. The repo now includes same-block live pool balance evidence, decoded executor event evidence when simulation returns logs, local callback harness tests, Base provider fork tests, and no-broadcast executor deployment fork tests. Remaining work is production executor audit/hardening and full unwind proof against live liquidity plus a funded/authorized owner position.
 3. The requested open sequence includes `curve.swap`; the source vault already mints wstDIEM through `vault.deposit`. Protocol team must decide whether open should use direct deposit, Curve acquisition of wstDIEM, or a hybrid route.
-4. The loop executor and auto-deleverager contracts do not exist in the repo and require a separate Solidity spec/audit before mainnet use.
+4. The repo now contains a local Uniswap V3 flash-exit executor harness with mocked unwind tests and Base provider/readiness fork tests, but production mainnet executor hardening, full unwind fork proof, and auto-deleverager contracts still require a separate Solidity spec/audit before mainnet use.
 5. The Curve pool `TokenExchange` event signature must be verified against the exact deployed StableSwap NG implementation ABI before coding log decoding.
 6. Hardware wallet support scope needs a decision: Ledger only, or also Safe transaction building.
 7. Confirm whether `riskFreeRate = 5%` remains static or should be read from an external USDC yield source in later versions.

@@ -54,6 +54,7 @@ export async function quoteCurveExitRoute(input: {
   client: RouteQuoteClient;
   wstDiemIn: bigint;
   slippageBps: number;
+  blockNumber?: bigint;
 }): Promise<RouteQuoteResult> {
   const readiness: string[] = [];
   if (input.config.contracts.curvePool === null || input.config.contracts.inferenceVault === null) {
@@ -79,7 +80,7 @@ export async function quoteCurveExitRoute(input: {
   if (chainId !== input.config.chainId) {
     return { readiness: [`unexpected route quote chainId ${chainId}; expected ${input.config.chainId}`] };
   }
-  const blockNumber = await input.client.getBlockNumber();
+  const blockNumber = input.blockNumber ?? (await input.client.getBlockNumber());
   const [expectedDiemOutAtNav, quotedDiemOut] = await Promise.all([
     input.client.readContract({
       address: input.config.contracts.inferenceVault,

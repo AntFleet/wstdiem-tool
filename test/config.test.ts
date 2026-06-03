@@ -14,16 +14,36 @@ afterEach(() => {
 });
 
 describe("config loading", () => {
-  it("interpolates empty environment placeholders as null", () => {
+  it("keeps whole-value missing env placeholders optional but rejects partial unresolved strings", () => {
     delete process.env.DOES_NOT_EXIST_FOR_WSTDIEM_TEST;
     expect(interpolateEnv("${DOES_NOT_EXIST_FOR_WSTDIEM_TEST}")).toBeNull();
+    expect(() => interpolateEnv("https://rpc.example/${DOES_NOT_EXIST_FOR_WSTDIEM_TEST}")).toThrow(
+      /Unresolved env var/,
+    );
   });
 
   it("loads SPEC001 defaults and reports required deployment gaps", () => {
     const config = loadConfig({ configPath: "/tmp/does-not-exist-wstdiem.yaml" });
     expect(config.chainId).toBe(8453);
-    expect(missingDeploymentKeys(config)).toContain("inferenceVault");
-    expect(missingDeploymentKeys(config)).toContain("marketId");
+    expect(config.contracts.inferenceVault).toBe("0x4751BA2b09374C1929FC01734a166e3c8cd75810");
+    expect(config.contracts.feeRouter).toBe("0x21fe048B10dC9bED2Ee0Ae76724C627CA7F35F61");
+    expect(config.contracts.curvePool).toBe("0x39A4b4779C71E1A18d500627639682c9583Ee86f");
+    expect(config.contracts.morphoOracle).toBe("0xBAEC9cccba9884d403dBcee15455e28781f1FD72");
+    expect(config.morpho.marketId).toBe("0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894");
+    expect(config.morpho.lltvWad).toBe("860000000000000000");
+    expect(config.execution.exitRepayBufferBps).toBe(200);
+    expect(config.execution.maxBaseApyStalenessBlocks).toBe(7_200);
+    expect(config.flashLoan).toMatchObject({
+      provider: "uniswap-v3",
+      factory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+      pool: "0x80d995189ecc593672aD4703b250a5e82672EB1D",
+      loanToken: DEFAULT_CONFIG.contracts.diem,
+      pairToken: DEFAULT_CONFIG.contracts.weth,
+      feeTier: 10_000,
+    });
+    expect(missingDeploymentKeys(config)).toContain("loopExecutor");
+    expect(missingDeploymentKeys(config)).not.toContain("morphoOracle");
+    expect(missingDeploymentKeys(config)).not.toContain("marketId");
   });
 
   it("loads YAML overrides", () => {
@@ -43,6 +63,14 @@ describe("config loading", () => {
     expect(config.position.owner).toBe("0x0000000000000000000000000000000000000001");
   });
 
+  it("keeps the checked-in config example parseable", () => {
+    const config = loadConfig({ configPath: path.resolve("config.example.yaml") });
+    expect(config.flashLoan.provider).toBe("uniswap-v3");
+    expect(config.flashLoan.loanToken).toBe(config.contracts.diem);
+    expect(config.flashLoan.pairToken).toBe(config.contracts.weth);
+    expect(config.morpho.lltvWad).toBe("860000000000000000");
+  });
+
   it("rejects configuration that weakens SPEC001 safety thresholds", () => {
     expect(() =>
       loadConfig({
@@ -52,6 +80,8 @@ describe("config loading", () => {
             defaultSlippageBps: 50,
             maxSlippageBps: 301,
             maxCurvePriceImpactBps: 100,
+            exitRepayBufferBps: 200,
+            maxBaseApyStalenessBlocks: 7_200,
             transactionDeadlineSeconds: 300,
           },
         },
@@ -92,11 +122,25 @@ describe("config loading", () => {
             defaultSlippageBps: 150,
             maxSlippageBps: 100,
             maxCurvePriceImpactBps: 100,
+            exitRepayBufferBps: 200,
+            maxBaseApyStalenessBlocks: 7_200,
             transactionDeadlineSeconds: 300,
           },
         },
       }),
     ).toThrow(/defaultSlippageBps/);
+
+    expect(() =>
+      loadConfig({
+        configPath: "/tmp/does-not-exist-wstdiem.yaml",
+        overrides: {
+          execution: {
+            ...DEFAULT_CONFIG.execution,
+            exitRepayBufferBps: 0,
+          },
+        },
+      }),
+    ).toThrow(/exitRepayBufferBps/);
 
     expect(() =>
       loadConfig({
@@ -110,5 +154,55 @@ describe("config loading", () => {
         },
       }),
     ).toThrow(/curveDepthWarn/);
+  });
+
+  it("rejects incomplete or mismatched Uniswap V3 flash provider config", () => {
+    expect(() =>
+      loadConfig({
+        configPath: "/tmp/does-not-exist-wstdiem.yaml",
+        overrides: {
+          flashLoan: {
+            ...DEFAULT_CONFIG.flashLoan,
+            pool: null,
+          },
+        },
+      }),
+    ).toThrow(/pool is required/);
+
+    expect(() =>
+      loadConfig({
+        configPath: "/tmp/does-not-exist-wstdiem.yaml",
+        overrides: {
+          flashLoan: {
+            ...DEFAULT_CONFIG.flashLoan,
+            loanToken: DEFAULT_CONFIG.contracts.weth,
+          },
+        },
+      }),
+    ).toThrow(/loanToken must match/);
+
+    expect(() =>
+      loadConfig({
+        configPath: "/tmp/does-not-exist-wstdiem.yaml",
+        overrides: {
+          flashLoan: {
+            ...DEFAULT_CONFIG.flashLoan,
+            pairToken: DEFAULT_CONFIG.contracts.diem,
+          },
+        },
+      }),
+    ).toThrow(/pairToken must differ/);
+
+    expect(() =>
+      loadConfig({
+        configPath: "/tmp/does-not-exist-wstdiem.yaml",
+        overrides: {
+          flashLoan: {
+            ...DEFAULT_CONFIG.flashLoan,
+            feeTier: 100_000,
+          },
+        },
+      }),
+    ).toThrow(/supported Uniswap V3 tier/);
   });
 });

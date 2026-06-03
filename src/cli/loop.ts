@@ -6,6 +6,7 @@ import {
   buildLoopOpenParams,
   buildLoopRebalanceParams,
   encodeLoopExecutorCall,
+  unsupportedExecutorAction,
 } from "../loop/params.js";
 import { buildExitFlashFeeProof } from "../loop/flashFeeProof.js";
 import { staticLoopPreflight } from "../loop/preflight.js";
@@ -192,6 +193,10 @@ export function projectLoopCommand(config: AppConfig, options: LoopCommandOption
   if (options.action === "exit" && options.force === true) {
     blockers.push("FORCE EXIT CAN REALIZE UNBOUNDED CURVE SLIPPAGE; simulation remains mandatory");
   }
+  const unsupported = unsupportedExecutorAction(options.action);
+  if (unsupported !== null) {
+    blockers.push(unsupported);
+  }
 
   const projectedPositionNotionalDiemWei =
     initialDiemWei !== undefined && options.targetLeverage !== undefined
@@ -202,7 +207,7 @@ export function projectLoopCommand(config: AppConfig, options: LoopCommandOption
     blockers.push("unable to build exact LoopExecutor params from current config");
   }
   const executorCalldata =
-    executorParams !== null && config.contracts.loopExecutor !== null
+    executorParams !== null && config.contracts.loopExecutor !== null && unsupported === null
       ? encodeLoopExecutorCall(options.action, executorParams)
       : undefined;
 
@@ -216,7 +221,7 @@ export function projectLoopCommand(config: AppConfig, options: LoopCommandOption
       reason: "SPEC001 executor simulation is not implemented in this product slice.",
     },
     executorParamsAvailable: executorParams !== null,
-    exitFlashFeeProof: buildExitFlashFeeProof(options.action, executorParams),
+    exitFlashFeeProof: buildExitFlashFeeProof(config, options.action, executorParams),
     executorCalldata,
     preflightChecks,
     targetLeverage: options.targetLeverage,

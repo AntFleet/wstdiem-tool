@@ -1,6 +1,9 @@
 node_modules/
 dist/
 coverage/
+cache/
+out/
+.omc/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

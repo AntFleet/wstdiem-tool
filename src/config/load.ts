@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { DEFAULT_CONFIG } from "./defaults.js";
 import type { AppConfig } from "../types/domain.js";
+import { ALLOWED_UNISWAP_V3_FEE_TIERS } from "../loop/uniswapV3FlashFee.js";
 
 dotenv.config();
 
@@ -90,6 +91,14 @@ const configSchema = z
       gelatoTaskId: z.string().nullable(),
       chainlinkUpkeepId: z.string().nullable(),
     }),
+    flashLoan: z.object({
+      provider: z.enum(["uniswap-v3", "unconfigured"]),
+      factory: nullableAddressSchema,
+      pool: nullableAddressSchema,
+      loanToken: nullableAddressSchema,
+      pairToken: nullableAddressSchema,
+      feeTier: z.number().int().positive().nullable(),
+    }),
     storage: z.object({
       sqlitePath: z.string().min(1),
     }),
@@ -97,6 +106,8 @@ const configSchema = z
       defaultSlippageBps: z.number().int().min(0).max(300),
       maxSlippageBps: z.number().int().min(0).max(300),
       maxCurvePriceImpactBps: z.number().int().min(0).max(100),
+      exitRepayBufferBps: z.number().int().min(1).max(10_000),
+      maxBaseApyStalenessBlocks: z.number().int().min(0),
       transactionDeadlineSeconds: z.number().int().positive(),
     }),
   })
@@ -129,6 +140,42 @@ const configSchema = z
         message: "spreadCriticalNetApy35 must be less than or equal to spreadWarnNetApy35",
       });
     }
+    if (config.flashLoan.provider === "uniswap-v3") {
+      for (const key of ["factory", "pool", "loanToken", "pairToken", "feeTier"] as const) {
+        if (config.flashLoan[key] === null) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["flashLoan", key],
+            message: `${key} is required when flashLoan.provider is uniswap-v3`,
+          });
+        }
+      }
+      if (config.flashLoan.loanToken !== null && config.flashLoan.loanToken.toLowerCase() !== config.contracts.diem.toLowerCase()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["flashLoan", "loanToken"],
+          message: "flashLoan.loanToken must match contracts.diem",
+        });
+      }
+      if (
+        config.flashLoan.loanToken !== null &&
+        config.flashLoan.pairToken !== null &&
+        config.flashLoan.loanToken.toLowerCase() === config.flashLoan.pairToken.toLowerCase()
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["flashLoan", "pairToken"],
+          message: "flashLoan.pairToken must differ from loanToken",
+        });
+      }
+      if (config.flashLoan.feeTier !== null && !ALLOWED_UNISWAP_V3_FEE_TIERS.has(config.flashLoan.feeTier)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["flashLoan", "feeTier"],
+          message: "flashLoan.feeTier must be a supported Uniswap V3 tier",
+        });
+      }
+    }
   });
 
 export interface LoadConfigOptions {
@@ -137,10 +184,22 @@ export interface LoadConfigOptions {
 }
 
 export function interpolateEnv(input: string): string | null {
+  const missing = new Set<string>();
   const interpolated = input.replace(/\$\{([A-Z0-9_]+)\}/g, (_match, name: string) => {
-    return process.env[name] ?? "";
+    const value = process.env[name];
+    if (value === undefined) {
+      missing.add(name);
+      return "";
+    }
+    return value;
   });
-  return interpolated.trim() === "" ? null : interpolated;
+  if (interpolated.trim() === "") {
+    return null;
+  }
+  if (missing.size > 0) {
+    throw new Error(`Unresolved env var(s) in config value: ${Array.from(missing).join(", ")}`);
+  }
+  return interpolated;
 }
 
 function resolveEnvPlaceholders(value: unknown): unknown {

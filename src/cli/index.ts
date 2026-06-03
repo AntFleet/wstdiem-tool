@@ -8,12 +8,13 @@ import { Storage } from "../storage/sqlite.js";
 import { createViemLoopSimulationClient } from "../contracts/loopSimulationClient.js";
 import { simulateMorphoAuthorization } from "../loop/authorization.js";
 import { buildLiveLoopExitPlan } from "../loop/exitPlan.js";
+import { buildLoopReadiness } from "../loop/readiness.js";
 import { buildConfiguredLoopSafetyEvidence } from "../loop/safetyEvidence.js";
 import { simulateLoopExecutorCall } from "../loop/simulator.js";
 import type { AppConfig, Severity } from "../types/domain.js";
 import { CliError, toCliError } from "./errors.js";
 import { assertBroadcastNotAllowed, buildLoopExecutorParamsForCommand, projectLoopCommand } from "./loop.js";
-import { jsonEnvelope, printJson, renderStatusTable } from "./output.js";
+import { jsonEnvelope, printJson, renderLoopReadinessTable, renderStatusTable, stringifyJson } from "./output.js";
 import { parseAddress, parseStrictFloat, parseStrictInteger } from "./parse.js";
 import { buildStatus, runWatchOnce } from "./status.js";
 
@@ -46,7 +47,7 @@ async function runAction<T>(
     } else if (typeof data === "string") {
       console.log(data);
     } else {
-      console.log(JSON.stringify(data, null, 2));
+      console.log(stringifyJson(data));
     }
   } catch (error) {
     const cliError = toCliError(error);
@@ -118,6 +119,28 @@ program
   });
 
 const loop = program.command("loop").description("Loop position commands");
+
+loop
+  .command("readiness")
+  .description("Read live Curve, Morpho, executor, and owner exit readiness")
+  .option("--owner <address>", "position owner override")
+  .action(async function (this: Command) {
+    await runAction(this, "loop readiness", async (config) => {
+      const ownerOption = this.opts<{ owner?: string }>().owner;
+      const owner = ownerOption === undefined ? config.position.owner : parseAddress(ownerOption, "--owner");
+      let client: Awaited<ReturnType<typeof createViemLoopSimulationClient>> | undefined;
+      try {
+        client = (await createViemLoopSimulationClient(config)) ?? undefined;
+      } catch {
+        client = undefined;
+      }
+      const result = await buildLoopReadiness({ config, owner, client });
+      if (this.optsWithGlobals<GlobalOptions>().json) {
+        return result;
+      }
+      return renderLoopReadinessTable(result);
+    });
+  });
 
 function addLoopAction(name: "open" | "rebalance" | "exit"): Command {
   const cmd = loop.command(name);
@@ -261,6 +284,12 @@ loop
             routeSlippage: exitPlan.routeSlippage,
           };
         }
+        if (exitPlan.flashLoanLiquidity !== undefined) {
+          safetyEvidence = {
+            ...safetyEvidence,
+            flashLoanLiquidity: exitPlan.flashLoanLiquidity,
+          };
+        }
       }
       const liveSimulation = await simulateLoopExecutorCall({
         config,
@@ -276,6 +305,8 @@ loop
         executorParamsAvailable: params !== null,
         liveRouteQuote: exitPlan?.routeQuote,
         liveRouteQuoteReadiness: exitPlan?.readiness,
+        liveFlashLoanLiquidity: exitPlan?.flashLoanLiquidity,
+        liveMorphoDebtBlockNumber: exitPlan?.morphoDebtBlockNumber,
         kind:
           liveSimulation.status === "passed"
             ? ("live_passed" as const)
