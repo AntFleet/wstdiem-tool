@@ -31,7 +31,10 @@ export async function simulateLoopExecutorCall(input: {
 }): Promise<LoopSimulationResult> {
   let preflightChecks: Awaited<ReturnType<typeof runLoopPreflight>>;
   try {
-    preflightChecks = await runLoopPreflight(input.config, input.owner, input.client);
+    preflightChecks = await runLoopPreflight(input.config, input.owner, input.client, {
+      action: input.action,
+      params: input.params,
+    });
   } catch (error) {
     return {
       status: "failed",

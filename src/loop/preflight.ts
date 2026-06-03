@@ -1,8 +1,9 @@
 import { inferenceVaultAbi } from "../abi/inferenceVault.js";
 import { morphoAbi } from "../abi/morpho.js";
 import { missingDeploymentKeys } from "../config/load.js";
+import { WAD } from "../metrics/math.js";
 import type { Address, AppConfig, Hex } from "../types/domain.js";
-import type { PreflightCheck } from "./types.js";
+import type { LoopAction, LoopExecutorParams, LoopOpenParams, LoopRebalanceParams, PreflightCheck } from "./types.js";
 
 interface ReadMorphoMarketParams {
   loanToken: Address;
@@ -21,6 +22,11 @@ export interface LoopPreflightClient {
     functionName: string;
     args?: readonly unknown[];
   }): Promise<unknown>;
+}
+
+export interface LoopPreflightContext {
+  action: LoopAction;
+  params: LoopExecutorParams | null;
 }
 
 function check(key: string, status: PreflightCheck["status"], message: string): PreflightCheck {
@@ -91,6 +97,16 @@ function parseMorphoMarketParams(value: unknown): ReadMorphoMarketParams | null 
   return null;
 }
 
+function numberToWad(value: number): bigint {
+  return BigInt(Math.round(value * 1_000_000)) * (WAD / 1_000_000n);
+}
+
+function formatWadDecimal(value: bigint, precision = 4): string {
+  const whole = value / WAD;
+  const fraction = (value % WAD).toString().padStart(18, "0").slice(0, precision);
+  return `${whole}.${fraction}`;
+}
+
 async function checkMorphoMarketParams(config: AppConfig, client: LoopPreflightClient): Promise<PreflightCheck> {
   if (config.morpho.marketId === null || config.contracts.inferenceVault === null || config.contracts.morphoOracle === null) {
     return check(
@@ -136,10 +152,72 @@ async function checkMorphoMarketParams(config: AppConfig, client: LoopPreflightC
   );
 }
 
+function projectedHealthFactorWad(input: {
+  config: AppConfig;
+  action: LoopAction;
+  params: LoopExecutorParams | null;
+}): bigint | null {
+  if (input.params === null) {
+    return null;
+  }
+  const lltv = BigInt(input.config.morpho.lltvWad);
+  if (input.action === "rebalance") {
+    const params = input.params as LoopRebalanceParams;
+    const leverage = params.targetLeverageWad;
+    if (leverage <= WAD) {
+      return null;
+    }
+    return (lltv * leverage) / (leverage - WAD);
+  }
+  if (input.action === "open") {
+    const params = input.params as LoopOpenParams;
+    const collateralValueDiem = params.initialDiem + params.flashDiem;
+    if (params.minBorrowedDiem === 0n) {
+      return null;
+    }
+    return (collateralValueDiem * lltv) / params.minBorrowedDiem;
+  }
+  return null;
+}
+
+function checkProjectedHealthFactor(config: AppConfig, context?: LoopPreflightContext): PreflightCheck {
+  if (context === undefined || context.params === null) {
+    return check(
+      "projected-health-factor",
+      "fail",
+      "exact LoopExecutor params are required for projected post-loop health factor validation",
+    );
+  }
+  if (context.action === "exit") {
+    return check(
+      "projected-health-factor",
+      "skip",
+      "exit projected health factor requires live position unwind sizing before validation",
+    );
+  }
+  const projected = projectedHealthFactorWad({
+    config,
+    action: context.action,
+    params: context.params,
+  });
+  if (projected === null) {
+    return check("projected-health-factor", "fail", "unable to compute projected post-loop health factor");
+  }
+  const minimum = numberToWad(config.thresholds.minPostLoopHealthFactor);
+  return check(
+    "projected-health-factor",
+    projected >= minimum ? "pass" : "fail",
+    projected >= minimum
+      ? `projected post-loop HF ${formatWadDecimal(projected)} >= ${config.thresholds.minPostLoopHealthFactor}`
+      : `projected post-loop HF ${formatWadDecimal(projected)} below required ${config.thresholds.minPostLoopHealthFactor}`,
+  );
+}
+
 export async function runLoopPreflight(
   config: AppConfig,
   owner: Address | null,
   client?: LoopPreflightClient,
+  context?: LoopPreflightContext,
 ): Promise<PreflightCheck[]> {
   const checks = staticLoopPreflight(config, owner);
   if (client === undefined || hasPreflightFailures(checks)) {
@@ -217,9 +295,9 @@ export async function runLoopPreflight(
   }
 
   checks.push(await checkMorphoMarketParams(config, client));
+  checks.push(checkProjectedHealthFactor(config, context));
 
   const unavailableStrategyGates = [
-    ["projected-health-factor", "projected post-loop health factor check is not implemented"],
     ["curve-depth", "Curve depth and position-size check is not implemented"],
     ["net-apy", "target leverage net APY check is not implemented"],
     ["oracle-deviation", "Morpho oracle deviation check is not implemented"],

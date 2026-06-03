@@ -169,6 +169,24 @@ describe("loop preflight and simulation", () => {
     expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("route-slippage:fail");
   });
 
+  it("passes projected health factor for conservative target leverage", async () => {
+    const config = completeConfig();
+    const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 1.7, slippageBps: 25, nowSeconds: 1 });
+    const result = await simulateLoopExecutorCall({
+      config,
+      action: "rebalance",
+      owner,
+      from: owner,
+      params,
+      client: new MockSimulationClient({ gas: 999n }),
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain(
+      "projected-health-factor:pass",
+    );
+    expect(result.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain("curve-depth:fail");
+  });
+
   it("blocks live simulation without a transaction sender", async () => {
     const config = completeConfig();
     const params = buildLoopRebalanceParams({ config, owner, targetLeverage: 2, slippageBps: 25, nowSeconds: 1 });
