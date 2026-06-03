@@ -1,6 +1,14 @@
 import { encodeFunctionData } from "viem";
 import { morphoAbi } from "../abi/morpho.js";
 import { missingDeploymentKeys } from "../config/load.js";
+import {
+  buildLoopExitParams,
+  buildLoopOpenParams,
+  buildLoopRebalanceParams,
+  encodeLoopExecutorCall,
+} from "../loop/params.js";
+import { staticLoopPreflight } from "../loop/preflight.js";
+import type { LoopExecutorParams, PreflightCheck } from "../loop/types.js";
 import { parseDecimalToUnits, WAD } from "../metrics/math.js";
 import type { Address, AppConfig, Hex } from "../types/domain.js";
 import { CliError } from "./errors.js";
@@ -13,6 +21,9 @@ export interface LoopProjection {
     status: "not_run";
     reason: string;
   };
+  executorParamsAvailable: boolean;
+  executorCalldata?: Hex;
+  preflightChecks: PreflightCheck[];
   targetLeverage?: number;
   initialDiem?: string;
   initialDiemWei?: string;
@@ -103,6 +114,7 @@ export function projectLoopCommand(config: AppConfig, options: LoopCommandOption
     "executor simulation unavailable: this command is projection-only and has not run simulateContract/eth_call or estimateGas",
   );
   const owner = options.owner ?? config.position.owner;
+  const preflightChecks = staticLoopPreflight(config, owner);
   if (owner === null) {
     blockers.push("missing position.owner or --owner");
   }
@@ -121,6 +133,38 @@ export function projectLoopCommand(config: AppConfig, options: LoopCommandOption
     initialDiemWei !== undefined && options.targetLeverage !== undefined
       ? ((initialDiemWei * BigInt(Math.round(options.targetLeverage * 10_000))) / 10_000n).toString()
       : undefined;
+  let executorParams: LoopExecutorParams | null = null;
+  if (owner !== null) {
+    if (options.action === "open" && options.targetLeverage !== undefined && options.initialDiem !== undefined) {
+      executorParams = buildLoopOpenParams({
+        config,
+        owner,
+        targetLeverage: options.targetLeverage,
+        initialDiem: options.initialDiem,
+      });
+    } else if (options.action === "rebalance" && options.targetLeverage !== undefined) {
+      executorParams = buildLoopRebalanceParams({
+        config,
+        owner,
+        targetLeverage: options.targetLeverage,
+        slippageBps,
+      });
+    } else if (options.action === "exit") {
+      executorParams = buildLoopExitParams({
+        config,
+        owner,
+        slippageBps,
+        force: options.force,
+      });
+    }
+  }
+  if (executorParams === null) {
+    blockers.push("unable to build exact LoopExecutor params from current config");
+  }
+  const executorCalldata =
+    executorParams !== null && config.contracts.loopExecutor !== null
+      ? encodeLoopExecutorCall(options.action, executorParams)
+      : undefined;
 
   return {
     kind: "projection",
@@ -130,6 +174,9 @@ export function projectLoopCommand(config: AppConfig, options: LoopCommandOption
       status: "not_run",
       reason: "SPEC001 executor simulation is not implemented in this product slice.",
     },
+    executorParamsAvailable: executorParams !== null,
+    executorCalldata,
+    preflightChecks,
     targetLeverage: options.targetLeverage,
     initialDiem: options.initialDiem,
     initialDiemWei: initialDiemWei?.toString(),

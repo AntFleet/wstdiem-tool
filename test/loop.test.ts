@@ -13,6 +13,10 @@ describe("loop safety behavior", () => {
     expect(projection.blocked).toBe(true);
     expect(projection.kind).toBe("projection");
     expect(projection.simulation.status).toBe("not_run");
+    expect(projection.executorParamsAvailable).toBe(false);
+    expect(projection.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain(
+      "deployment-config:fail",
+    );
     expect(projection.blockers.join(" ")).toContain("LoopExecutor");
     expect(projection.blockers.join(" ")).toContain("projection-only");
     expect(projection.projectedPositionNotionalDiemWei).toBe("300000000000000000000");
@@ -60,6 +64,8 @@ describe("loop safety behavior", () => {
       dryRun: true,
     });
     expect(projection.blocked).toBe(true);
+    expect(projection.executorParamsAvailable).toBe(true);
+    expect(projection.executorCalldata?.startsWith("0x")).toBe(true);
     expect(projection.blockers.join(" ")).toContain("executor simulation unavailable");
     expect(projection.authorizationCalldata?.to).toBe(DEFAULT_CONFIG.contracts.morphoBlue);
     expect(projection.authorizationCalldata?.data.startsWith("0x")).toBe(true);
