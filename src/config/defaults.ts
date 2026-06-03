@@ -1,0 +1,78 @@
+import type { AppConfig } from "../types/domain.js";
+
+export const DEFAULT_CONFIG: AppConfig = {
+  chainId: 8453,
+  rpc: {
+    primaryUrl: process.env.BASE_RPC_URL ?? null,
+    fallbackUrls: [
+      process.env.BASE_RPC_URL_FALLBACK_1,
+      process.env.BASE_RPC_URL_FALLBACK_2,
+    ].filter((url): url is string => Boolean(url)),
+    timeoutMs: 10_000,
+  },
+  contracts: {
+    diem: "0xF4d97F2da56e8c3098f3a8D538DB630A2606a024",
+    weth: "0x4200000000000000000000000000000000000006",
+    vvv: "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf",
+    vvvStaking: "0x321b7ff75154472B18EDb199033fF4D116F340Ff",
+    morphoBlue: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
+    adaptiveCurveIrm: "0x46415998764C29aB2a25CbeA6254146D50D22687",
+    curveFactory: "0xd2002373543Ce3527023C75e7518C274A51ce712",
+    uniswapV4PoolManager: "0x498581fF718922c3f8e6A244956aF099B2652b2b",
+    inferenceVault: null,
+    feeRouter: null,
+    curvePool: null,
+    morphoOracle: null,
+    loopExecutor: null,
+    autoDeleverageExecutor: null,
+  },
+  morpho: {
+    marketId: null,
+    lltvWad: "770000000000000000",
+  },
+  wallet: {
+    privateKeyEnv: "WSTDIEM_OPERATOR_PRIVATE_KEY",
+    hardware: {
+      enabled: false,
+      derivationPath: "m/44'/60'/0'/0/0",
+    },
+  },
+  position: {
+    owner: null,
+  },
+  thresholds: {
+    healthFactorWarn: 1.6,
+    healthFactorCritical: 1.4,
+    minPostLoopHealthFactor: 1.7,
+    spreadWarnNetApy35: 0.15,
+    spreadCriticalNetApy35: 0.08,
+    curveDepthWarn: 0.15,
+    curveDepthCritical: 0.2,
+    harvestSilenceWarnDays: 7,
+    harvestSilenceCriticalDays: 14,
+    oracleDeviationCritical: 0.01,
+    borrowSpikeBaseApyRatio: 0.7,
+    riskFreeRate: 0.05,
+  },
+  alerts: {
+    webhookUrls: [],
+    telegram: {
+      botTokenEnv: "WSTDIEM_TELEGRAM_BOT_TOKEN",
+      chatId: null,
+    },
+  },
+  automation: {
+    provider: "gelato",
+    gelatoTaskId: null,
+    chainlinkUpkeepId: null,
+  },
+  storage: {
+    sqlitePath: "./wstdiem-loop-manager.sqlite",
+  },
+  execution: {
+    defaultSlippageBps: 50,
+    maxSlippageBps: 300,
+    maxCurvePriceImpactBps: 100,
+    transactionDeadlineSeconds: 300,
+  },
+};

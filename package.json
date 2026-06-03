@@ -1,0 +1,43 @@
+{
+  "name": "wstdiem-loop-manager",
+  "version": "0.1.0",
+  "description": "Operator CLI for monitoring and safely simulating wstDIEM loop positions.",
+  "type": "module",
+  "bin": {
+    "wstdiem-loop-manager": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "smoke": "node dist/cli/index.js alerts test --json --message smoke"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "chalk": "^5.4.1",
+    "cli-table3": "^0.6.5",
+    "commander": "^13.1.0",
+    "dotenv": "^16.5.0",
+    "pino": "^9.6.0",
+    "undici": "^7.8.0",
+    "viem": "^2.29.0",
+    "yaml": "^2.7.1",
+    "zod": "^3.24.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.3",
+    "eslint": "^9.25.1",
+    "prettier": "^3.5.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.31.0",
+    "vitest": "^4.1.8"
+  }
+}
