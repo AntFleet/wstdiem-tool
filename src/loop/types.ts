@@ -69,6 +69,10 @@ export interface RouteSlippageEvidence {
   blockNumber: bigint;
   maxSlippageBps: number;
   priceImpactBps: number;
+  amountIn?: bigint;
+  expectedOut?: bigint;
+  quotedOut?: bigint;
+  protectedMinOut?: bigint;
   valid: boolean;
 }
 
