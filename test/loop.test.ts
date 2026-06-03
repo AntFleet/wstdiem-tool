@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
-import { assertBroadcastNotAllowed, projectLoopCommand } from "../src/cli/loop.js";
+import { assertBroadcastNotAllowed, buildLoopExecutorParamsForCommand, projectLoopCommand } from "../src/cli/loop.js";
 
 describe("loop safety behavior", () => {
   it("blocks open when SPEC001 deployment config is missing", () => {
@@ -69,6 +69,31 @@ describe("loop safety behavior", () => {
     expect(projection.blockers.join(" ")).toContain("executor simulation unavailable");
     expect(projection.authorizationCalldata?.to).toBe(DEFAULT_CONFIG.contracts.morphoBlue);
     expect(projection.authorizationCalldata?.data.startsWith("0x")).toBe(true);
+  });
+
+  it("builds typed executor params for configured open commands", () => {
+    const config = {
+      ...DEFAULT_CONFIG,
+      contracts: {
+        ...DEFAULT_CONFIG.contracts,
+        inferenceVault: "0x0000000000000000000000000000000000000001" as const,
+        morphoOracle: "0x0000000000000000000000000000000000000004" as const,
+      },
+      position: {
+        owner: "0x0000000000000000000000000000000000000006" as const,
+      },
+    };
+    const built = buildLoopExecutorParamsForCommand(config, {
+      action: "open",
+      targetLeverage: 3,
+      initialDiem: "100",
+    });
+    expect(built.owner).toBe(config.position.owner);
+    expect(built.params).toMatchObject({
+      owner: config.position.owner,
+      initialDiem: 100_000_000_000_000_000_000n,
+      flashDiem: 200_000_000_000_000_000_000n,
+    });
   });
 
   it("throws a typed safety error before broadcast", () => {

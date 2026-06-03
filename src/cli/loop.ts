@@ -50,6 +50,11 @@ export interface LoopCommandOptions {
   force?: boolean;
 }
 
+export interface BuiltLoopExecutorParams {
+  owner: Address | null;
+  params: LoopExecutorParams | null;
+}
+
 function validateLeverage(targetLeverage: number | undefined, required: boolean): void {
   if (targetLeverage === undefined) {
     if (required) {
@@ -93,6 +98,51 @@ function buildAuthorizationCalldata(config: AppConfig, owner: Address | null): L
   };
 }
 
+export function buildLoopExecutorParamsForCommand(
+  config: AppConfig,
+  options: LoopCommandOptions,
+): BuiltLoopExecutorParams {
+  const slippageBps = options.slippageBps ?? config.execution.defaultSlippageBps;
+  const owner = options.owner ?? config.position.owner;
+  if (owner === null) {
+    return { owner, params: null };
+  }
+  if (options.action === "open" && options.targetLeverage !== undefined && options.initialDiem !== undefined) {
+    return {
+      owner,
+      params: buildLoopOpenParams({
+        config,
+        owner,
+        targetLeverage: options.targetLeverage,
+        initialDiem: options.initialDiem,
+      }),
+    };
+  }
+  if (options.action === "rebalance" && options.targetLeverage !== undefined) {
+    return {
+      owner,
+      params: buildLoopRebalanceParams({
+        config,
+        owner,
+        targetLeverage: options.targetLeverage,
+        slippageBps,
+      }),
+    };
+  }
+  if (options.action === "exit") {
+    return {
+      owner,
+      params: buildLoopExitParams({
+        config,
+        owner,
+        slippageBps,
+        force: options.force,
+      }),
+    };
+  }
+  return { owner, params: null };
+}
+
 export function projectLoopCommand(config: AppConfig, options: LoopCommandOptions): LoopProjection {
   const slippageBps = options.slippageBps ?? config.execution.defaultSlippageBps;
   validateSlippage(config, slippageBps);
@@ -133,31 +183,7 @@ export function projectLoopCommand(config: AppConfig, options: LoopCommandOption
     initialDiemWei !== undefined && options.targetLeverage !== undefined
       ? ((initialDiemWei * BigInt(Math.round(options.targetLeverage * 10_000))) / 10_000n).toString()
       : undefined;
-  let executorParams: LoopExecutorParams | null = null;
-  if (owner !== null) {
-    if (options.action === "open" && options.targetLeverage !== undefined && options.initialDiem !== undefined) {
-      executorParams = buildLoopOpenParams({
-        config,
-        owner,
-        targetLeverage: options.targetLeverage,
-        initialDiem: options.initialDiem,
-      });
-    } else if (options.action === "rebalance" && options.targetLeverage !== undefined) {
-      executorParams = buildLoopRebalanceParams({
-        config,
-        owner,
-        targetLeverage: options.targetLeverage,
-        slippageBps,
-      });
-    } else if (options.action === "exit") {
-      executorParams = buildLoopExitParams({
-        config,
-        owner,
-        slippageBps,
-        force: options.force,
-      });
-    }
-  }
+  const { params: executorParams } = buildLoopExecutorParamsForCommand(config, options);
   if (executorParams === null) {
     blockers.push("unable to build exact LoopExecutor params from current config");
   }

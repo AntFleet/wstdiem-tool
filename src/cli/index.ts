@@ -5,9 +5,11 @@ import { deliverConfiguredAlerts } from "../alerts/deliver.js";
 import { evaluateAlerts } from "../alerts/evaluate.js";
 import { makeEmptySnapshot } from "../metrics/math.js";
 import { Storage } from "../storage/sqlite.js";
+import { createViemLoopSimulationClient } from "../contracts/loopSimulationClient.js";
+import { simulateLoopExecutorCall } from "../loop/simulator.js";
 import type { AppConfig, Severity } from "../types/domain.js";
 import { CliError, toCliError } from "./errors.js";
-import { assertBroadcastNotAllowed, projectLoopCommand } from "./loop.js";
+import { assertBroadcastNotAllowed, buildLoopExecutorParamsForCommand, projectLoopCommand } from "./loop.js";
 import { jsonEnvelope, printJson, renderStatusTable } from "./output.js";
 import { parseAddress, parseStrictFloat, parseStrictInteger } from "./parse.js";
 import { buildStatus, runWatchOnce } from "./status.js";
@@ -167,19 +169,21 @@ loop
   .option("--initial-diem <amount>", "initial DIEM amount")
   .option("--slippage-bps <bps>", "slippage bps")
   .option("--owner <address>", "owner override")
+  .option("--live", "run RPC-backed preflight and executor simulation when config allows", false)
   .action(async function (this: Command) {
-    await runAction(this, "loop simulate", (config) => {
+    await runAction(this, "loop simulate", async (config) => {
       const opts = this.opts<{
         action: "open" | "rebalance" | "exit";
         targetLeverage?: string;
         initialDiem?: string;
         slippageBps?: string;
         owner?: string;
+        live?: boolean;
       }>();
       if (!["open", "rebalance", "exit"].includes(opts.action)) {
         throw new CliError("INVALID_INPUT", "--action must be open, rebalance, or exit");
       }
-      return projectLoopCommand(config, {
+      const commandOptions = {
         action: opts.action,
         targetLeverage:
           opts.targetLeverage === undefined
@@ -190,7 +194,24 @@ loop
           opts.slippageBps === undefined ? undefined : parseStrictInteger(opts.slippageBps, "--slippage-bps"),
         owner: opts.owner === undefined ? undefined : parseAddress(opts.owner, "--owner"),
         dryRun: true,
+      };
+      const projection = projectLoopCommand(config, commandOptions);
+      if (!opts.live) {
+        return projection;
+      }
+      const { owner, params } = buildLoopExecutorParamsForCommand(config, commandOptions);
+      const client = createViemLoopSimulationClient(config);
+      const liveSimulation = await simulateLoopExecutorCall({
+        config,
+        action: opts.action,
+        owner,
+        params,
+        client: client ?? undefined,
       });
+      return {
+        ...projection,
+        liveSimulation,
+      };
     });
   });
 
