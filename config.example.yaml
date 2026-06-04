@@ -36,9 +36,9 @@ wallet:
 position:
   owner: null
 
-# Full-unwind Base fork tests use the configured wstDIEM vault and Curve pool
-# addresses above. Remaining deployment/position evidence is read from env vars:
-# WSTDIEM_FORK_LOOP_EXECUTOR, WSTDIEM_FORK_OWNER.
+# Full-unwind Base fork tests and live readiness use the configured wstDIEM
+# vault and Curve pool addresses above. Remaining deployment/position evidence
+# is read from env vars: WSTDIEM_FORK_LOOP_EXECUTOR, WSTDIEM_FORK_OWNER.
 # Optional WSTDIEM_FORK_MORPHO_ORACLE and WSTDIEM_FORK_MARKET_ID override the
 # configured Morpho evidence for alternate deployment checks.
 

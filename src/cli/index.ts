@@ -9,6 +9,7 @@ import { createViemLoopSimulationClient } from "../contracts/loopSimulationClien
 import { simulateMorphoAuthorization } from "../loop/authorization.js";
 import { buildLiveLoopExitPlan } from "../loop/exitPlan.js";
 import { buildLoopReadiness } from "../loop/readiness.js";
+import type { LoopReadinessResult } from "../loop/readiness.js";
 import { buildConfiguredLoopSafetyEvidence } from "../loop/safetyEvidence.js";
 import { simulateLoopExecutorCall } from "../loop/simulator.js";
 import type { AppConfig, Severity } from "../types/domain.js";
@@ -21,6 +22,39 @@ import { buildStatus, runWatchOnce } from "./status.js";
 interface GlobalOptions {
   config?: string;
   json?: boolean;
+}
+
+const AUDIT_GATE_BLOCKER = "broadcast disabled pending production executor audit/review";
+
+function assertStrictLoopReadinessEvidence(result: LoopReadinessResult): void {
+  const auditGate = result.checks.find((check) => check.key === "audit-gate");
+  const nonAuditIssues = result.checks.filter((check) => check.key !== "audit-gate" && check.status !== "pass");
+  const unexpectedBlockers = result.blockers.filter((blocker) => blocker !== AUDIT_GATE_BLOCKER);
+
+  if (
+    result.broadcastAvailable !== false ||
+    result.auditRequired !== true ||
+    auditGate?.status !== "fail" ||
+    nonAuditIssues.length > 0 ||
+    unexpectedBlockers.length > 0
+  ) {
+    const details = [
+      ...nonAuditIssues.map((check) => `${check.key}:${check.status}`),
+      ...unexpectedBlockers.map((blocker) => `blocker:${blocker}`),
+      auditGate?.status === "fail" ? undefined : "audit-gate:not-fail",
+      result.broadcastAvailable === false ? undefined : "broadcastAvailable:not-false",
+      result.auditRequired === true ? undefined : "auditRequired:not-true",
+    ].filter((entry): entry is string => entry !== undefined);
+
+    throw new CliError(
+      "READINESS_EVIDENCE_BLOCKED",
+      details.length === 0
+        ? "strict readiness evidence failed"
+        : `strict readiness evidence failed: ${details.join(", ")}`,
+      undefined,
+      result,
+    );
+  }
 }
 
 function configFor(command: Command): AppConfig {
@@ -124,10 +158,19 @@ loop
   .command("readiness")
   .description("Read live Curve, Morpho, executor, and owner exit readiness")
   .option("--owner <address>", "position owner override")
+  .option("--loop-executor <address>", "loopExecutor override for live readiness evidence")
+  .option("--strict-evidence", "exit non-zero unless all live evidence checks pass except the closed audit gate", false)
   .action(async function (this: Command) {
     await runAction(this, "loop readiness", async (config) => {
-      const ownerOption = this.opts<{ owner?: string }>().owner;
+      const opts = this.opts<{ owner?: string; loopExecutor?: string; strictEvidence?: boolean }>();
+      const ownerOption = opts.owner;
       const owner = ownerOption === undefined ? config.position.owner : parseAddress(ownerOption, "--owner");
+      if (opts.loopExecutor !== undefined) {
+        config = {
+          ...config,
+          contracts: { ...config.contracts, loopExecutor: parseAddress(opts.loopExecutor, "--loop-executor") },
+        };
+      }
       let client: Awaited<ReturnType<typeof createViemLoopSimulationClient>> | undefined;
       try {
         client = (await createViemLoopSimulationClient(config)) ?? undefined;
@@ -135,6 +178,9 @@ loop
         client = undefined;
       }
       const result = await buildLoopReadiness({ config, owner, client });
+      if (opts.strictEvidence) {
+        assertStrictLoopReadinessEvidence(result);
+      }
       if (this.optsWithGlobals<GlobalOptions>().json) {
         return result;
       }

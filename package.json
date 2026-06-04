@@ -15,6 +15,9 @@
     "test:contracts": "forge test --no-match-path 'test/foundry/*Fork.t.sol'",
     "test:contracts:fork": "npm run test:contracts:fork:required",
     "test:contracts:fork:required": "node -e \"if (!process.env.BASE_RPC_URL) { console.error('BASE_RPC_URL is required'); process.exit(1); }\" && forge test --match-path 'test/foundry/*Fork.t.sol'",
+    "deploy:executor:dry-run": "node -e \"if (!process.env.BASE_RPC_URL) { console.error('BASE_RPC_URL is required'); process.exit(1); }\" && forge script script/DeployLoopExecutor.s.sol:DeployLoopExecutor --fork-url \"$BASE_RPC_URL\"",
+    "readiness:owner": "node scripts/validate-live-evidence-env.mjs && npm run build && node dist/cli/index.js --json loop readiness --owner \"$WSTDIEM_FORK_OWNER\" --loop-executor \"$WSTDIEM_FORK_LOOP_EXECUTOR\" --strict-evidence",
+    "proof:full-unwind": "node scripts/validate-live-evidence-env.mjs && forge test --match-path 'test/foundry/BaseFullUnwindReadinessFork.t.sol' --match-test testLatestBlockFullUnwindReadinessWhenEnvProvided",
     "smoke": "node dist/cli/index.js alerts test --json --message smoke"
   },
   "engines": {

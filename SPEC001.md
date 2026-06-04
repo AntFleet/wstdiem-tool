@@ -1015,6 +1015,21 @@ npm run test:contracts
 npm run test:contracts:fork
 ```
 
+- Dry-run deployment script: no-broadcast executor deployment entrypoint for production input validation. Use:
+
+```text
+npm run deploy:executor:dry-run
+```
+
+- Live owner readiness and required full-unwind fork proof are separate production-gate evidence commands. Use:
+
+```text
+npm run readiness:owner
+npm run proof:full-unwind
+```
+
+`loop readiness` accepts `--owner`, `--loop-executor`, and `--strict-evidence` overrides so a deployed executor candidate can be checked before committing it into operator config. The `readiness:owner` evidence script validates nonzero owner/executor env values, rebuilds `dist`, and exits nonzero unless all live checks pass except the intentionally closed audit gate.
+
 `BaseFlashProviderFork.t.sol` always runs when `BASE_RPC_URL` is set and proves the configured Uniswap V3 DIEM/WETH 1% provider deployment, token pair, fee tier, DIEM decimals, and nonzero DIEM inventory at both pinned and latest Base blocks. `BaseLoopExecutorDeployFork.t.sol` deploys the executor locally on a Base fork without broadcasting and proves the constructor/runtime config against the real provider and protocol addresses. `BaseFullUnwindReadinessFork.t.sol` always proves the known wstDIEM vault, Curve pool, Morpho oracle, and Morpho market deployment wiring when `BASE_RPC_URL` is set. It skips full-unwind readiness until at least one full-unwind env var is provided; once configured, it requires all of:
 
 ```text
@@ -1027,7 +1042,7 @@ The readiness fork uses the configured wstDIEM vault, Curve pool, Morpho oracle,
 ## Open Questions
 
 1. Base mainnet addresses for `InferenceVault`/wstDIEM, `FeeRouter`, Curve DIEM/wstDIEM, Morpho oracle, and Morpho market id are now configured from deployed evidence. The Morpho market id `0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894` resolves to DIEM loan token, wstDIEM collateral, oracle `0xBAEC9cccba9884d403dBcee15455e28781f1FD72`, adaptive Curve IRM, and `86e16` LLTV. Live reads showed nonzero vault assets/supply but zero Curve DIEM/wstDIEM balances and zero Morpho supply/borrow totals, so full unwind remains blocked on Curve liquidity, Morpho liquidity/position state, and a funded/authorized owner position.
-2. Flash-loan provider and fee model are selected: Uniswap V3 Base DIEM/WETH 1% with deterministic fee-tier planning and callback-supplied executor repayment. The repo now includes same-block live pool balance evidence, decoded executor event evidence when simulation returns logs, local callback harness tests, Base provider fork tests, and no-broadcast executor deployment fork tests. Remaining work is production executor audit/hardening and full unwind proof against live liquidity plus a funded/authorized owner position.
+2. Flash-loan provider and fee model are selected: Uniswap V3 Base DIEM/WETH 1% with deterministic fee-tier planning and callback-supplied executor repayment. The repo now includes same-block live pool balance evidence, decoded executor event evidence when simulation returns logs, local callback harness tests, Base provider fork tests, no-broadcast executor deployment fork tests, and a dry-run deployment script/checklist. Remaining work is production executor audit signoff, production broadcast gating, and full unwind proof against live liquidity plus a funded/authorized owner position.
 3. The requested open sequence includes `curve.swap`; the source vault already mints wstDIEM through `vault.deposit`. Protocol team must decide whether open should use direct deposit, Curve acquisition of wstDIEM, or a hybrid route.
 4. The repo now contains a local Uniswap V3 flash-exit executor harness with mocked unwind tests and Base provider/readiness fork tests, but production mainnet executor hardening, full unwind fork proof, and auto-deleverager contracts still require a separate Solidity spec/audit before mainnet use.
 5. The Curve pool `TokenExchange` event signature must be verified against the exact deployed StableSwap NG implementation ABI before coding log decoding.

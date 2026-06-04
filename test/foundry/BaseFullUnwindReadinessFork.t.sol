@@ -122,7 +122,7 @@ contract BaseFullUnwindReadinessForkTest {
             marketId: vm.envOr("WSTDIEM_FORK_MARKET_ID", MARKET_ID)
         });
 
-        if (!_hasAnyFullUnwindEnv(env)) return;
+        if (!_hasAnyFullUnwindEnvRequest()) return;
         _requireCompleteFullUnwindEnv(env);
 
         vm.createSelectFork(rpc);
@@ -147,8 +147,13 @@ contract BaseFullUnwindReadinessForkTest {
         require(IMorphoBlueFork(MORPHO_BLUE).isAuthorized(env.owner, env.loopExecutor), "executor not authorized");
     }
 
-    function _hasAnyFullUnwindEnv(FullUnwindEnv memory env) private pure returns (bool) {
-        return env.loopExecutor != address(0) || env.owner != address(0);
+    function _hasAnyFullUnwindEnvRequest() private view returns (bool) {
+        return bytes(vm.envOr("WSTDIEM_FORK_INFERENCE_VAULT", string(""))).length > 0
+            || bytes(vm.envOr("WSTDIEM_FORK_CURVE_POOL", string(""))).length > 0
+            || bytes(vm.envOr("WSTDIEM_FORK_MORPHO_ORACLE", string(""))).length > 0
+            || bytes(vm.envOr("WSTDIEM_FORK_LOOP_EXECUTOR", string(""))).length > 0
+            || bytes(vm.envOr("WSTDIEM_FORK_OWNER", string(""))).length > 0
+            || bytes(vm.envOr("WSTDIEM_FORK_MARKET_ID", string(""))).length > 0;
     }
 
     function _requireCompleteFullUnwindEnv(FullUnwindEnv memory env) private pure {
