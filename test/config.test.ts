@@ -22,13 +22,15 @@ describe("config loading", () => {
     );
   });
 
-  it("loads SPEC001 defaults and reports required deployment gaps", () => {
+  it("loads SPEC001 v5 defaults", () => {
     const config = loadConfig({ configPath: "/tmp/does-not-exist-wstdiem.yaml" });
     expect(config.chainId).toBe(8453);
-    expect(config.contracts.inferenceVault).toBe("0x4751BA2b09374C1929FC01734a166e3c8cd75810");
-    expect(config.contracts.feeRouter).toBe("0x21fe048B10dC9bED2Ee0Ae76724C627CA7F35F61");
-    expect(config.contracts.curvePool).toBe("0x39A4b4779C71E1A18d500627639682c9583Ee86f");
+    expect(config.contracts.inferenceVault).toBe("0xb9f23c33FfD2213f31C0cFb6c9e2fDf525a9Dd2D");
+    expect(config.contracts.feeRouter).toBe("0x3b8d968DCca09E319fac7Df741804Af5644E3a60");
+    expect(config.contracts.agentTgeRegistry).toBe("0x09a4227935FF15b261533238F79935CCcA0e7941");
+    expect(config.contracts.curvePool).toBe("0xB9c7F62e4EeC145bFa1C6bBc5fFdFf246181FdA2");
     expect(config.contracts.morphoOracle).toBe("0xBAEC9cccba9884d403dBcee15455e28781f1FD72");
+    expect(config.contracts.loopExecutor).toBe("0x6fF481F4B3B0E2ADa548D454F7011D1ed51532B6");
     expect(config.morpho.marketId).toBe("0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894");
     expect(config.morpho.lltvWad).toBe("860000000000000000");
     expect(config.execution.exitRepayBufferBps).toBe(200);
@@ -41,7 +43,7 @@ describe("config loading", () => {
       pairToken: DEFAULT_CONFIG.contracts.weth,
       feeTier: 10_000,
     });
-    expect(missingDeploymentKeys(config)).toContain("loopExecutor");
+    expect(missingDeploymentKeys(config)).not.toContain("loopExecutor");
     expect(missingDeploymentKeys(config)).not.toContain("morphoOracle");
     expect(missingDeploymentKeys(config)).not.toContain("marketId");
   });

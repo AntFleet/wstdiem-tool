@@ -13,6 +13,7 @@ export interface ContractsConfig {
   uniswapV4PoolManager: Address;
   inferenceVault: Address | null;
   feeRouter: Address | null;
+  agentTgeRegistry: Address | null;
   curvePool: Address | null;
   morphoOracle: Address | null;
   loopExecutor: Address | null;

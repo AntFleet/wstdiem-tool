@@ -249,7 +249,17 @@ class MockSimulationClient extends MockPreflightClient implements LoopSimulation
 
 describe("loop preflight and simulation", () => {
   it("reports static preflight failures before on-chain checks", async () => {
-    const checks = await runLoopPreflight(DEFAULT_CONFIG, null, new MockPreflightClient());
+    const checks = await runLoopPreflight(
+      {
+        ...DEFAULT_CONFIG,
+        contracts: {
+          ...DEFAULT_CONFIG.contracts,
+          loopExecutor: null,
+        },
+      },
+      null,
+      new MockPreflightClient(),
+    );
     expect(checks.map((check) => `${check.key}:${check.status}`)).toContain("deployment-config:fail");
     expect(checks.map((check) => `${check.key}:${check.status}`)).toContain("owner:fail");
     expect(checks.map((check) => `${check.key}:${check.status}`)).toContain("onchain-preflight:fail");

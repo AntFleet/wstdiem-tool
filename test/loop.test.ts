@@ -2,9 +2,17 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { assertBroadcastNotAllowed, buildLoopExecutorParamsForCommand, projectLoopCommand } from "../src/cli/loop.js";
 
+const missingDeploymentConfig = {
+  ...DEFAULT_CONFIG,
+  contracts: {
+    ...DEFAULT_CONFIG.contracts,
+    loopExecutor: null,
+  },
+};
+
 describe("loop safety behavior", () => {
   it("blocks open when SPEC001 deployment config is missing", () => {
-    const projection = projectLoopCommand(DEFAULT_CONFIG, {
+    const projection = projectLoopCommand(missingDeploymentConfig, {
       action: "open",
       targetLeverage: 3,
       initialDiem: "100",
@@ -139,7 +147,7 @@ describe("loop safety behavior", () => {
   });
 
   it("throws a typed safety error before broadcast", () => {
-    const projection = projectLoopCommand(DEFAULT_CONFIG, {
+    const projection = projectLoopCommand(missingDeploymentConfig, {
       action: "open",
       targetLeverage: 2,
       initialDiem: "1",

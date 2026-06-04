@@ -63,8 +63,8 @@ contract BaseFullUnwindReadinessForkTest {
     VmFullUnwind private constant vm = VmFullUnwind(address(uint160(uint256(keccak256("hevm cheat code")))));
 
     address private constant DIEM = 0xF4d97F2da56e8c3098f3a8D538DB630A2606a024;
-    address private constant INFERENCE_VAULT = 0x4751BA2b09374C1929FC01734a166e3c8cd75810;
-    address private constant CURVE_POOL = 0x39A4b4779C71E1A18d500627639682c9583Ee86f;
+    address private constant INFERENCE_VAULT = 0xb9f23c33FfD2213f31C0cFb6c9e2fDf525a9Dd2D;
+    address private constant CURVE_POOL = 0xB9c7F62e4EeC145bFa1C6bBc5fFdFf246181FdA2;
     address private constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
     address private constant MORPHO_ORACLE = 0xbaEc9cCcBa9884D403dBcEe15455E28781f1fd72;
     address private constant ADAPTIVE_CURVE_IRM = 0x46415998764C29aB2a25CbeA6254146D50D22687;

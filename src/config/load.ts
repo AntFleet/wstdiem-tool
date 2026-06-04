@@ -43,6 +43,7 @@ const configSchema = z
       uniswapV4PoolManager: addressSchema,
       inferenceVault: nullableAddressSchema,
       feeRouter: nullableAddressSchema,
+      agentTgeRegistry: nullableAddressSchema,
       curvePool: nullableAddressSchema,
       morphoOracle: nullableAddressSchema,
       loopExecutor: nullableAddressSchema,

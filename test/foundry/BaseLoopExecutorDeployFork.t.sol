@@ -18,9 +18,9 @@ contract BaseLoopExecutorDeployForkTest {
 
     address private constant DIEM = 0xF4d97F2da56e8c3098f3a8D538DB630A2606a024;
     address private constant WETH = 0x4200000000000000000000000000000000000006;
-    address private constant WSTDIEM = 0x4751BA2b09374C1929FC01734a166e3c8cd75810;
+    address private constant WSTDIEM = 0xb9f23c33FfD2213f31C0cFb6c9e2fDf525a9Dd2D;
     address private constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
-    address private constant CURVE_POOL = 0x39A4b4779C71E1A18d500627639682c9583Ee86f;
+    address private constant CURVE_POOL = 0xB9c7F62e4EeC145bFa1C6bBc5fFdFf246181FdA2;
     address private constant UNISWAP_V3_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
     address private constant UNISWAP_V3_DIEM_WETH_POOL = 0x80d995189ecc593672aD4703b250a5e82672EB1D;
     uint256 private constant BASE_CHAIN_ID = 8453;

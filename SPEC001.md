@@ -839,11 +839,12 @@ contracts:
   curveFactory: "0xd2002373543Ce3527023C75e7518C274A51ce712"
   uniswapV4PoolManager: "0x498581fF718922c3f8e6A244956aF099B2652b2b"
 
-  inferenceVault: "0x4751BA2b09374C1929FC01734a166e3c8cd75810"
-  feeRouter: "0x21fe048B10dC9bED2Ee0Ae76724C627CA7F35F61"
-  curvePool: "0x39A4b4779C71E1A18d500627639682c9583Ee86f"
+  inferenceVault: "0xb9f23c33FfD2213f31C0cFb6c9e2fDf525a9Dd2D"
+  feeRouter: "0x3b8d968DCca09E319fac7Df741804Af5644E3a60"
+  agentTgeRegistry: "0x09a4227935FF15b261533238F79935CCcA0e7941"
+  curvePool: "0xB9c7F62e4EeC145bFa1C6bBc5fFdFf246181FdA2"
   morphoOracle: "0xBAEC9cccba9884d403dBcee15455e28781f1FD72"
-  loopExecutor: null
+  loopExecutor: "0x6fF481F4B3B0E2ADa548D454F7011D1ed51532B6"
   autoDeleverageExecutor: null
 
 morpho:
@@ -1041,7 +1042,7 @@ The readiness fork uses the configured wstDIEM vault, Curve pool, Morpho oracle,
 
 ## Open Questions
 
-1. Base mainnet addresses for `InferenceVault`/wstDIEM, `FeeRouter`, Curve DIEM/wstDIEM, Morpho oracle, and Morpho market id are now configured from deployed evidence. The Morpho market id `0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894` resolves to DIEM loan token, wstDIEM collateral, oracle `0xBAEC9cccba9884d403dBcee15455e28781f1FD72`, adaptive Curve IRM, and `86e16` LLTV. Live reads showed nonzero vault assets/supply but zero Curve DIEM/wstDIEM balances and zero Morpho supply/borrow totals, so full unwind remains blocked on Curve liquidity, Morpho liquidity/position state, and a funded/authorized owner position.
+1. Base mainnet addresses for `InferenceVault`/wstDIEM, `FeeRouter`, `AgentTGERegistry`, Router/`loopExecutor`, Curve DIEM/wstDIEM, Morpho oracle, and Morpho market id are now configured from deployed evidence. The Morpho market id `0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894` resolves to DIEM loan token, wstDIEM collateral, oracle `0xBAEC9cccba9884d403dBcee15455e28781f1FD72`, adaptive Curve IRM, and `86e16` LLTV. Live reads showed nonzero vault assets/supply but zero Curve DIEM/wstDIEM balances and zero Morpho supply/borrow totals, so full unwind remains blocked on Curve liquidity, Morpho liquidity/position state, and a funded/authorized owner position.
 2. Flash-loan provider and fee model are selected: Uniswap V3 Base DIEM/WETH 1% with deterministic fee-tier planning and callback-supplied executor repayment. The repo now includes same-block live pool balance evidence, decoded executor event evidence when simulation returns logs, local callback harness tests, Base provider fork tests, no-broadcast executor deployment fork tests, and a dry-run deployment script/checklist. Remaining work is production executor audit signoff, production broadcast gating, and full unwind proof against live liquidity plus a funded/authorized owner position.
 3. The requested open sequence includes `curve.swap`; the source vault already mints wstDIEM through `vault.deposit`. Protocol team must decide whether open should use direct deposit, Curve acquisition of wstDIEM, or a hybrid route.
 4. The repo now contains a local Uniswap V3 flash-exit executor harness with mocked unwind tests and Base provider/readiness fork tests, but production mainnet executor hardening, full unwind fork proof, and auto-deleverager contracts still require a separate Solidity spec/audit before mainnet use.
