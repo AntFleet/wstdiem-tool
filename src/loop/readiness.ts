@@ -15,6 +15,20 @@ export interface ReadinessCheck {
   message: string;
 }
 
+interface ExecutorFlashConfig {
+  factory: Address;
+  pool: Address;
+  loanToken: Address;
+  pairToken: Address;
+  feeTier: number;
+}
+
+interface ExecutorProtocolConfig {
+  morpho: Address;
+  curvePool: Address;
+  wstDiem: Address;
+}
+
 export interface LoopReadinessResult {
   status: "ready" | "blocked";
   blockNumber?: bigint;
@@ -47,6 +61,8 @@ export interface LoopReadinessResult {
     canonicalFlashPool?: Address;
     expectedFlashFeeFor50Diem?: bigint;
     loanTokenIsToken0?: boolean;
+    flashConfig?: ExecutorFlashConfig;
+    protocolConfig?: ExecutorProtocolConfig;
     verified: boolean;
   };
   broadcastAvailable: false;
@@ -63,6 +79,64 @@ function addressEqual(left: Address, right: Address): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function tupleField(value: unknown, index: number, name: string): unknown {
+  if (Array.isArray(value)) {
+    return value[index];
+  }
+  if (value && typeof value === "object") {
+    return (value as Record<string, unknown>)[name] ?? (value as Record<number, unknown>)[index];
+  }
+  return undefined;
+}
+
+function parseExecutorFlashConfig(value: unknown): ExecutorFlashConfig | null {
+  const factory = tupleField(value, 0, "factory");
+  const pool = tupleField(value, 1, "pool");
+  const loanToken = tupleField(value, 2, "loanToken");
+  const pairToken = tupleField(value, 3, "pairToken");
+  const feeTier = tupleField(value, 4, "feeTier");
+  if (
+    typeof factory !== "string" ||
+    typeof pool !== "string" ||
+    typeof loanToken !== "string" ||
+    typeof pairToken !== "string" ||
+    feeTier === undefined
+  ) {
+    return null;
+  }
+  const parsedFeeTier = Number(feeTier);
+  if (!Number.isSafeInteger(parsedFeeTier)) {
+    return null;
+  }
+  return {
+    factory: factory as Address,
+    pool: pool as Address,
+    loanToken: loanToken as Address,
+    pairToken: pairToken as Address,
+    feeTier: parsedFeeTier,
+  };
+}
+
+function parseExecutorProtocolConfig(value: unknown): ExecutorProtocolConfig | null {
+  const morpho = tupleField(value, 0, "morpho");
+  const curvePool = tupleField(value, 1, "curvePool");
+  const wstDiem = tupleField(value, 2, "wstDiem");
+  if (typeof morpho !== "string" || typeof curvePool !== "string" || typeof wstDiem !== "string") {
+    return null;
+  }
+  return {
+    morpho: morpho as Address,
+    curvePool: curvePool as Address,
+    wstDiem: wstDiem as Address,
+  };
+}
+
+function pushMismatch(mismatches: string[], name: string, ok: boolean): void {
+  if (!ok) {
+    mismatches.push(name);
+  }
 }
 
 export async function buildLoopReadiness(input: {
@@ -225,7 +299,7 @@ export async function buildLoopReadiness(input: {
       checks.push(check("executor-config", "fail", "loopExecutor has no deployed code"));
       blockers.push("loopExecutor has no deployed code");
     } else {
-      const [canonicalFlashPool, executorFee, loanTokenIsToken0] = await Promise.all([
+      const [canonicalFlashPool, executorFee, loanTokenIsToken0, rawFlashConfig, rawProtocolConfig] = await Promise.all([
         input.client.readContract({
           address: config.contracts.loopExecutor,
           abi: loopExecutorAbi,
@@ -245,30 +319,96 @@ export async function buildLoopReadiness(input: {
           functionName: "loanTokenIsToken0",
           blockNumber,
         }),
+        input.client.readContract({
+          address: config.contracts.loopExecutor,
+          abi: loopExecutorAbi,
+          functionName: "flashConfig",
+          blockNumber,
+        }),
+        input.client.readContract({
+          address: config.contracts.loopExecutor,
+          abi: loopExecutorAbi,
+          functionName: "protocolConfig",
+          blockNumber,
+        }),
       ]);
+      const flashConfig = parseExecutorFlashConfig(rawFlashConfig);
+      const protocolConfig = parseExecutorProtocolConfig(rawProtocolConfig);
       const configuredFee = expectedUniswapV3FlashFee(50n * WAD, config.flashLoan.feeTier);
       const configuredTokenSide =
         config.flashLoan.loanToken !== null && config.flashLoan.pairToken !== null
           ? config.flashLoan.loanToken.toLowerCase() < config.flashLoan.pairToken.toLowerCase()
           : null;
+      const mismatches: string[] = [];
+      pushMismatch(
+        mismatches,
+        "canonicalFlashPool",
+        config.flashLoan.pool !== null && addressEqual(canonicalFlashPool as Address, config.flashLoan.pool),
+      );
+      pushMismatch(
+        mismatches,
+        "expectedFlashFee",
+        configuredFee !== null && BigInt(executorFee as bigint | number | string) === configuredFee,
+      );
+      pushMismatch(mismatches, "loanTokenIsToken0", configuredTokenSide !== null && Boolean(loanTokenIsToken0) === configuredTokenSide);
+      pushMismatch(mismatches, "flashConfig", flashConfig !== null);
+      pushMismatch(mismatches, "protocolConfig", protocolConfig !== null);
+      if (flashConfig !== null) {
+        pushMismatch(
+          mismatches,
+          "flashConfig.factory",
+          config.flashLoan.factory !== null && addressEqual(flashConfig.factory, config.flashLoan.factory),
+        );
+        pushMismatch(
+          mismatches,
+          "flashConfig.pool",
+          config.flashLoan.pool !== null && addressEqual(flashConfig.pool, config.flashLoan.pool),
+        );
+        pushMismatch(
+          mismatches,
+          "flashConfig.loanToken",
+          config.flashLoan.loanToken !== null && addressEqual(flashConfig.loanToken, config.flashLoan.loanToken),
+        );
+        pushMismatch(
+          mismatches,
+          "flashConfig.pairToken",
+          config.flashLoan.pairToken !== null && addressEqual(flashConfig.pairToken, config.flashLoan.pairToken),
+        );
+        pushMismatch(
+          mismatches,
+          "flashConfig.feeTier",
+          config.flashLoan.feeTier !== null && flashConfig.feeTier === config.flashLoan.feeTier,
+        );
+      }
+      if (protocolConfig !== null) {
+        pushMismatch(mismatches, "protocolConfig.morpho", addressEqual(protocolConfig.morpho, config.contracts.morphoBlue));
+        pushMismatch(
+          mismatches,
+          "protocolConfig.curvePool",
+          config.contracts.curvePool !== null && addressEqual(protocolConfig.curvePool, config.contracts.curvePool),
+        );
+        pushMismatch(
+          mismatches,
+          "protocolConfig.wstDiem",
+          config.contracts.inferenceVault !== null && addressEqual(protocolConfig.wstDiem, config.contracts.inferenceVault),
+        );
+      }
       executor = {
         ...executor,
         canonicalFlashPool: canonicalFlashPool as Address,
         expectedFlashFeeFor50Diem: BigInt(executorFee as bigint | number | string),
         loanTokenIsToken0: Boolean(loanTokenIsToken0),
-        verified:
-          config.flashLoan.pool !== null &&
-          addressEqual(canonicalFlashPool as Address, config.flashLoan.pool) &&
-          configuredFee !== null &&
-          BigInt(executorFee as bigint | number | string) === configuredFee &&
-          configuredTokenSide !== null &&
-          Boolean(loanTokenIsToken0) === configuredTokenSide,
+        flashConfig: flashConfig ?? undefined,
+        protocolConfig: protocolConfig ?? undefined,
+        verified: mismatches.length === 0,
       };
       checks.push(
         check(
           "executor-config",
           executor.verified ? "pass" : "fail",
-          executor.verified ? "loopExecutor runtime config matches flash provider config" : "loopExecutor runtime config mismatch",
+          executor.verified
+            ? "loopExecutor runtime config matches flash and protocol config"
+            : `loopExecutor runtime config mismatch: ${mismatches.join(", ")}`,
         ),
       );
       if (!executor.verified) {

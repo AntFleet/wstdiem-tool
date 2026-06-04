@@ -52,6 +52,11 @@ interface ILoopExecutorFork {
     function canonicalFlashPool() external view returns (address);
     function expectedFlashFee(uint256 amount) external view returns (uint256);
     function loanTokenIsToken0() external view returns (bool);
+    function flashConfig()
+        external
+        view
+        returns (address factory, address pool, address loanToken, address pairToken, uint24 feeTier);
+    function protocolConfig() external view returns (address morpho, address curvePool, address wstDiem);
 }
 
 contract BaseFullUnwindReadinessForkTest {
@@ -67,6 +72,9 @@ contract BaseFullUnwindReadinessForkTest {
     address private constant WETH = 0x4200000000000000000000000000000000000006;
     bytes32 private constant MARKET_ID = 0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894;
     uint256 private constant LLTV = 860_000_000_000_000_000;
+    uint256 private constant BASE_CHAIN_ID = 8453;
+    uint24 private constant UNISWAP_V3_FEE_TIER = 10_000;
+    address private constant UNISWAP_V3_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
 
     struct FullUnwindEnv {
         address inferenceVault;
@@ -82,6 +90,7 @@ contract BaseFullUnwindReadinessForkTest {
         if (bytes(rpc).length == 0) return;
 
         vm.createSelectFork(rpc);
+        _assertBaseChain();
 
         _assertContract(INFERENCE_VAULT, "missing inferenceVault code");
         _assertContract(CURVE_POOL, "missing curvePool code");
@@ -102,6 +111,7 @@ contract BaseFullUnwindReadinessForkTest {
         if (bytes(rpc).length == 0) return;
 
         vm.createSelectFork(rpc);
+        _assertBaseChain();
 
         _assertContract(MORPHO_ORACLE, "missing morphoOracle code");
         require(IWstDiemMorphoOracleFork(MORPHO_ORACLE).vault() == INFERENCE_VAULT, "oracle vault mismatch");
@@ -126,6 +136,7 @@ contract BaseFullUnwindReadinessForkTest {
         _requireCompleteFullUnwindEnv(env);
 
         vm.createSelectFork(rpc);
+        _assertBaseChain();
 
         _assertContract(env.inferenceVault, "missing inferenceVault code");
         _assertContract(env.curvePool, "missing curvePool code");
@@ -138,7 +149,7 @@ contract BaseFullUnwindReadinessForkTest {
         require(ICurvePoolFork(env.curvePool).balances(1) > 0, "curve wstDIEM balance is zero");
         require(ICurvePoolFork(env.curvePool).get_dy(1, 0, 1 ether) > 0, "curve exit quote unavailable");
 
-        _assertLoopExecutor(env.loopExecutor);
+        _assertLoopExecutor(env.loopExecutor, env.inferenceVault, env.curvePool);
         _assertMorphoMarket(env.marketId, env.inferenceVault, env.morphoOracle);
 
         ForkPosition memory position = IMorphoBlueFork(MORPHO_BLUE).position(env.marketId, env.owner);
@@ -178,7 +189,11 @@ contract BaseFullUnwindReadinessForkTest {
         require(params.lltv == LLTV, "morpho lltv mismatch");
     }
 
-    function _assertLoopExecutor(address loopExecutor) private view {
+    function _assertBaseChain() private view {
+        require(block.chainid == BASE_CHAIN_ID, "unexpected chain id");
+    }
+
+    function _assertLoopExecutor(address loopExecutor, address inferenceVault, address curvePool) private view {
         require(
             ILoopExecutorFork(loopExecutor).canonicalFlashPool() == UNISWAP_V3_DIEM_WETH_POOL,
             "executor flash pool mismatch"
@@ -187,6 +202,18 @@ contract BaseFullUnwindReadinessForkTest {
         require(
             ILoopExecutorFork(loopExecutor).loanTokenIsToken0() == (DIEM < WETH), "executor loan token side mismatch"
         );
+        (address factory, address pool, address loanToken, address pairToken, uint24 feeTier) =
+            ILoopExecutorFork(loopExecutor).flashConfig();
+        require(factory == UNISWAP_V3_FACTORY, "executor factory mismatch");
+        require(pool == UNISWAP_V3_DIEM_WETH_POOL, "executor pool mismatch");
+        require(loanToken == DIEM, "executor loan token mismatch");
+        require(pairToken == WETH, "executor pair token mismatch");
+        require(feeTier == UNISWAP_V3_FEE_TIER, "executor fee tier mismatch");
+
+        (address morpho, address executorCurvePool, address wstDiem) = ILoopExecutorFork(loopExecutor).protocolConfig();
+        require(morpho == MORPHO_BLUE, "executor morpho mismatch");
+        require(executorCurvePool == curvePool, "executor curve pool mismatch");
+        require(wstDiem == inferenceVault, "executor wstDIEM mismatch");
     }
 
     function _stringEqual(string memory left, string memory right) private pure returns (bool) {

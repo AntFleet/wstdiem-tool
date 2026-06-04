@@ -62,6 +62,30 @@ export const loopExecutorAbi = [
     outputs: [{ name: "", type: "bool" }],
   },
   {
+    type: "function",
+    name: "flashConfig",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "factory", type: "address" },
+      { name: "pool", type: "address" },
+      { name: "loanToken", type: "address" },
+      { name: "pairToken", type: "address" },
+      { name: "feeTier", type: "uint24" },
+    ],
+  },
+  {
+    type: "function",
+    name: "protocolConfig",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "morpho", type: "address" },
+      { name: "curvePool", type: "address" },
+      { name: "wstDiem", type: "address" },
+    ],
+  },
+  {
     type: "event",
     name: "ExitFlashCallbackValidated",
     inputs: [

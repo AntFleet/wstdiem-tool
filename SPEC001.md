@@ -699,7 +699,7 @@ Current product slice behavior:
 ### `loop readiness`
 
 - Reads live Base state for Curve DIEM/wstDIEM liquidity, Morpho market supply/borrow state, optional owner debt/collateral, optional owner authorization, and deployed executor runtime config.
-- Verifies a configured executor exposes `canonicalFlashPool()`, `expectedFlashFee(amount)`, and `loanTokenIsToken0()` values matching the configured Uniswap V3 flash-provider surface.
+- Verifies a configured executor exposes `canonicalFlashPool()`, `expectedFlashFee(amount)`, `loanTokenIsToken0()`, `flashConfig()`, and `protocolConfig()` values matching the configured Uniswap V3 flash-provider, Morpho, Curve, and wstDIEM surfaces.
 - Reports `blocked` when Curve or Morpho are empty, owner is not configured or has no exit-ready position, owner has not authorized the executor, executor config is missing/mismatched, RPC is unavailable, or the audit gate is active.
 - Production broadcast remains unavailable even when all live dependency checks pass; readiness must keep reporting `broadcastAvailable: false` and `auditRequired: true` until a production executor audit/review gate is explicitly cleared in a later spec update.
 
@@ -726,7 +726,7 @@ Selected flash provider for fee-inclusive off-chain proof:
   - The executor constructor must reject non-contract addresses for the configured Uniswap V3 factory, flash pool, loan token, pair token, Morpho, Curve pool, and wstDIEM contract.
   - The executor must validate `msg.sender` with the expected Uniswap V3 pool derived from factory, token0, token1, and fee tier; use `CallbackValidation.verifyCallback(factory, poolKey)` or equivalent canonical-pool derivation.
   - The executor must not expose an external callback-arming function; flash callback context must be armed only inside the owner-authorized exit flow.
-  - A deployed executor must expose read-only config proof helpers for `canonicalFlashPool()`, `expectedFlashFee(amount)`, and `loanTokenIsToken0()` so fork tests and CLI readiness checks can verify runtime configuration without relying on deployment notes alone.
+  - A deployed executor must expose read-only config proof helpers for `canonicalFlashPool()`, `expectedFlashFee(amount)`, `loanTokenIsToken0()`, `flashConfig()`, and `protocolConfig()` so fork tests and CLI readiness checks can verify runtime configuration without relying on deployment notes alone.
   - The current exit executor must require `msg.sender == owner`; any keeper-operated version requires an explicit owner-signed intent or tightly scoped operator authorization before deployment.
   - The executor must validate loan token, loan amount, fee amount, encoded owner/action context, deadline, nonce, non-reentrancy, and Morpho owner authorization before continuing the exit path.
   - The executor must repay flash principal plus fee atomically, refund remaining DIEM/wstDIEM dust to the owner, and revert if Curve output cannot cover `repayAmountDiem + flashFee`.

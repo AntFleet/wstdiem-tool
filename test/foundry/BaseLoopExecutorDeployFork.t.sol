@@ -23,6 +23,7 @@ contract BaseLoopExecutorDeployForkTest {
     address private constant CURVE_POOL = 0x39A4b4779C71E1A18d500627639682c9583Ee86f;
     address private constant UNISWAP_V3_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
     address private constant UNISWAP_V3_DIEM_WETH_POOL = 0x80d995189ecc593672aD4703b250a5e82672EB1D;
+    uint256 private constant BASE_CHAIN_ID = 8453;
     uint24 private constant UNISWAP_V3_FEE_TIER = 10_000;
 
     function testLatestBlockDeploysExecutorWithVerifiedBaseConfig() public {
@@ -30,6 +31,7 @@ contract BaseLoopExecutorDeployForkTest {
         if (bytes(rpc).length == 0) return;
 
         vm.createSelectFork(rpc);
+        _assertBaseChain();
 
         LoopExecutor executor = _deployBaseExecutor();
 
@@ -58,6 +60,7 @@ contract BaseLoopExecutorDeployForkTest {
         if (bytes(rpc).length == 0) return;
 
         vm.createSelectFork(rpc);
+        _assertBaseChain();
 
         try new LoopExecutor(
             LoopExecutor.FlashConfig({
@@ -86,6 +89,10 @@ contract BaseLoopExecutorDeployForkTest {
             }),
             LoopExecutor.ProtocolConfig({morpho: MORPHO_BLUE, curvePool: CURVE_POOL, wstDiem: WSTDIEM})
         );
+    }
+
+    function _assertBaseChain() private view {
+        require(block.chainid == BASE_CHAIN_ID, "unexpected chain id");
     }
 
     function _assertRevertSelector(bytes memory revertData, bytes4 selector) private pure {

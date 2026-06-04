@@ -35,6 +35,7 @@ class MockReadinessClient implements LoopSimulationClient {
       borrowShares?: bigint;
       authorized?: boolean;
       hasExecutorCode?: boolean;
+      executorCurvePool?: Address;
       readFailureFunction?: string;
     } = {},
   ) {}
@@ -82,6 +83,22 @@ class MockReadinessClient implements LoopSimulationClient {
     }
     if (args.functionName === "loanTokenIsToken0") {
       return false;
+    }
+    if (args.functionName === "flashConfig") {
+      return [
+        DEFAULT_CONFIG.flashLoan.factory,
+        DEFAULT_CONFIG.flashLoan.pool,
+        DEFAULT_CONFIG.flashLoan.loanToken,
+        DEFAULT_CONFIG.flashLoan.pairToken,
+        DEFAULT_CONFIG.flashLoan.feeTier,
+      ];
+    }
+    if (args.functionName === "protocolConfig") {
+      return [
+        DEFAULT_CONFIG.contracts.morphoBlue,
+        this.options.executorCurvePool ?? DEFAULT_CONFIG.contracts.curvePool,
+        DEFAULT_CONFIG.contracts.inferenceVault,
+      ];
     }
     if (args.functionName === "position") {
       return [0n, this.options.borrowShares ?? 0n, this.options.collateral ?? 0n];
@@ -159,6 +176,11 @@ describe("loop readiness", () => {
     ]);
     expect(result.status).toBe("blocked");
     expect(result.executor?.verified).toBe(true);
+    expect(result.executor?.protocolConfig).toMatchObject({
+      morpho: DEFAULT_CONFIG.contracts.morphoBlue,
+      curvePool: DEFAULT_CONFIG.contracts.curvePool,
+      wstDiem: DEFAULT_CONFIG.contracts.inferenceVault,
+    });
     expect(result.owner).toMatchObject({
       address: owner,
       borrowedDiem: 50n * WAD,
@@ -167,6 +189,32 @@ describe("loop readiness", () => {
     });
     expect(result.blockers).toEqual(["broadcast disabled pending production executor audit/review"]);
     expect(client.readBlockNumbers.every((blockNumber) => blockNumber === 456n)).toBe(true);
+  });
+
+  it("blocks readiness when deployed executor protocol config does not match config", async () => {
+    const result = await buildLoopReadiness({
+      config: completeConfig(),
+      owner,
+      client: new MockReadinessClient({
+        curveDiem: 1_000n * WAD,
+        curveWstDiem: 1_000n * WAD,
+        marketSupply: 2_000n * WAD,
+        marketBorrowAssets: 500n * WAD,
+        marketBorrowShares: 500n * WAD,
+        collateral: 100n * WAD,
+        borrowShares: 50n * WAD,
+        authorized: true,
+        executorCurvePool: "0x00000000000000000000000000000000000000A5",
+      }),
+    });
+
+    expect(result.executor?.verified).toBe(false);
+    expect(result.checks).toContainEqual({
+      key: "executor-config",
+      status: "fail",
+      message: "loopExecutor runtime config mismatch: protocolConfig.curvePool",
+    });
+    expect(result.blockers).toContain("loopExecutor runtime config mismatch");
   });
 
   it("returns blocked readiness when a live read fails", async () => {

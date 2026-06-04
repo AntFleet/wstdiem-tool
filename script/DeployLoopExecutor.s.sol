@@ -14,8 +14,11 @@ interface VmDeployLoopExecutor {
 contract DeployLoopExecutor {
     VmDeployLoopExecutor private constant vm =
         VmDeployLoopExecutor(address(uint160(uint256(keccak256("hevm cheat code")))));
+    uint256 private constant BASE_CHAIN_ID = 8453;
 
     function run() external returns (LoopExecutor executor) {
+        if (block.chainid != BASE_CHAIN_ID) revert("unexpected chain id");
+
         uint256 feeTier = vm.envUint("LOOP_EXECUTOR_UNISWAP_V3_FEE_TIER");
         if (feeTier > type(uint24).max) revert("fee tier exceeds uint24");
 

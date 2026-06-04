@@ -48,7 +48,7 @@ Expected result before the production gate is cleared:
 - Morpho market liquidity passes only when live DIEM supply exists.
 - owner position passes only when the owner has wstDIEM collateral and DIEM debt.
 - Morpho authorization passes only when the owner has authorized the configured executor.
-- executor config passes only when `canonicalFlashPool()`, `expectedFlashFee(50 DIEM)`, and `loanTokenIsToken0()` match the configured Uniswap V3 flash-provider evidence.
+- executor config passes only when `canonicalFlashPool()`, `expectedFlashFee(50 DIEM)`, `loanTokenIsToken0()`, `flashConfig()`, and `protocolConfig()` match the configured Uniswap V3, Morpho, Curve, and wstDIEM evidence.
 - audit gate still fails and keeps broadcast disabled.
 
 ## Full-Unwind Fork Proof
@@ -65,7 +65,7 @@ The proof must establish:
 
 - configured vault, Curve pool, Morpho oracle, and Morpho market are live contracts.
 - Curve has nonzero DIEM and wstDIEM balances and can quote wstDIEM to DIEM.
-- executor runtime config matches the selected Uniswap V3 DIEM/WETH 1% provider.
+- executor runtime config matches the selected Uniswap V3 DIEM/WETH 1% provider and the expected Morpho, Curve, and wstDIEM protocol addresses.
 - owner has nonzero Morpho borrow shares and collateral.
 - owner has authorized the executor in Morpho.
 
