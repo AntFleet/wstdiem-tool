@@ -1,3 +1,4 @@
+import "dotenv/config";
 import type { AppConfig } from "../types/domain.js";
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -19,16 +20,16 @@ export const DEFAULT_CONFIG: AppConfig = {
     adaptiveCurveIrm: "0x46415998764C29aB2a25CbeA6254146D50D22687",
     curveFactory: "0xd2002373543Ce3527023C75e7518C274A51ce712",
     uniswapV4PoolManager: "0x498581fF718922c3f8e6A244956aF099B2652b2b",
-    inferenceVault: "0xb9f23c33FfD2213f31C0cFb6c9e2fDf525a9Dd2D",
-    feeRouter: "0x3b8d968DCca09E319fac7Df741804Af5644E3a60",
-    agentTgeRegistry: "0x09a4227935FF15b261533238F79935CCcA0e7941",
-    curvePool: "0xB9c7F62e4EeC145bFa1C6bBc5fFdFf246181FdA2",
-    morphoOracle: "0xBAEC9cccba9884d403dBcee15455e28781f1FD72",
-    loopExecutor: "0x6fF481F4B3B0E2ADa548D454F7011D1ed51532B6",
+    inferenceVault: "0xe49FA849cB37b0e7A42B2335e333fb99474167ba",
+    feeRouter: "0xa13a6e75d696bAceB38236389eeFD6eCa5FD4ED3",
+    agentTgeRegistry: "0xb13830e7f72Eef167A7F188285feBa5f7C1198Ef",
+    curvePool: "0x21c33a1Bb5f6Eb43563e1fB9e7AA1D4E90C1A0CD",
+    morphoOracle: "0xAF29776f93FE0bf21282bF792A52AC212f20F45c",
+    loopExecutor: "0x74ad4532133Ba538945a5371D249560E66CC7c71",
     autoDeleverageExecutor: null,
   },
   morpho: {
-    marketId: "0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894",
+    marketId: "0xdd6b9f10bf69445ebba0626ef54042af628cdf65dda98ff68df4d235d4d56c76",
     lltvWad: "860000000000000000",
   },
   wallet: {

@@ -22,16 +22,16 @@ describe("config loading", () => {
     );
   });
 
-  it("loads SPEC001 v5 defaults", () => {
+  it("loads SPEC001 v6 defaults", () => {
     const config = loadConfig({ configPath: "/tmp/does-not-exist-wstdiem.yaml" });
     expect(config.chainId).toBe(8453);
-    expect(config.contracts.inferenceVault).toBe("0xb9f23c33FfD2213f31C0cFb6c9e2fDf525a9Dd2D");
-    expect(config.contracts.feeRouter).toBe("0x3b8d968DCca09E319fac7Df741804Af5644E3a60");
-    expect(config.contracts.agentTgeRegistry).toBe("0x09a4227935FF15b261533238F79935CCcA0e7941");
-    expect(config.contracts.curvePool).toBe("0xB9c7F62e4EeC145bFa1C6bBc5fFdFf246181FdA2");
-    expect(config.contracts.morphoOracle).toBe("0xBAEC9cccba9884d403dBcee15455e28781f1FD72");
-    expect(config.contracts.loopExecutor).toBe("0x6fF481F4B3B0E2ADa548D454F7011D1ed51532B6");
-    expect(config.morpho.marketId).toBe("0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894");
+    expect(config.contracts.inferenceVault).toBe("0xe49FA849cB37b0e7A42B2335e333fb99474167ba");
+    expect(config.contracts.feeRouter).toBe("0xa13a6e75d696bAceB38236389eeFD6eCa5FD4ED3");
+    expect(config.contracts.agentTgeRegistry).toBe("0xb13830e7f72Eef167A7F188285feBa5f7C1198Ef");
+    expect(config.contracts.curvePool).toBe("0x21c33a1Bb5f6Eb43563e1fB9e7AA1D4E90C1A0CD");
+    expect(config.contracts.morphoOracle).toBe("0xAF29776f93FE0bf21282bF792A52AC212f20F45c");
+    expect(config.contracts.loopExecutor).toBe("0x74ad4532133Ba538945a5371D249560E66CC7c71");
+    expect(config.morpho.marketId).toBe("0xdd6b9f10bf69445ebba0626ef54042af628cdf65dda98ff68df4d235d4d56c76");
     expect(config.morpho.lltvWad).toBe("860000000000000000");
     expect(config.execution.exitRepayBufferBps).toBe(200);
     expect(config.execution.maxBaseApyStalenessBlocks).toBe(7_200);

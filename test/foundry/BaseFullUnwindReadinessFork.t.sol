@@ -63,14 +63,14 @@ contract BaseFullUnwindReadinessForkTest {
     VmFullUnwind private constant vm = VmFullUnwind(address(uint160(uint256(keccak256("hevm cheat code")))));
 
     address private constant DIEM = 0xF4d97F2da56e8c3098f3a8D538DB630A2606a024;
-    address private constant INFERENCE_VAULT = 0xb9f23c33FfD2213f31C0cFb6c9e2fDf525a9Dd2D;
-    address private constant CURVE_POOL = 0xB9c7F62e4EeC145bFa1C6bBc5fFdFf246181FdA2;
+    address private constant INFERENCE_VAULT = 0xe49FA849cB37b0e7A42B2335e333fb99474167ba;
+    address private constant CURVE_POOL = 0x21c33a1Bb5f6Eb43563e1fB9e7AA1D4E90C1A0CD;
     address private constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
-    address private constant MORPHO_ORACLE = 0xbaEc9cCcBa9884D403dBcEe15455E28781f1fd72;
+    address private constant MORPHO_ORACLE = 0xAF29776f93FE0bf21282bF792A52AC212f20F45c;
     address private constant ADAPTIVE_CURVE_IRM = 0x46415998764C29aB2a25CbeA6254146D50D22687;
     address private constant UNISWAP_V3_DIEM_WETH_POOL = 0x80d995189ecc593672aD4703b250a5e82672EB1D;
     address private constant WETH = 0x4200000000000000000000000000000000000006;
-    bytes32 private constant MARKET_ID = 0x12fd8d51cd36807382afd6128a32e117955d6d065b27a578687142478e81f894;
+    bytes32 private constant MARKET_ID = 0xdd6b9f10bf69445ebba0626ef54042af628cdf65dda98ff68df4d235d4d56c76;
     uint256 private constant LLTV = 860_000_000_000_000_000;
     uint256 private constant BASE_CHAIN_ID = 8453;
     uint24 private constant UNISWAP_V3_FEE_TIER = 10_000;
