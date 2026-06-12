@@ -3,10 +3,18 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
-import { buildStatus, runWatchOnce } from "../src/cli/status.js";
+import { buildStatus, runWatchOnce, type StatusDeps } from "../src/cli/status.js";
 import { Storage } from "../src/storage/sqlite.js";
 
 const created: string[] = [];
+
+const OFFLINE_DEPS: StatusDeps = {
+  readBlockStatus: async () => {
+    throw new Error("offline test: RPC transport mocked out");
+  },
+  createLoopClient: async () => null,
+  createBackfillClient: async () => null,
+};
 
 afterEach(() => {
   for (const file of created.splice(0)) {
@@ -18,7 +26,7 @@ afterEach(() => {
 
 describe("status/watch safety", () => {
   it("does not evaluate strategy risk alerts from placeholder metrics", async () => {
-    const result = await buildStatus(DEFAULT_CONFIG);
+    const result = await buildStatus(DEFAULT_CONFIG, OFFLINE_DEPS);
     expect(result.alerts).toEqual([]);
     expect(result.snapshot.validity.yieldWindow).toBe(false);
   });
@@ -27,7 +35,7 @@ describe("status/watch safety", () => {
     const file = path.join(os.tmpdir(), `wstdiem-watch-${Date.now()}.sqlite`);
     created.push(file);
     const config = { ...DEFAULT_CONFIG, storage: { sqlitePath: file } };
-    await runWatchOnce(config);
+    await runWatchOnce(config, OFFLINE_DEPS);
     const storage = new Storage(file);
     try {
       expect(storage.getMeta("lastProcessedBlock")).toBeNull();

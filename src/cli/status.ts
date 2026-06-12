@@ -4,8 +4,9 @@ import { deliverConfiguredAlerts } from "../alerts/deliver.js";
 import { missingDeploymentKeys } from "../config/load.js";
 import { createViemBackfillClient } from "../contracts/backfillClient.js";
 import { createViemLoopSimulationClient } from "../contracts/loopSimulationClient.js";
-import { readBestRpcBlockStatus } from "../contracts/rpc.js";
-import { backfillCreditAndHarvestEvents } from "../metrics/backfill.js";
+import { readBestRpcBlockStatus, type RpcBlockStatus } from "../contracts/rpc.js";
+import type { LoopSimulationClient } from "../loop/simulator.js";
+import { backfillCreditAndHarvestEvents, type BackfillClient } from "../metrics/backfill.js";
 import { YIELD_WINDOW_SECONDS, applyYieldWindowMetrics, collectVaultMetrics } from "../metrics/collector.js";
 import { makeEmptySnapshot } from "../metrics/math.js";
 import { Storage } from "../storage/sqlite.js";
@@ -16,7 +17,15 @@ export interface StatusResult {
   alerts: ReturnType<typeof evaluateAlerts>;
 }
 
-export async function buildStatus(config: AppConfig): Promise<StatusResult> {
+export interface StatusDeps {
+  readBlockStatus?: (config: AppConfig) => Promise<RpcBlockStatus>;
+  createLoopClient?: (config: AppConfig) => Promise<LoopSimulationClient | null>;
+  createBackfillClient?: (config: AppConfig) => Promise<BackfillClient | null>;
+}
+
+export async function buildStatus(config: AppConfig, deps: StatusDeps = {}): Promise<StatusResult> {
+  const readBlockStatus = deps.readBlockStatus ?? readBestRpcBlockStatus;
+  const createLoopClient = deps.createLoopClient ?? createViemLoopSimulationClient;
   const readiness: string[] = [];
   const missing = missingDeploymentKeys(config);
   if (missing.length > 0) {
@@ -29,7 +38,7 @@ export async function buildStatus(config: AppConfig): Promise<StatusResult> {
   let snapshot = makeEmptySnapshot();
   if (config.rpc.primaryUrl !== null || config.rpc.fallbackUrls.length > 0) {
     try {
-      const blockStatus = await readBestRpcBlockStatus(config);
+      const blockStatus = await readBlockStatus(config);
       if (blockStatus.chainId !== config.chainId) {
         readiness.push(`unexpected chainId ${blockStatus.chainId}; expected ${config.chainId}`);
       }
@@ -37,7 +46,7 @@ export async function buildStatus(config: AppConfig): Promise<StatusResult> {
       snapshot.latestBlockAgeSeconds = Math.max(0, Math.floor(Date.now() / 1000) - blockStatus.blockTimestamp);
       snapshot.validity.rpcFreshness = blockStatus.chainId === config.chainId;
       if (snapshot.validity.rpcFreshness && config.contracts.inferenceVault !== null) {
-        const client = await createViemLoopSimulationClient(config);
+        const client = await createLoopClient(config);
         if (client !== null) {
           const vaultMetrics = await collectVaultMetrics(config, client, snapshot);
           snapshot = vaultMetrics.snapshot;
@@ -54,13 +63,14 @@ export async function buildStatus(config: AppConfig): Promise<StatusResult> {
   return { snapshot, readiness, alerts };
 }
 
-export async function runWatchOnce(config: AppConfig): Promise<StatusResult> {
-  let result = await buildStatus(config);
+export async function runWatchOnce(config: AppConfig, deps: StatusDeps = {}): Promise<StatusResult> {
+  const createBackfillClient = deps.createBackfillClient ?? createViemBackfillClient;
+  let result = await buildStatus(config, deps);
   const storage = new Storage(config.storage.sqlitePath);
   try {
     if (result.snapshot.validity.rpcFreshness) {
       try {
-        const backfillClient = await createViemBackfillClient(config);
+        const backfillClient = await createBackfillClient(config);
         if (backfillClient !== null) {
           const backfill = await backfillCreditAndHarvestEvents({
             config,
