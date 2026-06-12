@@ -35,6 +35,10 @@ class MockReadinessClient implements LoopSimulationClient {
       borrowShares?: bigint;
       authorized?: boolean;
       hasExecutorCode?: boolean;
+      vaultAsset?: Address;
+      vaultTotalSupply?: bigint;
+      vaultTotalAssets?: bigint;
+      vaultNav?: bigint;
       executorCurvePool?: Address;
       readFailureFunction?: string;
     } = {},
@@ -54,16 +58,31 @@ class MockReadinessClient implements LoopSimulationClient {
     return this.options.hasExecutorCode === false ? "0x" : "0x01";
   }
 
-  async readContract(args: { functionName: string; args?: readonly unknown[]; blockNumber?: bigint }): Promise<unknown> {
+  async readContract(args: {
+    functionName: string;
+    args?: readonly unknown[];
+    blockNumber?: bigint;
+  }): Promise<unknown> {
     this.readBlockNumbers.push(args.blockNumber);
     if (args.functionName === this.options.readFailureFunction) {
       throw new Error(`forced ${args.functionName} failure`);
     }
     if (args.functionName === "balances") {
-      return args.args?.[0] === 0n ? (this.options.curveDiem ?? 0n) : (this.options.curveWstDiem ?? 0n);
+      return args.args?.[0] === 0n
+        ? (this.options.curveDiem ?? 0n)
+        : (this.options.curveWstDiem ?? 0n);
     }
     if (args.functionName === "convertToAssets") {
-      return WAD;
+      return this.options.vaultNav ?? WAD;
+    }
+    if (args.functionName === "asset") {
+      return this.options.vaultAsset ?? DEFAULT_CONFIG.contracts.diem;
+    }
+    if (args.functionName === "totalSupply") {
+      return this.options.vaultTotalSupply ?? WAD;
+    }
+    if (args.functionName === "totalAssets") {
+      return this.options.vaultTotalAssets ?? WAD;
     }
     if (args.functionName === "market") {
       return [
@@ -79,7 +98,7 @@ class MockReadinessClient implements LoopSimulationClient {
       return DEFAULT_CONFIG.flashLoan.pool;
     }
     if (args.functionName === "expectedFlashFee") {
-      return ((50n * WAD * 10_000n - 1n) / 1_000_000n) + 1n;
+      return (50n * WAD * 10_000n - 1n) / 1_000_000n + 1n;
     }
     if (args.functionName === "loanTokenIsToken0") {
       return false;
@@ -133,9 +152,22 @@ describe("loop readiness", () => {
   });
 
   it("reports empty Curve and Morpho state as blockers", async () => {
-    const result = await buildLoopReadiness({ config: completeConfig(), owner, client: new MockReadinessClient() });
+    const result = await buildLoopReadiness({
+      config: completeConfig(),
+      owner,
+      client: new MockReadinessClient(),
+    });
 
     expect(result.status).toBe("blocked");
+    expect(result.vault).toMatchObject({
+      address: DEFAULT_CONFIG.contracts.inferenceVault,
+      asset: DEFAULT_CONFIG.contracts.diem,
+      totalSupply: WAD,
+      totalAssets: WAD,
+      wstDiemNav: WAD,
+      assetMatchesDiem: true,
+      hasSupply: true,
+    });
     expect(result.curve?.liquid).toBe(false);
     expect(result.morpho?.totalSupplyAssets).toBe(0n);
     expect(result.owner?.hasExitPosition).toBe(false);
@@ -176,6 +208,7 @@ describe("loop readiness", () => {
     ]);
     expect(result.status).toBe("blocked");
     expect(result.executor?.verified).toBe(true);
+    expect(result.vault?.hasSupply).toBe(true);
     expect(result.executor?.protocolConfig).toMatchObject({
       morpho: DEFAULT_CONFIG.contracts.morphoBlue,
       curvePool: DEFAULT_CONFIG.contracts.curvePool,
@@ -187,7 +220,9 @@ describe("loop readiness", () => {
       hasExitPosition: true,
       executorAuthorized: true,
     });
-    expect(result.blockers).toEqual(["broadcast disabled pending production executor audit/review"]);
+    expect(result.blockers).toEqual([
+      "broadcast disabled pending production executor audit/review",
+    ]);
     expect(client.readBlockNumbers.every((blockNumber) => blockNumber === 456n)).toBe(true);
   });
 

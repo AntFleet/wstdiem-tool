@@ -5,7 +5,15 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: ["dist/**", "coverage/**", "node_modules/**"],
+    ignores: [
+      ".omc/**",
+      ".omx/**",
+      "cache/**",
+      "coverage/**",
+      "dist/**",
+      "node_modules/**",
+      "out/**",
+    ],
   },
   {
     files: ["**/*.ts"],
@@ -20,9 +28,9 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-vars": [
         "error",
         {
-          "argsIgnorePattern": "^_"
-        }
-      ]
-    }
-  }
+          argsIgnorePattern: "^_",
+        },
+      ],
+    },
+  },
 );

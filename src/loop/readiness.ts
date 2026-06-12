@@ -34,6 +34,16 @@ export interface LoopReadinessResult {
   blockNumber?: bigint;
   checks: ReadinessCheck[];
   blockers: string[];
+  vault?: {
+    address: Address;
+    asset: Address | null;
+    totalSupply: bigint;
+    totalAssets: bigint;
+    wstDiemNav: bigint;
+    hasCode: boolean;
+    assetMatchesDiem: boolean;
+    hasSupply: boolean;
+  };
   curve?: {
     diemBalance: bigint;
     wstDiemBalance: bigint;
@@ -154,7 +164,9 @@ export async function buildLoopReadiness(input: {
     check(
       "deployment-config",
       missing.length === 0 ? "pass" : "fail",
-      missing.length === 0 ? "required deployment config is present" : `missing: ${missing.join(", ")}`,
+      missing.length === 0
+        ? "required deployment config is present"
+        : `missing: ${missing.join(", ")}`,
     ),
   );
   if (missing.length > 0) {
@@ -164,7 +176,13 @@ export async function buildLoopReadiness(input: {
   if (input.client === undefined) {
     checks.push(check("rpc-client", "fail", "live RPC client is required for loop readiness"));
     blockers.push("live RPC client unavailable");
-    checks.push(check("audit-gate", "fail", "broadcast remains disabled until production executor audit/review is complete"));
+    checks.push(
+      check(
+        "audit-gate",
+        "fail",
+        "broadcast remains disabled until production executor audit/review is complete",
+      ),
+    );
     blockers.push("broadcast disabled pending production executor audit/review");
     return {
       status: "blocked",
@@ -176,327 +194,449 @@ export async function buildLoopReadiness(input: {
   }
 
   let blockNumber: bigint | undefined;
+  let vault: LoopReadinessResult["vault"];
   let curve: LoopReadinessResult["curve"];
   let morpho: LoopReadinessResult["morpho"];
   let executor: LoopReadinessResult["executor"];
   let ownerReadiness: LoopReadinessResult["owner"];
   try {
-  const chainId = await input.client.getChainId();
-  checks.push(
-    check(
-      "chain-id",
-      chainId === config.chainId ? "pass" : "fail",
-      chainId === config.chainId ? `chainId ${chainId}` : `unexpected chainId ${chainId}; expected ${config.chainId}`,
-    ),
-  );
-  if (chainId !== config.chainId) {
-    blockers.push(`unexpected chainId ${chainId}`);
-  }
-  blockNumber = await input.client.getBlockNumber();
+    const chainId = await input.client.getChainId();
+    checks.push(
+      check(
+        "chain-id",
+        chainId === config.chainId ? "pass" : "fail",
+        chainId === config.chainId
+          ? `chainId ${chainId}`
+          : `unexpected chainId ${chainId}; expected ${config.chainId}`,
+      ),
+    );
+    if (chainId !== config.chainId) {
+      blockers.push(`unexpected chainId ${chainId}`);
+    }
+    blockNumber = await input.client.getBlockNumber();
 
-  if (config.contracts.curvePool === null || config.contracts.inferenceVault === null) {
-    checks.push(check("curve-liquidity", "fail", "curvePool and inferenceVault are required"));
-    blockers.push("Curve deployment config missing");
-  } else {
-    const [diemBalance, wstDiemBalance, wstDiemNav] = await Promise.all([
-      input.client.readContract({
+    if (config.contracts.inferenceVault === null) {
+      checks.push(check("vault", "fail", "inferenceVault is required"));
+      blockers.push("wstDIEM vault config missing");
+    } else {
+      const code = await input.client.getCode(config.contracts.inferenceVault);
+      const hasCode = code !== "0x";
+      if (!hasCode) {
+        vault = {
+          address: config.contracts.inferenceVault,
+          asset: null,
+          totalSupply: 0n,
+          totalAssets: 0n,
+          wstDiemNav: 0n,
+          hasCode,
+          assetMatchesDiem: false,
+          hasSupply: false,
+        };
+        checks.push(check("vault", "fail", "wstDIEM vault has no deployed code"));
+        blockers.push("wstDIEM vault has no deployed code");
+      } else {
+        const asset = await input.client.readContract({
+          address: config.contracts.inferenceVault,
+          abi: inferenceVaultAbi,
+          functionName: "asset",
+          blockNumber,
+        });
+        const totalSupply = await input.client.readContract({
+          address: config.contracts.inferenceVault,
+          abi: inferenceVaultAbi,
+          functionName: "totalSupply",
+          blockNumber,
+        });
+        const totalAssets = await input.client.readContract({
+          address: config.contracts.inferenceVault,
+          abi: inferenceVaultAbi,
+          functionName: "totalAssets",
+          blockNumber,
+        });
+        const wstDiemNav = await input.client.readContract({
+          address: config.contracts.inferenceVault,
+          abi: inferenceVaultAbi,
+          functionName: "convertToAssets",
+          args: [WAD],
+          blockNumber,
+        });
+        const totalSupplyShares = BigInt(totalSupply as bigint | number | string);
+        const totalAssetDiem = BigInt(totalAssets as bigint | number | string);
+        const nav = BigInt(wstDiemNav as bigint | number | string);
+        vault = {
+          address: config.contracts.inferenceVault,
+          asset: asset as Address,
+          totalSupply: totalSupplyShares,
+          totalAssets: totalAssetDiem,
+          wstDiemNav: nav,
+          hasCode,
+          assetMatchesDiem: addressEqual(asset as Address, config.contracts.diem),
+          hasSupply: totalSupplyShares > 0n && totalAssetDiem > 0n && nav > 0n,
+        };
+        const vaultReady = vault.assetMatchesDiem && vault.hasSupply;
+        checks.push(
+          check(
+            "vault",
+            vaultReady ? "pass" : "fail",
+            vaultReady
+              ? "wstDIEM vault asset, supply, and NAV are ready"
+              : "wstDIEM vault asset, supply, or NAV is not ready",
+          ),
+        );
+        if (!vaultReady) {
+          blockers.push("wstDIEM vault is not ready");
+        }
+      }
+    }
+
+    if (config.contracts.curvePool === null || vault === undefined) {
+      checks.push(check("curve-liquidity", "fail", "curvePool and inferenceVault are required"));
+      blockers.push("Curve deployment config missing");
+    } else {
+      const diemBalance = await input.client.readContract({
         address: config.contracts.curvePool,
         abi: curvePoolAbi,
         functionName: "balances",
         args: [0n],
         blockNumber,
-      }),
-      input.client.readContract({
+      });
+      const wstDiemBalance = await input.client.readContract({
         address: config.contracts.curvePool,
         abi: curvePoolAbi,
         functionName: "balances",
         args: [1n],
         blockNumber,
-      }),
-      input.client.readContract({
-        address: config.contracts.inferenceVault,
-        abi: inferenceVaultAbi,
-        functionName: "convertToAssets",
-        args: [WAD],
-        blockNumber,
-      }),
-    ]);
-    const curveDiemBalance = BigInt(diemBalance as bigint | number | string);
-    const curveWstDiemBalance = BigInt(wstDiemBalance as bigint | number | string);
-    const nav = BigInt(wstDiemNav as bigint | number | string);
-    const tvlDiem = computeCurvePoolTvlDiem(curveDiemBalance, curveWstDiemBalance, nav);
-    curve = {
-      diemBalance: curveDiemBalance,
-      wstDiemBalance: curveWstDiemBalance,
-      wstDiemNav: nav,
-      tvlDiem,
-      liquid: curveDiemBalance > 0n && curveWstDiemBalance > 0n && tvlDiem > 0n,
-    };
-    checks.push(
-      check(
-        "curve-liquidity",
-        curve.liquid ? "pass" : "fail",
-        curve.liquid ? "Curve has DIEM and wstDIEM liquidity" : "Curve DIEM/wstDIEM liquidity is not ready",
-      ),
-    );
-    if (!curve.liquid) {
-      blockers.push("Curve DIEM/wstDIEM liquidity is not ready");
-    }
-  }
-
-  if (config.morpho.marketId === null) {
-    checks.push(check("morpho-market-liquidity", "fail", "marketId is required"));
-    blockers.push("Morpho marketId missing");
-  } else {
-    const market = parseMorphoMarket(
-      await input.client.readContract({
-        address: config.contracts.morphoBlue,
-        abi: morphoAbi,
-        functionName: "market",
-        args: [config.morpho.marketId],
-        blockNumber,
-      }),
-    );
-    if (market === null) {
-      checks.push(check("morpho-market-liquidity", "fail", "Morpho market returned an unsupported shape"));
-      blockers.push("Morpho market state unreadable");
-    } else {
-      morpho = {
-        totalSupplyAssets: market.totalSupplyAssets,
-        totalBorrowAssets: market.totalBorrowAssets,
-        totalBorrowShares: market.totalBorrowShares,
-        empty:
-          market.totalSupplyAssets === 0n &&
-          market.totalSupplyShares === 0n &&
-          market.totalBorrowAssets === 0n &&
-          market.totalBorrowShares === 0n,
+      });
+      const curveDiemBalance = BigInt(diemBalance as bigint | number | string);
+      const curveWstDiemBalance = BigInt(wstDiemBalance as bigint | number | string);
+      const nav = vault.wstDiemNav;
+      const tvlDiem = computeCurvePoolTvlDiem(curveDiemBalance, curveWstDiemBalance, nav);
+      curve = {
+        diemBalance: curveDiemBalance,
+        wstDiemBalance: curveWstDiemBalance,
+        wstDiemNav: nav,
+        tvlDiem,
+        liquid: curveDiemBalance > 0n && curveWstDiemBalance > 0n && tvlDiem > 0n,
       };
       checks.push(
         check(
-          "morpho-market-liquidity",
-          morpho.totalSupplyAssets > 0n ? "pass" : "fail",
-          morpho.totalSupplyAssets > 0n ? "Morpho market has DIEM supply assets" : "Morpho market has no DIEM supply assets",
+          "curve-liquidity",
+          curve.liquid ? "pass" : "fail",
+          curve.liquid
+            ? "Curve has DIEM and wstDIEM liquidity"
+            : "Curve DIEM/wstDIEM liquidity is not ready",
         ),
       );
-      if (morpho.totalSupplyAssets === 0n) {
-        blockers.push("Morpho market has no DIEM supply assets");
+      if (!curve.liquid) {
+        blockers.push("Curve DIEM/wstDIEM liquidity is not ready");
       }
     }
-  }
 
-  if (config.contracts.loopExecutor === null) {
-    checks.push(check("executor-config", "fail", "loopExecutor is not configured"));
-    blockers.push("loopExecutor is not configured");
-  } else {
-    const code = await input.client.getCode(config.contracts.loopExecutor);
-    const hasCode = code !== "0x";
-    executor = {
-      address: config.contracts.loopExecutor,
-      hasCode,
-      verified: false,
-    };
-    if (!hasCode) {
-      checks.push(check("executor-config", "fail", "loopExecutor has no deployed code"));
-      blockers.push("loopExecutor has no deployed code");
+    if (config.morpho.marketId === null) {
+      checks.push(check("morpho-market-liquidity", "fail", "marketId is required"));
+      blockers.push("Morpho marketId missing");
     } else {
-      const [canonicalFlashPool, executorFee, loanTokenIsToken0, rawFlashConfig, rawProtocolConfig] = await Promise.all([
-        input.client.readContract({
-          address: config.contracts.loopExecutor,
-          abi: loopExecutorAbi,
-          functionName: "canonicalFlashPool",
+      const market = parseMorphoMarket(
+        await input.client.readContract({
+          address: config.contracts.morphoBlue,
+          abi: morphoAbi,
+          functionName: "market",
+          args: [config.morpho.marketId],
           blockNumber,
         }),
-        input.client.readContract({
-          address: config.contracts.loopExecutor,
-          abi: loopExecutorAbi,
-          functionName: "expectedFlashFee",
-          args: [50n * WAD],
-          blockNumber,
-        }),
-        input.client.readContract({
-          address: config.contracts.loopExecutor,
-          abi: loopExecutorAbi,
-          functionName: "loanTokenIsToken0",
-          blockNumber,
-        }),
-        input.client.readContract({
-          address: config.contracts.loopExecutor,
-          abi: loopExecutorAbi,
-          functionName: "flashConfig",
-          blockNumber,
-        }),
-        input.client.readContract({
-          address: config.contracts.loopExecutor,
-          abi: loopExecutorAbi,
-          functionName: "protocolConfig",
-          blockNumber,
-        }),
-      ]);
-      const flashConfig = parseExecutorFlashConfig(rawFlashConfig);
-      const protocolConfig = parseExecutorProtocolConfig(rawProtocolConfig);
-      const configuredFee = expectedUniswapV3FlashFee(50n * WAD, config.flashLoan.feeTier);
-      const configuredTokenSide =
-        config.flashLoan.loanToken !== null && config.flashLoan.pairToken !== null
-          ? config.flashLoan.loanToken.toLowerCase() < config.flashLoan.pairToken.toLowerCase()
-          : null;
-      const mismatches: string[] = [];
-      pushMismatch(
-        mismatches,
-        "canonicalFlashPool",
-        config.flashLoan.pool !== null && addressEqual(canonicalFlashPool as Address, config.flashLoan.pool),
       );
-      pushMismatch(
-        mismatches,
-        "expectedFlashFee",
-        configuredFee !== null && BigInt(executorFee as bigint | number | string) === configuredFee,
-      );
-      pushMismatch(mismatches, "loanTokenIsToken0", configuredTokenSide !== null && Boolean(loanTokenIsToken0) === configuredTokenSide);
-      pushMismatch(mismatches, "flashConfig", flashConfig !== null);
-      pushMismatch(mismatches, "protocolConfig", protocolConfig !== null);
-      if (flashConfig !== null) {
-        pushMismatch(
-          mismatches,
-          "flashConfig.factory",
-          config.flashLoan.factory !== null && addressEqual(flashConfig.factory, config.flashLoan.factory),
+      if (market === null) {
+        checks.push(
+          check("morpho-market-liquidity", "fail", "Morpho market returned an unsupported shape"),
         );
-        pushMismatch(
-          mismatches,
-          "flashConfig.pool",
-          config.flashLoan.pool !== null && addressEqual(flashConfig.pool, config.flashLoan.pool),
+        blockers.push("Morpho market state unreadable");
+      } else {
+        morpho = {
+          totalSupplyAssets: market.totalSupplyAssets,
+          totalBorrowAssets: market.totalBorrowAssets,
+          totalBorrowShares: market.totalBorrowShares,
+          empty:
+            market.totalSupplyAssets === 0n &&
+            market.totalSupplyShares === 0n &&
+            market.totalBorrowAssets === 0n &&
+            market.totalBorrowShares === 0n,
+        };
+        checks.push(
+          check(
+            "morpho-market-liquidity",
+            morpho.totalSupplyAssets > 0n ? "pass" : "fail",
+            morpho.totalSupplyAssets > 0n
+              ? "Morpho market has DIEM supply assets"
+              : "Morpho market has no DIEM supply assets",
+          ),
         );
-        pushMismatch(
-          mismatches,
-          "flashConfig.loanToken",
-          config.flashLoan.loanToken !== null && addressEqual(flashConfig.loanToken, config.flashLoan.loanToken),
-        );
-        pushMismatch(
-          mismatches,
-          "flashConfig.pairToken",
-          config.flashLoan.pairToken !== null && addressEqual(flashConfig.pairToken, config.flashLoan.pairToken),
-        );
-        pushMismatch(
-          mismatches,
-          "flashConfig.feeTier",
-          config.flashLoan.feeTier !== null && flashConfig.feeTier === config.flashLoan.feeTier,
-        );
+        if (morpho.totalSupplyAssets === 0n) {
+          blockers.push("Morpho market has no DIEM supply assets");
+        }
       }
-      if (protocolConfig !== null) {
-        pushMismatch(mismatches, "protocolConfig.morpho", addressEqual(protocolConfig.morpho, config.contracts.morphoBlue));
-        pushMismatch(
-          mismatches,
-          "protocolConfig.curvePool",
-          config.contracts.curvePool !== null && addressEqual(protocolConfig.curvePool, config.contracts.curvePool),
-        );
-        pushMismatch(
-          mismatches,
-          "protocolConfig.wstDiem",
-          config.contracts.inferenceVault !== null && addressEqual(protocolConfig.wstDiem, config.contracts.inferenceVault),
-        );
-      }
+    }
+
+    if (config.contracts.loopExecutor === null) {
+      checks.push(check("executor-config", "fail", "loopExecutor is not configured"));
+      blockers.push("loopExecutor is not configured");
+    } else {
+      const code = await input.client.getCode(config.contracts.loopExecutor);
+      const hasCode = code !== "0x";
       executor = {
-        ...executor,
-        canonicalFlashPool: canonicalFlashPool as Address,
-        expectedFlashFeeFor50Diem: BigInt(executorFee as bigint | number | string),
-        loanTokenIsToken0: Boolean(loanTokenIsToken0),
-        flashConfig: flashConfig ?? undefined,
-        protocolConfig: protocolConfig ?? undefined,
-        verified: mismatches.length === 0,
+        address: config.contracts.loopExecutor,
+        hasCode,
+        verified: false,
       };
-      checks.push(
-        check(
-          "executor-config",
-          executor.verified ? "pass" : "fail",
-          executor.verified
-            ? "loopExecutor runtime config matches flash and protocol config"
-            : `loopExecutor runtime config mismatch: ${mismatches.join(", ")}`,
-        ),
-      );
-      if (!executor.verified) {
-        blockers.push("loopExecutor runtime config mismatch");
-      }
-    }
-  }
-
-  if (owner === null) {
-    checks.push(check("owner-position", "skip", "owner not configured; position readiness not checked"));
-    blockers.push("owner is not configured");
-  } else if (config.morpho.marketId === null || morpho === undefined) {
-    checks.push(check("owner-position", "fail", "Morpho market state is required before owner position readiness"));
-    blockers.push("owner position cannot be checked without Morpho market state");
-  } else {
-    const position = parseMorphoPosition(
-      await input.client.readContract({
-        address: config.contracts.morphoBlue,
-        abi: morphoAbi,
-        functionName: "position",
-        args: [config.morpho.marketId, owner],
-        blockNumber,
-      }),
-    );
-    if (position === null) {
-      checks.push(check("owner-position", "fail", "Morpho position returned an unsupported shape"));
-      blockers.push("owner position state unreadable");
-    } else {
-      const borrowedDiem = computeBorrowedDiem(
-        {
-          totalBorrowAssets: morpho.totalBorrowAssets,
-          totalBorrowShares: morpho.totalBorrowShares,
-        },
-        { borrowShares: position.borrowShares },
-      );
-      let executorAuthorized: boolean | null = null;
-      if (config.contracts.loopExecutor !== null) {
-        executorAuthorized = Boolean(
-          await input.client.readContract({
-            address: config.contracts.morphoBlue,
-            abi: morphoAbi,
-            functionName: "isAuthorized",
-            args: [owner, config.contracts.loopExecutor],
+      if (!hasCode) {
+        checks.push(check("executor-config", "fail", "loopExecutor has no deployed code"));
+        blockers.push("loopExecutor has no deployed code");
+      } else {
+        const [
+          canonicalFlashPool,
+          executorFee,
+          loanTokenIsToken0,
+          rawFlashConfig,
+          rawProtocolConfig,
+        ] = await Promise.all([
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "canonicalFlashPool",
             blockNumber,
           }),
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "expectedFlashFee",
+            args: [50n * WAD],
+            blockNumber,
+          }),
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "loanTokenIsToken0",
+            blockNumber,
+          }),
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "flashConfig",
+            blockNumber,
+          }),
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "protocolConfig",
+            blockNumber,
+          }),
+        ]);
+        const flashConfig = parseExecutorFlashConfig(rawFlashConfig);
+        const protocolConfig = parseExecutorProtocolConfig(rawProtocolConfig);
+        const configuredFee = expectedUniswapV3FlashFee(50n * WAD, config.flashLoan.feeTier);
+        const configuredTokenSide =
+          config.flashLoan.loanToken !== null && config.flashLoan.pairToken !== null
+            ? config.flashLoan.loanToken.toLowerCase() < config.flashLoan.pairToken.toLowerCase()
+            : null;
+        const mismatches: string[] = [];
+        pushMismatch(
+          mismatches,
+          "canonicalFlashPool",
+          config.flashLoan.pool !== null &&
+            addressEqual(canonicalFlashPool as Address, config.flashLoan.pool),
         );
+        pushMismatch(
+          mismatches,
+          "expectedFlashFee",
+          configuredFee !== null &&
+            BigInt(executorFee as bigint | number | string) === configuredFee,
+        );
+        pushMismatch(
+          mismatches,
+          "loanTokenIsToken0",
+          configuredTokenSide !== null && Boolean(loanTokenIsToken0) === configuredTokenSide,
+        );
+        pushMismatch(mismatches, "flashConfig", flashConfig !== null);
+        pushMismatch(mismatches, "protocolConfig", protocolConfig !== null);
+        if (flashConfig !== null) {
+          pushMismatch(
+            mismatches,
+            "flashConfig.factory",
+            config.flashLoan.factory !== null &&
+              addressEqual(flashConfig.factory, config.flashLoan.factory),
+          );
+          pushMismatch(
+            mismatches,
+            "flashConfig.pool",
+            config.flashLoan.pool !== null && addressEqual(flashConfig.pool, config.flashLoan.pool),
+          );
+          pushMismatch(
+            mismatches,
+            "flashConfig.loanToken",
+            config.flashLoan.loanToken !== null &&
+              addressEqual(flashConfig.loanToken, config.flashLoan.loanToken),
+          );
+          pushMismatch(
+            mismatches,
+            "flashConfig.pairToken",
+            config.flashLoan.pairToken !== null &&
+              addressEqual(flashConfig.pairToken, config.flashLoan.pairToken),
+          );
+          pushMismatch(
+            mismatches,
+            "flashConfig.feeTier",
+            config.flashLoan.feeTier !== null && flashConfig.feeTier === config.flashLoan.feeTier,
+          );
+        }
+        if (protocolConfig !== null) {
+          pushMismatch(
+            mismatches,
+            "protocolConfig.morpho",
+            addressEqual(protocolConfig.morpho, config.contracts.morphoBlue),
+          );
+          pushMismatch(
+            mismatches,
+            "protocolConfig.curvePool",
+            config.contracts.curvePool !== null &&
+              addressEqual(protocolConfig.curvePool, config.contracts.curvePool),
+          );
+          pushMismatch(
+            mismatches,
+            "protocolConfig.wstDiem",
+            config.contracts.inferenceVault !== null &&
+              addressEqual(protocolConfig.wstDiem, config.contracts.inferenceVault),
+          );
+        }
+        executor = {
+          ...executor,
+          canonicalFlashPool: canonicalFlashPool as Address,
+          expectedFlashFeeFor50Diem: BigInt(executorFee as bigint | number | string),
+          loanTokenIsToken0: Boolean(loanTokenIsToken0),
+          flashConfig: flashConfig ?? undefined,
+          protocolConfig: protocolConfig ?? undefined,
+          verified: mismatches.length === 0,
+        };
+        checks.push(
+          check(
+            "executor-config",
+            executor.verified ? "pass" : "fail",
+            executor.verified
+              ? "loopExecutor runtime config matches flash and protocol config"
+              : `loopExecutor runtime config mismatch: ${mismatches.join(", ")}`,
+          ),
+        );
+        if (!executor.verified) {
+          blockers.push("loopExecutor runtime config mismatch");
+        }
       }
-      ownerReadiness = {
-        address: owner,
-        collateralWstDiem: position.collateral,
-        borrowShares: position.borrowShares,
-        borrowedDiem,
-        hasExitPosition: position.collateral > 0n && position.borrowShares > 0n && borrowedDiem > 0n,
-        executorAuthorized,
-      };
+    }
+
+    if (owner === null) {
+      checks.push(
+        check("owner-position", "skip", "owner not configured; position readiness not checked"),
+      );
+      blockers.push("owner is not configured");
+    } else if (config.morpho.marketId === null || morpho === undefined) {
       checks.push(
         check(
           "owner-position",
-          ownerReadiness.hasExitPosition ? "pass" : "fail",
-          ownerReadiness.hasExitPosition ? "owner has collateral and DIEM debt" : "owner does not have an exit-ready position",
+          "fail",
+          "Morpho market state is required before owner position readiness",
         ),
       );
-      if (!ownerReadiness.hasExitPosition) {
-        blockers.push("owner does not have an exit-ready position");
-      }
-      if (config.contracts.loopExecutor === null) {
-        checks.push(check("morpho-authorization", "skip", "loopExecutor is not configured; authorization not checked"));
+      blockers.push("owner position cannot be checked without Morpho market state");
+    } else {
+      const position = parseMorphoPosition(
+        await input.client.readContract({
+          address: config.contracts.morphoBlue,
+          abi: morphoAbi,
+          functionName: "position",
+          args: [config.morpho.marketId, owner],
+          blockNumber,
+        }),
+      );
+      if (position === null) {
+        checks.push(
+          check("owner-position", "fail", "Morpho position returned an unsupported shape"),
+        );
+        blockers.push("owner position state unreadable");
       } else {
+        const borrowedDiem = computeBorrowedDiem(
+          {
+            totalBorrowAssets: morpho.totalBorrowAssets,
+            totalBorrowShares: morpho.totalBorrowShares,
+          },
+          { borrowShares: position.borrowShares },
+        );
+        let executorAuthorized: boolean | null = null;
+        if (config.contracts.loopExecutor !== null) {
+          executorAuthorized = Boolean(
+            await input.client.readContract({
+              address: config.contracts.morphoBlue,
+              abi: morphoAbi,
+              functionName: "isAuthorized",
+              args: [owner, config.contracts.loopExecutor],
+              blockNumber,
+            }),
+          );
+        }
+        ownerReadiness = {
+          address: owner,
+          collateralWstDiem: position.collateral,
+          borrowShares: position.borrowShares,
+          borrowedDiem,
+          hasExitPosition:
+            position.collateral > 0n && position.borrowShares > 0n && borrowedDiem > 0n,
+          executorAuthorized,
+        };
         checks.push(
           check(
-            "morpho-authorization",
-            executorAuthorized === true ? "pass" : "fail",
-            executorAuthorized === true ? "owner has authorized loopExecutor" : "owner has not authorized loopExecutor",
+            "owner-position",
+            ownerReadiness.hasExitPosition ? "pass" : "fail",
+            ownerReadiness.hasExitPosition
+              ? "owner has collateral and DIEM debt"
+              : "owner does not have an exit-ready position",
           ),
         );
-      }
-      if (config.contracts.loopExecutor !== null && executorAuthorized !== true) {
-        blockers.push("owner has not authorized loopExecutor");
+        if (!ownerReadiness.hasExitPosition) {
+          blockers.push("owner does not have an exit-ready position");
+        }
+        if (config.contracts.loopExecutor === null) {
+          checks.push(
+            check(
+              "morpho-authorization",
+              "skip",
+              "loopExecutor is not configured; authorization not checked",
+            ),
+          );
+        } else {
+          checks.push(
+            check(
+              "morpho-authorization",
+              executorAuthorized === true ? "pass" : "fail",
+              executorAuthorized === true
+                ? "owner has authorized loopExecutor"
+                : "owner has not authorized loopExecutor",
+            ),
+          );
+        }
+        if (config.contracts.loopExecutor !== null && executorAuthorized !== true) {
+          blockers.push("owner has not authorized loopExecutor");
+        }
       }
     }
-  }
   } catch (error) {
     const message = errorMessage(error);
     checks.push(check("rpc-read", "fail", `live readiness read failed: ${message}`));
     blockers.push(`live readiness read failed: ${message}`);
   }
 
-  checks.push(check("audit-gate", "fail", "broadcast remains disabled until production executor audit/review is complete"));
+  checks.push(
+    check(
+      "audit-gate",
+      "fail",
+      "broadcast remains disabled until production executor audit/review is complete",
+    ),
+  );
   blockers.push("broadcast disabled pending production executor audit/review");
 
   return {
@@ -504,6 +644,7 @@ export async function buildLoopReadiness(input: {
     blockNumber,
     checks,
     blockers,
+    vault,
     curve,
     morpho,
     owner: ownerReadiness,

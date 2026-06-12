@@ -12,10 +12,25 @@ import { buildLoopReadiness } from "../loop/readiness.js";
 import type { LoopReadinessResult } from "../loop/readiness.js";
 import { buildConfiguredLoopSafetyEvidence } from "../loop/safetyEvidence.js";
 import { simulateLoopExecutorCall } from "../loop/simulator.js";
+import { buildLoopSizingReport } from "../loop/sizing.js";
+import { buildLoopSizingScenarios, type LoopSizingGridOptions } from "../loop/sizingScenarios.js";
+import { evaluateReadinessAlerts } from "../monitor/readinessAlerts.js";
 import type { AppConfig, Severity } from "../types/domain.js";
 import { CliError, toCliError } from "./errors.js";
-import { assertBroadcastNotAllowed, buildLoopExecutorParamsForCommand, projectLoopCommand } from "./loop.js";
-import { jsonEnvelope, printJson, renderLoopReadinessTable, renderStatusTable, stringifyJson } from "./output.js";
+import {
+  assertBroadcastNotAllowed,
+  buildLoopExecutorParamsForCommand,
+  projectLoopCommand,
+} from "./loop.js";
+import {
+  jsonEnvelope,
+  printJson,
+  renderLoopReadinessTable,
+  renderLoopSizingTable,
+  renderMonitorDashboard,
+  renderStatusTable,
+  stringifyJson,
+} from "./output.js";
 import { parseAddress, parseStrictFloat, parseStrictInteger } from "./parse.js";
 import { buildStatus, runWatchOnce } from "./status.js";
 
@@ -28,7 +43,9 @@ const AUDIT_GATE_BLOCKER = "broadcast disabled pending production executor audit
 
 function assertStrictLoopReadinessEvidence(result: LoopReadinessResult): void {
   const auditGate = result.checks.find((check) => check.key === "audit-gate");
-  const nonAuditIssues = result.checks.filter((check) => check.key !== "audit-gate" && check.status !== "pass");
+  const nonAuditIssues = result.checks.filter(
+    (check) => check.key !== "audit-gate" && check.status !== "pass",
+  );
   const unexpectedBlockers = result.blockers.filter((blocker) => blocker !== AUDIT_GATE_BLOCKER);
 
   if (
@@ -142,7 +159,10 @@ program
     await runAction(this, "watch", async (config) => {
       const opts = this.opts<{ once?: boolean }>();
       if (!opts.once) {
-        throw new CliError("NOT_IMPLEMENTED", "Persistent TUI is not implemented in this slice; use watch --once");
+        throw new CliError(
+          "NOT_IMPLEMENTED",
+          "Persistent TUI is not implemented in this slice; use watch --once",
+        );
       }
       const result = await runWatchOnce(config);
       if (this.optsWithGlobals<GlobalOptions>().json) {
@@ -152,23 +172,122 @@ program
     });
   });
 
+program
+  .command("monitor")
+  .description("Operator dashboard for live Curve, Morpho, executor, and owner readiness")
+  .option("--owner <address>", "position owner override")
+  .option("--loop-executor <address>", "loopExecutor override for live monitoring")
+  .option("--alert", "deliver monitor alerts to configured stderr/webhook/Telegram channels", false)
+  .action(async function (this: Command) {
+    await runAction(this, "monitor", async (config) => {
+      const opts = this.opts<{ owner?: string; loopExecutor?: string; alert?: boolean }>();
+      const owner =
+        opts.owner === undefined ? config.position.owner : parseAddress(opts.owner, "--owner");
+      if (opts.loopExecutor !== undefined) {
+        config = {
+          ...config,
+          contracts: {
+            ...config.contracts,
+            loopExecutor: parseAddress(opts.loopExecutor, "--loop-executor"),
+          },
+        };
+      }
+
+      let client: Awaited<ReturnType<typeof createViemLoopSimulationClient>> | undefined;
+      try {
+        client = (await createViemLoopSimulationClient(config)) ?? undefined;
+      } catch {
+        client = undefined;
+      }
+      const readiness = await buildLoopReadiness({ config, owner, client });
+      const alerts = evaluateReadinessAlerts(readiness);
+      const delivered = opts.alert
+        ? await deliverConfiguredAlerts(
+            config,
+            alerts,
+            readiness.blockNumber ?? 0n,
+            Math.floor(Date.now() / 1000),
+          )
+        : [];
+      const result = { readiness, alerts, delivered };
+      if (this.optsWithGlobals<GlobalOptions>().json) {
+        return result;
+      }
+      return renderMonitorDashboard(readiness, alerts, delivered);
+    });
+  });
+
 const loop = program.command("loop").description("Loop position commands");
+
+loop
+  .command("sizing")
+  .description(
+    "Offline loop sizing simulator for Curve, Morpho, APY, slippage, and unwind scenarios",
+  )
+  .option("--json", "emit JSON envelope")
+  .option("--preset <preset>", "baseline|current-zero|liquidity-sweep", "baseline")
+  .option("--initial-diem <amounts>", "comma-separated initial DIEM equity amounts")
+  .option("--initial-wstdiem <amounts>", "comma-separated initial wstDIEM collateral amounts")
+  .option("--wstdiem-nav <amount>", "DIEM value of 1 wstDIEM when --initial-wstdiem is used", "1")
+  .option("--target-leverage <values>", "comma-separated leverage targets", "1.5,2,3")
+  .option("--curve-depth-diem <amounts>", "comma-separated Curve TVL/depth assumptions in DIEM")
+  .option("--morpho-supply-diem <amounts>", "comma-separated Morpho supply assumptions in DIEM")
+  .option(
+    "--morpho-existing-borrow-diem <amount>",
+    "existing Morpho borrow to reserve from usable supply",
+  )
+  .option("--vault-apy-bps <bps>", "comma-separated vault APY assumptions in bps", "1500")
+  .option("--borrow-apy-bps <bps>", "comma-separated Morpho borrow APY assumptions in bps", "800")
+  .option("--curve-fee-bps <bps>", "Curve fee assumption in bps")
+  .option("--slippage-bps <bps>", "maximum acceptable simulated entry/exit slippage bps")
+  .option("--flash-fee-bps <bps>", "flash fee assumption in bps")
+  .option(
+    "--max-curve-position-share-bps <bps>",
+    "maximum position/depth share before Curve blocks",
+  )
+  .option("--max-morpho-utilization-bps <bps>", "maximum Morpho utilization available to this loop")
+  .option("--min-health-factor <value>", "minimum post-loop health factor")
+  .option("--min-net-apy-bps <bps>", "minimum acceptable net APY in bps")
+  .option("--holding-days <days>", "holding period for annualizing one-time costs")
+  .action(async function (this: Command) {
+    await runAction(this, "loop sizing", (config) => {
+      let scenarios;
+      try {
+        scenarios = buildLoopSizingScenarios(config, this.opts<LoopSizingGridOptions>());
+      } catch (error) {
+        throw new CliError("INVALID_INPUT", error instanceof Error ? error.message : String(error));
+      }
+      const report = buildLoopSizingReport(scenarios);
+      if (this.optsWithGlobals<GlobalOptions>().json) {
+        return report;
+      }
+      return renderLoopSizingTable(report);
+    });
+  });
 
 loop
   .command("readiness")
   .description("Read live Curve, Morpho, executor, and owner exit readiness")
   .option("--owner <address>", "position owner override")
   .option("--loop-executor <address>", "loopExecutor override for live readiness evidence")
-  .option("--strict-evidence", "exit non-zero unless all live evidence checks pass except the closed audit gate", false)
+  .option(
+    "--strict-evidence",
+    "exit non-zero unless all live evidence checks pass except the closed audit gate",
+    false,
+  )
   .action(async function (this: Command) {
     await runAction(this, "loop readiness", async (config) => {
       const opts = this.opts<{ owner?: string; loopExecutor?: string; strictEvidence?: boolean }>();
       const ownerOption = opts.owner;
-      const owner = ownerOption === undefined ? config.position.owner : parseAddress(ownerOption, "--owner");
+      const owner =
+        ownerOption === undefined ? config.position.owner : parseAddress(ownerOption, "--owner");
       if (opts.loopExecutor !== undefined) {
         config = {
           ...config,
-          contracts: { ...config.contracts, loopExecutor: parseAddress(opts.loopExecutor, "--loop-executor") },
+          contracts: {
+            ...config.contracts,
+            loopExecutor: parseAddress(opts.loopExecutor, "--loop-executor"),
+          },
         };
       }
       let client: Awaited<ReturnType<typeof createViemLoopSimulationClient>> | undefined;
@@ -224,7 +343,9 @@ function addLoopAction(name: "open" | "rebalance" | "exit"): Command {
             : parseStrictFloat(opts.targetLeverage, "--target-leverage"),
         initialDiem: opts.initialDiem,
         slippageBps:
-          opts.slippageBps === undefined ? undefined : parseStrictInteger(opts.slippageBps, "--slippage-bps"),
+          opts.slippageBps === undefined
+            ? undefined
+            : parseStrictInteger(opts.slippageBps, "--slippage-bps"),
         dryRun: opts.dryRun,
         owner: opts.owner === undefined ? undefined : parseAddress(opts.owner, "--owner"),
         from: opts.from === undefined ? undefined : parseAddress(opts.from, "--from"),
@@ -278,7 +399,9 @@ loop
             : parseStrictFloat(opts.targetLeverage, "--target-leverage"),
         initialDiem: opts.initialDiem,
         slippageBps:
-          opts.slippageBps === undefined ? undefined : parseStrictInteger(opts.slippageBps, "--slippage-bps"),
+          opts.slippageBps === undefined
+            ? undefined
+            : parseStrictInteger(opts.slippageBps, "--slippage-bps"),
         owner: opts.owner === undefined ? undefined : parseAddress(opts.owner, "--owner"),
         from: opts.from === undefined ? undefined : parseAddress(opts.from, "--from"),
         force: opts.force,
@@ -377,13 +500,18 @@ loop
   .command("authorize-executor")
   .description("Build Morpho executor authorization")
   .option("--owner <address>", "owner override")
-  .option("--live", "read current authorization and simulate setAuthorization with gas estimate", false)
+  .option(
+    "--live",
+    "read current authorization and simulate setAuthorization with gas estimate",
+    false,
+  )
   .option("--dry-run", "simulate only", false)
   .action(async function (this: Command) {
     await runAction(this, "loop authorize-executor", async (config) => {
       const opts = this.opts<{ owner?: string; live?: boolean }>();
       const ownerOption = opts.owner;
-      const owner = ownerOption === undefined ? config.position.owner : parseAddress(ownerOption, "--owner");
+      const owner =
+        ownerOption === undefined ? config.position.owner : parseAddress(ownerOption, "--owner");
       const projection = projectLoopCommand(config, {
         action: "rebalance",
         targetLeverage: 1.7,
@@ -439,7 +567,9 @@ loop
       };
       if (authorization.status !== "passed") {
         throw new CliError(
-          authorization.status === "failed" ? "AUTHORIZATION_LIVE_FAILED" : "AUTHORIZATION_LIVE_BLOCKED",
+          authorization.status === "failed"
+            ? "AUTHORIZATION_LIVE_FAILED"
+            : "AUTHORIZATION_LIVE_BLOCKED",
           authorization.error?.message ?? "Authorization simulation did not pass",
           undefined,
           data,
@@ -462,7 +592,9 @@ loop
     await runAction(this, "loop history", (config) => {
       const storage = new Storage(config.storage.sqlitePath);
       try {
-        return storage.listTxHistory(parseStrictInteger(this.opts<{ limit: string }>().limit, "--limit"));
+        return storage.listTxHistory(
+          parseStrictInteger(this.opts<{ limit: string }>().limit, "--limit"),
+        );
       } finally {
         storage.close();
       }
