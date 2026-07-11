@@ -164,6 +164,12 @@ live-seed — and any future model change — must conform to.
       blocked until **SPEC002 rev-2**.
   - **Central product-safety rule added:** any degraded/unseeded input sets `authoritative:false` and
     **demotes the verdict token itself**, not just a warnings sidecar.
+  - **Part A IMPLEMENTED + SHIPPED (7d74aa4)** — the first code of the spec-first pipeline, end-to-end:
+    spec → executor (opus) → code-review approval gate → fixes → verify → merge behind green gates.
+    `--from-chain` seeds `rateAtTarget` (direct read; live 217 bps) + Morpho supply/borrow, block-pinned
+    and fail-closed; `src/loop/fromChainSeed.ts` + 30 tests; offline output byte-for-byte unchanged. The
+    review gate (run before code) + approval pass caught the design and every carried-over bug; the
+    inversion fallback was consciously cut (direct-read revert fails closed).
 
 ### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B)
 
