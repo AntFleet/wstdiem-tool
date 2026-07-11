@@ -100,7 +100,14 @@ Delivered:
    auto-deleverager, daemon/TUI, hardware wallet) into **Appendix A (Deferred)**. 1051 → 610 lines.
 3. Decisions applied: D1 exit-only current; D2 `watch --once` + scheduler; D3 broadcast fail-closed.
 
-**Next:** a scaled-down review-pass (verifier/critic) before rev-2 is treated as locked, then Phase 2.
+**Review gate — PASSED (2026-07-11).** Two-agent review (adversarial technical + product-design).
+All Critical/Major technical findings were verified against code and corrected in rev-2 (§1 ABI
+over-listing, §9 fictional backoff, §6/§7 schema/config values, §3/§5/§10 details) — see the
+post-review corrections table in the reconciliation doc. Product decision applied: **monitor-and-
+rehearse only** — no supported in-tool execution while broadcast is fail-closed (Open Question #6
+resolved); remaining product gaps captured as Open Questions #7–9. **rev-2 is locked.**
+
+**Next:** Phase 2 — SPEC002 (Loop Sizing Engine), which rev-2 now formally forward-references.
 
 ## Phase 2 — SPEC002 (Loop Sizing Engine) — retro-spec
 
