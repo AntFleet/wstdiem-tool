@@ -32,10 +32,24 @@ interface MockOptions {
   revertFunction?: string;
   getChainIdThrows?: boolean;
   codelessAddresses?: Address[];
+  // Part B-1 curve reads. `curveDiemBalance` = balances(0); `curveWstDiemBalance` = balances(1)
+  // raw shares. `vaultNavBps` sets the wstDIEM→DIEM NAV: convertToAssets(x) = x × nav/10000,
+  // convertToShares(x) = x × 10000/nav (default 10000 = identity, so existing tests are unchanged).
+  // `getDyOutRateBps` sets get_dy(dx) = convertToAssets(dx) × rate/10000 — 10000 (default) is a
+  // lossless quote (0 bps impact regardless of NAV), lower values model a real exit price impact.
+  curveDiemBalance?: bigint;
+  curveWstDiemBalance?: bigint;
+  vaultNavBps?: number;
+  getDyOutRateBps?: number;
 }
+
+const DEFAULT_CURVE_LEG_RAW = 1_000_000n * WAD;
 
 class MockSeedClient implements FromChainSeedClient {
   readonly readBlockNumbers: Array<bigint | undefined> = [];
+  readonly readFunctions: string[] = [];
+  /** Every `dx` (wstDIEM shares) passed to `get_dy`, to prove the exit is share-denominated. */
+  readonly readGetDyDx: bigint[] = [];
 
   constructor(private readonly options: MockOptions = {}) {}
 
@@ -63,6 +77,7 @@ class MockSeedClient implements FromChainSeedClient {
     blockNumber?: bigint;
   }): Promise<unknown> {
     this.readBlockNumbers.push(args.blockNumber);
+    this.readFunctions.push(args.functionName);
     if (args.functionName === this.options.revertFunction) {
       throw new Error(`forced ${args.functionName} revert`);
     }
@@ -78,6 +93,30 @@ class MockSeedClient implements FromChainSeedClient {
         0n,
         0n,
       ];
+    }
+    if (args.functionName === "balances") {
+      const index = BigInt(args.args?.[0] as bigint);
+      return index === 0n
+        ? (this.options.curveDiemBalance ?? DEFAULT_CURVE_LEG_RAW)
+        : (this.options.curveWstDiemBalance ?? DEFAULT_CURVE_LEG_RAW);
+    }
+    // NAV-aware conversions (default nav 10000 = identity). convertToAssets values shares in DIEM;
+    // convertToShares inverts it. A non-identity nav makes shares ≠ assets, so a regression that
+    // fed the DIEM notional straight into get_dy's dx (skipping convertToShares) would be caught.
+    const navBps = BigInt(this.options.vaultNavBps ?? 10_000);
+    if (args.functionName === "convertToAssets") {
+      return (BigInt(args.args?.[0] as bigint) * navBps) / 10_000n;
+    }
+    if (args.functionName === "convertToShares") {
+      return (BigInt(args.args?.[0] as bigint) * 10_000n) / navBps;
+    }
+    if (args.functionName === "get_dy") {
+      const dx = BigInt(args.args?.[2] as bigint);
+      this.readGetDyDx.push(dx);
+      // Quote in DIEM: value the wstDIEM dx at NAV, then apply the exit rate. Keeps priceImpact =
+      // (10000 - getDyOutRateBps) bps independent of NAV, so rate-based assertions are stable.
+      const expectedDiemOut = (dx * navBps) / 10_000n;
+      return (expectedDiemOut * BigInt(this.options.getDyOutRateBps ?? 10_000)) / 10_000n;
     }
     throw new Error(`unexpected readContract ${args.functionName}`);
   }
@@ -476,6 +515,233 @@ describe("loop sizing --from-chain (SPEC003 Part A)", () => {
       ),
     );
     expect(distinctCurveDepth.size).toBeGreaterThan(1);
+  });
+});
+
+describe("loop sizing --from-chain (SPEC003 Part B-1: curve legs + get_dy exit slippage)", () => {
+  // Acceptance 12 — direction-correct: a fat-DIEM-leg pool exiting is NOT over-blocked. A
+  // direction-blind `2×min(leg)` heuristic would penalize the tiny wstDIEM leg; the live get_dy
+  // quote prices the actual exit and keeps the scenario off the exit-slippage gate.
+  it("does not over-block a fat-DIEM-leg exit and sources exit slippage from get_dy", async () => {
+    const report = await buildFromChainSizingReport({
+      config: baseConfig(),
+      client: new MockSeedClient({
+        marketSupply: 100_000n * WAD,
+        curveDiemBalance: 1_000_000n * WAD, // fat DIEM leg (the leg the exit draws)
+        curveWstDiemBalance: 1_000n * WAD, // thin wstDIEM leg
+        getDyOutRateBps: 9_950, // a healthy quote: 50 bps exit impact
+      }),
+      options: { initialDiem: "100", targetLeverage: "1.5", vaultApyBps: "1500" },
+      explicitFlags: NO_EXPLICIT,
+    });
+
+    expect(report.results).toHaveLength(1);
+    const result = report.results[0];
+    expect(result.exitSlippageSource).toBe("get_dy");
+    // Injected impact is the live 50 bps, well under the 300 bps cap — not over-blocked.
+    expect(result.exitSlippageBps).toBe(50);
+    expect(result.exitSlippageBps).toBeLessThanOrEqual(result.scenario.maxSlippageBps);
+    expect(result.blockers).not.toContain("curve_liquidity_insufficient");
+    // The seeded legs are recorded in provenance (DIEM-denominated).
+    expect(report.seedProvenance?.curveDiemLegDiem).toBe(1_000_000n * WAD);
+    expect(report.seedProvenance?.curveWstDiemLegDiem).toBe(1_000n * WAD);
+  });
+
+  // Acceptance 12 — both legs zero → fail-closed (empty pool), no partial report.
+  it("fails closed when both Curve legs are zero", async () => {
+    await expect(
+      buildFromChainSizingReport({
+        config: baseConfig(),
+        client: new MockSeedClient({
+          curveDiemBalance: 0n,
+          curveWstDiemBalance: 0n,
+        }),
+        options: { initialDiem: "100", targetLeverage: "1.5" },
+        explicitFlags: NO_EXPLICIT,
+      }),
+    ).rejects.toMatchObject({ code: "FROM_CHAIN_SEED_BLOCKED" });
+  });
+
+  it("fails closed when a Curve balances read reverts", async () => {
+    await expect(
+      buildFromChainSizingReport({
+        config: baseConfig(),
+        client: new MockSeedClient({ revertFunction: "balances" }),
+        options: { initialDiem: "100", targetLeverage: "1.5" },
+        explicitFlags: NO_EXPLICIT,
+      }),
+    ).rejects.toMatchObject({ code: "FROM_CHAIN_SEED_BLOCKED" });
+  });
+
+  // §2 address validation parity — a codeless curvePool fails closed with a clear message
+  // (before any balances read) rather than relying on the raw read to revert.
+  it("fails closed with a clear message when the curvePool address has no deployed code", async () => {
+    const config = baseConfig();
+    expect(config.contracts.curvePool).not.toBeNull();
+    await expect(
+      seedFromChain({
+        config,
+        client: new MockSeedClient({ codelessAddresses: [config.contracts.curvePool as Address] }),
+        seedCurve: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "FROM_CHAIN_SEED_BLOCKED",
+      message: `curvePool address ${config.contracts.curvePool} has no code`,
+    });
+  });
+
+  // §6 imbalance demotion — a > 2:1 pool degrades the verdict token even though its rate seed is a
+  // clean direct read (authoritative would otherwise be true).
+  it("demotes the verdict when the Curve legs are more than 2:1 imbalanced", async () => {
+    const report = await buildFromChainSizingReport({
+      config: baseConfig(),
+      client: new MockSeedClient({
+        marketSupply: 100_000n * WAD,
+        curveDiemBalance: 30_000n * WAD,
+        curveWstDiemBalance: 10_000n * WAD, // ratio 3:1 > 2.0 threshold (deep enough to stay viable)
+      }),
+      options: { initialDiem: "100", targetLeverage: "1.5", vaultApyBps: "1500" },
+      explicitFlags: NO_EXPLICIT,
+    });
+
+    // The rate seed is a clean direct read, so ONLY the imbalance can have flipped this.
+    expect(report.seedProvenance?.rateAtTargetSource).toBe("direct");
+    expect(report.authoritative).toBe(false);
+    expect(report.seedProvenance?.curveImbalanceRatio).toBe(3);
+    expect(report.seedProvenance?.warnings.join(" ")).toContain("imbalanced");
+
+    const rendered = renderLoopSizingTable(report);
+    expect(rendered).toContain("candidate — unverified seed");
+    expect(rendered).toContain("UNVERIFIED SEED");
+  });
+
+  it("keeps the verdict authoritative for a balanced pool with a clean rate seed", async () => {
+    const report = await buildFromChainSizingReport({
+      config: baseConfig(),
+      client: new MockSeedClient({ marketSupply: 100_000n * WAD }),
+      options: { initialDiem: "100", targetLeverage: "1.5", vaultApyBps: "1500" },
+      explicitFlags: NO_EXPLICIT,
+    });
+
+    expect(report.authoritative).toBe(true);
+    expect(report.seedProvenance?.curveImbalanceRatio).toBe(1);
+    expect(report.seedProvenance?.seededFields.curveDepthDiem).toBe("chain");
+    const rendered = renderLoopSizingTable(report);
+    expect(rendered).not.toContain("candidate — unverified seed");
+  });
+
+  // §5 precedence — an explicit curve-leg flag wins: the curve is NOT chain-seeded and NO get_dy
+  // quote is injected (mixing a swept/hypothetical leg with one real get_dy would be inconsistent).
+  it("does not chain-seed the curve when an explicit --curve-diem-leg flag is given", async () => {
+    const client = new MockSeedClient({ marketSupply: 100_000n * WAD });
+    const report = await buildFromChainSizingReport({
+      config: baseConfig(),
+      client,
+      options: { initialDiem: "100", targetLeverage: "1.5", curveDiemLeg: "5000" },
+      explicitFlags: { ...NO_EXPLICIT, curveDiemLeg: true },
+    });
+
+    expect(report.seedProvenance?.seededFields.curveDepthDiem).toBe("flag");
+    expect(report.seedProvenance?.curveDiemLegDiem).toBeUndefined();
+    // No curve or get_dy read happened, and every scenario keeps the estimate source.
+    expect(client.readFunctions).not.toContain("balances");
+    expect(client.readFunctions).not.toContain("get_dy");
+    expect(report.results.every((result) => result.exitSlippageSource === "estimate")).toBe(true);
+  });
+
+  // Criterion 7 (extended to Part B-1) — the curve balances, convertToAssets, convertToShares and
+  // get_dy reads all share the one pinned block with the rate/market reads.
+  it("pins every curve and get_dy read to the one resolved block", async () => {
+    const client = new MockSeedClient({ latestBlock: 7_654n, marketSupply: 100_000n * WAD });
+    await buildFromChainSizingReport({
+      config: baseConfig(),
+      client,
+      options: { initialDiem: "100", targetLeverage: "1.5,2" },
+      explicitFlags: NO_EXPLICIT,
+    });
+
+    // Proves the new reads actually ran (curve legs + a live exit quote) …
+    expect(client.readFunctions).toContain("balances");
+    expect(client.readFunctions).toContain("convertToShares");
+    expect(client.readFunctions).toContain("get_dy");
+    // … and every read (Part A + Part B-1) is pinned to the same block.
+    expect(client.readBlockNumbers.every((block) => block === 7_654n)).toBe(true);
+  });
+
+  // §4.2 memoization — a grid sweeping only leverage (2 distinct position sizes) reads
+  // convertToShares/get_dy once per distinct size, not once per scenario.
+  it("memoizes the get_dy injection by distinct position size", async () => {
+    const client = new MockSeedClient({ marketSupply: 100_000n * WAD });
+    await buildFromChainSizingReport({
+      config: baseConfig(),
+      client,
+      // 3 leverages × 1 initial = 3 scenarios, but 3 distinct position sizes here.
+      options: { initialDiem: "100", targetLeverage: "1.5,2,3" },
+      explicitFlags: NO_EXPLICIT,
+    });
+
+    const convertToSharesReads = client.readFunctions.filter(
+      (fn) => fn === "convertToShares",
+    ).length;
+    const getDyReads = client.readFunctions.filter((fn) => fn === "get_dy").length;
+    expect(convertToSharesReads).toBe(3);
+    expect(getDyReads).toBe(3);
+  });
+
+  // §4.2 denomination — the exit sells wstDIEM SHARES, so the amount fed to get_dy must be
+  // convertToShares(positionCollateral), NOT the DIEM notional. Under a 2:1 NAV shares ≠ assets,
+  // so this fails loudly if a regression ever skips convertToShares and passes the notional.
+  it("feeds get_dy the share-denominated exit amount, not the DIEM notional", async () => {
+    const client = new MockSeedClient({ marketSupply: 100_000n * WAD, vaultNavBps: 20_000 });
+    await buildFromChainSizingReport({
+      config: baseConfig(),
+      client,
+      // position = ceil(100 × 1.5) = 150 DIEM; at a 2:1 NAV that is 75 wstDIEM shares.
+      options: { initialDiem: "100", targetLeverage: "1.5", vaultApyBps: "1500" },
+      explicitFlags: NO_EXPLICIT,
+    });
+
+    expect(client.readGetDyDx).toHaveLength(1);
+    // 75 wstDIEM (shares), not 150 (the DIEM notional) — proves convertToShares was applied.
+    expect(client.readGetDyDx[0]).toBe(75n * WAD);
+  });
+
+  // Acceptance 12 (the actual claim) — the direction-blind leg-aware ESTIMATE would breach the
+  // 300 bps cap and block on exit slippage, but the live get_dy quote prices the real exit under
+  // the cap, so the verdict flips off the exit-slippage gate.
+  it("clears the exit-slippage gate that the leg-aware estimate alone would trip", async () => {
+    // Same seeded legs, sized offline WITHOUT a get_dy injection: the estimate blocks.
+    const estimateOnly = buildLoopSizingReport(
+      buildLoopSizingScenarios(baseConfig(), {
+        initialDiem: "100",
+        targetLeverage: "1.5",
+        curveDiemLeg: "3000", // exit draws this leg: estimate = fee + ratioBps(150, 3000) ≈ 504 bps
+        curveWstdiemLeg: "3000",
+        morphoSupplyDiem: "100000",
+        vaultApyBps: "1500",
+      }),
+    );
+    expect(estimateOnly.results[0].exitSlippageSource).toBe("estimate");
+    expect(estimateOnly.results[0].exitSlippageBps).toBeGreaterThan(300);
+    expect(estimateOnly.results[0].blockers).toContain("curve_liquidity_insufficient");
+
+    // The same pool via --from-chain, but the live get_dy quote prices the exit at 100 bps.
+    const withGetDy = await buildFromChainSizingReport({
+      config: baseConfig(),
+      client: new MockSeedClient({
+        marketSupply: 100_000n * WAD,
+        curveDiemBalance: 3_000n * WAD,
+        curveWstDiemBalance: 3_000n * WAD,
+        getDyOutRateBps: 9_900, // 100 bps exit impact, well under the 300 bps cap
+      }),
+      options: { initialDiem: "100", targetLeverage: "1.5", vaultApyBps: "1500" },
+      explicitFlags: NO_EXPLICIT,
+    });
+    const result = withGetDy.results[0];
+    expect(result.exitSlippageSource).toBe("get_dy");
+    expect(result.exitSlippageBps).toBe(100);
+    // The gate the estimate tripped is now clear — the live quote rescued the exit.
+    expect(result.blockers).not.toContain("curve_liquidity_insufficient");
   });
 });
 

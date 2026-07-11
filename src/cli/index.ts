@@ -340,6 +340,9 @@ loop
           rateAtTargetApyBps: this.getOptionValueSource("rateAtTargetApyBps") === "cli",
           morphoSupplyDiem: this.getOptionValueSource("morphoSupplyDiem") === "cli",
           morphoExistingBorrowDiem: this.getOptionValueSource("morphoExistingBorrowDiem") === "cli",
+          curveDepthDiem: this.getOptionValueSource("curveDepthDiem") === "cli",
+          curveDiemLeg: this.getOptionValueSource("curveDiemLeg") === "cli",
+          curveWstdiemLeg: this.getOptionValueSource("curveWstdiemLeg") === "cli",
         },
         planningBlock,
       });

@@ -127,6 +127,12 @@ export interface SeedProvenance {
   blockNumber: bigint;
   chainId: number;
   rateAtTargetSource: "direct" | "uninitialized-default";
+  // Part B-1 curve provenance (SPEC003 §4.2/§6), populated only when the two Curve legs are
+  // chain-seeded; Part A and the explicit-flag / liquidity-sweep paths leave them undefined.
+  // Both legs are DIEM-denominated (`curveWstDiemLegDiem` is the wstDIEM leg valued at NAV).
+  curveDiemLegDiem?: bigint;
+  curveWstDiemLegDiem?: bigint;
+  curveImbalanceRatio?: number;
   seededFields: Record<string, "chain" | "flag" | "default">;
   authoritative: boolean;
   warnings: string[];
@@ -171,6 +177,16 @@ function mulDivFloor(value: bigint, multiplier: number, denominator = BPS_DENOMI
 
 function leverageMultiplier(scenario: LoopSizingScenario): number {
   return scenario.targetLeverageBps / BPS_DENOMINATOR;
+}
+
+/**
+ * The single source of truth for a scenario's levered position collateral (SPEC002 rev-2):
+ * `ceil(initialCollateral × targetLeverage)`. Defined once here and reused by both
+ * `sizeLoopScenario` and the `--from-chain` `get_dy` seam (SPEC003 §4.2), so the sizing
+ * that drives the live exit quote is byte-identical to the sizing the gates evaluate.
+ */
+export function positionCollateralForScenario(scenario: LoopSizingScenario): bigint {
+  return mulDivCeil(scenario.initialCollateralDiem, scenario.targetLeverageBps);
 }
 
 function numberRatioBps(numerator: bigint, denominator: bigint): number {
@@ -243,10 +259,7 @@ function isMarginal(result: Omit<LoopSizingResult, "status">): boolean {
 
 export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult {
   const blockers = validateScenario(scenario);
-  const positionCollateralDiem = mulDivCeil(
-    scenario.initialCollateralDiem,
-    scenario.targetLeverageBps,
-  );
+  const positionCollateralDiem = positionCollateralForScenario(scenario);
   const borrowAmountDiem =
     positionCollateralDiem > scenario.initialCollateralDiem
       ? positionCollateralDiem - scenario.initialCollateralDiem

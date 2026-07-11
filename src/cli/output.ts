@@ -281,6 +281,27 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
         .join("; "),
     ],
     ["rateAtTarget", provenance.rateAtTargetSource],
+  );
+  if (
+    provenance.curveDiemLegDiem !== undefined &&
+    provenance.curveWstDiemLegDiem !== undefined
+  ) {
+    seedTable.push([
+      "Curve legs",
+      `DIEM ${formatWad(provenance.curveDiemLegDiem)} / wstDIEM ${formatWad(
+        provenance.curveWstDiemLegDiem,
+      )} DIEM; exit slippage via live get_dy quote`,
+    ]);
+    if (provenance.curveImbalanceRatio !== undefined) {
+      seedTable.push([
+        "Curve imbalance",
+        Number.isFinite(provenance.curveImbalanceRatio)
+          ? `${provenance.curveImbalanceRatio.toFixed(2)}:1`
+          : "∞:1 (a leg is empty)",
+      ]);
+    }
+  }
+  seedTable.push(
     [
       "Authoritative",
       provenance.authoritative

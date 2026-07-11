@@ -1,3 +1,5 @@
+import { curvePoolAbi } from "../abi/curvePool.js";
+import { inferenceVaultAbi } from "../abi/inferenceVault.js";
 import { morphoIrmAbi } from "../abi/morphoIrm.js";
 import { formatWad } from "../metrics/math.js";
 import type { Address, AppConfig, Hex } from "../types/domain.js";
@@ -9,8 +11,10 @@ import {
   perSecWadToAprBps,
 } from "./morphoRate.js";
 import { readMorphoMarket, type LoopPreflightClient } from "./preflight.js";
+import { quoteCurveExitRoute } from "./routeQuote.js";
 import {
   buildLoopSizingReport,
+  positionCollateralForScenario,
   type LoopSizingReport,
   type SeedProvenance,
 } from "./sizing.js";
@@ -21,6 +25,17 @@ const SEED_BLOCKED = "FROM_CHAIN_SEED_BLOCKED";
 
 const ZERO_ADDRESS = `0x${"0".repeat(40)}` as Address;
 
+const CURVE_POOL_DIEM_INDEX = 0n;
+const CURVE_POOL_WSTDIEM_INDEX = 1n;
+
+/**
+ * Above this DIEM/wstDIEM leg ratio the chain-seeded curve verdict is demoted to
+ * non-authoritative (SPEC003 §6, Open Question 4 — tunable). Deliberately STRICTER than the
+ * engine's 20%-leg-deviation warning: a mild imbalance still warns via the engine, but a
+ * 2×-lopsided pool degrades the verdict token itself.
+ */
+const CURVE_IMBALANCE_AUTHORITATIVE_THRESHOLD = 2.0;
+
 /**
  * A read client for the on-chain seed reads. It reuses the injectable-client shape from
  * `preflight.ts` (so tests mock it) and adds `getBlockNumber` for resolving the `latest`
@@ -30,11 +45,18 @@ export interface FromChainSeedClient extends LoopPreflightClient {
   getBlockNumber(): Promise<bigint>;
 }
 
-/** The three Part-A safe seeds populated onto a `LoopSizingScenario`. */
+/**
+ * The chain seeds populated onto a `LoopSizingScenario`. The three Part-A safe seeds are always
+ * present; the two Curve legs (Part B-1, SPEC003 §4.2) are present only when the curve is
+ * chain-seeded (no explicit curve flag, not `--preset liquidity-sweep`). Both legs are
+ * DIEM-denominated (`curveWstDiemLegInDiem` is the wstDIEM leg valued at NAV).
+ */
 export interface FromChainSeeds {
   rateAtTargetApyBps: number;
   morphoSupplyDiem: bigint;
   morphoExistingBorrowDiem: bigint;
+  curveDiemLegDiem?: bigint;
+  curveWstDiemLegInDiem?: bigint;
 }
 
 export interface FromChainSeedResult {
@@ -42,11 +64,18 @@ export interface FromChainSeedResult {
   provenance: SeedProvenance;
 }
 
-/** Which sizing dims the operator supplied explicitly (a flag wins over a chain seed). */
+/**
+ * Which sizing dims the operator supplied explicitly (a flag wins over a chain seed). The curve
+ * flags are optional so Part-A callers/tests need not enumerate them; an absent flag reads as
+ * "not explicit" and the curve is chain-seeded.
+ */
 export interface FromChainExplicitFlags {
   rateAtTargetApyBps: boolean;
   morphoSupplyDiem: boolean;
   morphoExistingBorrowDiem: boolean;
+  curveDepthDiem?: boolean;
+  curveDiemLeg?: boolean;
+  curveWstdiemLeg?: boolean;
 }
 
 function toBigInt(value: unknown): bigint {
@@ -104,8 +133,9 @@ export async function seedFromChain(input: {
   config: AppConfig;
   client: FromChainSeedClient;
   planningBlock?: bigint;
+  seedCurve?: boolean;
 }): Promise<FromChainSeedResult> {
-  const { config, client, planningBlock } = input;
+  const { config, client, planningBlock, seedCurve = false } = input;
 
   if (config.morpho.marketId === null) {
     throw new CliError(SEED_BLOCKED, "marketId is required to seed sizing inputs from chain");
@@ -192,16 +222,102 @@ export async function seedFromChain(input: {
     }
   }
 
+  // Part B-1 (SPEC003 §4.2): seed the two Curve legs, pinned to the SAME block. Only when the
+  // caller has decided to chain-seed the curve (no explicit curve flag, not liquidity-sweep).
+  let curveDiemLegDiem: bigint | undefined;
+  let curveWstDiemLegInDiem: bigint | undefined;
+  let curveImbalanceRatio: number | undefined;
+  if (seedCurve) {
+    const { curvePool, inferenceVault } = config.contracts;
+    if (curvePool === null || inferenceVault === null) {
+      throw new CliError(
+        SEED_BLOCKED,
+        "curvePool and inferenceVault must be configured to seed Curve depth from chain",
+      );
+    }
+    // §2 address validation parity with the Part-A reads (irm/morpho): nonzero + has-code, so a
+    // codeless/misconfigured curve address fails closed with a clear message rather than relying
+    // on the raw read to revert (and against a non-viem client that might not guard zero data).
+    await assertContractHasCode(client, "curvePool", curvePool);
+    await assertContractHasCode(client, "inferenceVault", inferenceVault);
+
+    let diemLegDiem: bigint;
+    let wstDiemLegRaw: bigint;
+    try {
+      diemLegDiem = toBigInt(
+        await client.readContract({
+          address: curvePool,
+          abi: curvePoolAbi,
+          functionName: "balances",
+          args: [CURVE_POOL_DIEM_INDEX],
+          blockNumber,
+        }),
+      );
+      wstDiemLegRaw = toBigInt(
+        await client.readContract({
+          address: curvePool,
+          abi: curvePoolAbi,
+          functionName: "balances",
+          args: [CURVE_POOL_WSTDIEM_INDEX],
+          blockNumber,
+        }),
+      );
+    } catch (error) {
+      throw new CliError(SEED_BLOCKED, `Curve balances read reverted: ${message(error)}`);
+    }
+
+    let wstDiemLegInDiem: bigint;
+    try {
+      wstDiemLegInDiem = toBigInt(
+        await client.readContract({
+          address: inferenceVault,
+          abi: inferenceVaultAbi,
+          functionName: "convertToAssets",
+          args: [wstDiemLegRaw],
+          blockNumber,
+        }),
+      );
+    } catch (error) {
+      throw new CliError(
+        SEED_BLOCKED,
+        `InferenceVault.convertToAssets (wstDIEM leg) reverted: ${message(error)}`,
+      );
+    }
+
+    // Both legs zero → empty pool → fail-closed (SPEC003 acceptance 12).
+    if (diemLegDiem === 0n && wstDiemLegInDiem === 0n) {
+      throw new CliError(
+        SEED_BLOCKED,
+        "Curve pool has zero DIEM and wstDIEM depth; cannot seed an empty pool",
+      );
+    }
+
+    curveDiemLegDiem = diemLegDiem;
+    curveWstDiemLegInDiem = wstDiemLegInDiem;
+    curveImbalanceRatio = computeCurveImbalanceRatio(diemLegDiem, wstDiemLegInDiem);
+    if (curveImbalanceRatio > CURVE_IMBALANCE_AUTHORITATIVE_THRESHOLD) {
+      authoritative = false;
+      warnings.push(
+        `curve legs imbalanced ${formatImbalanceRatio(curveImbalanceRatio)}:1 — verdict is not authoritative`,
+      );
+    }
+  }
+
   return {
     seeds: {
       rateAtTargetApyBps,
       morphoSupplyDiem: market.totalSupplyAssets,
       morphoExistingBorrowDiem: market.totalBorrowAssets,
+      curveDiemLegDiem,
+      curveWstDiemLegInDiem,
     },
     provenance: {
       blockNumber,
       chainId,
       rateAtTargetSource,
+      curveDiemLegDiem,
+      curveWstDiemLegDiem: curveWstDiemLegInDiem,
+      curveImbalanceRatio,
       seededFields: {
         rateAtTargetApyBps: "chain",
         morphoSupplyDiem: "chain",
@@ -211,6 +327,28 @@ export async function seedFromChain(input: {
       warnings,
     },
   };
+}
+
+/**
+ * `max(legA, legB) / min(legA, legB)`, always ≥ 1. Defined = 1 when BOTH legs are 0 (defensive
+ * against a `0/0 → NaN` that would suppress the warning on the most-drained pool; the both-zero
+ * case already fails closed upstream). One leg zero + the other nonzero → `+Infinity` (an extreme
+ * imbalance that trips the authoritative demotion).
+ */
+function computeCurveImbalanceRatio(diemLegDiem: bigint, wstDiemLegInDiem: bigint): number {
+  if (diemLegDiem === 0n && wstDiemLegInDiem === 0n) {
+    return 1;
+  }
+  const high = diemLegDiem > wstDiemLegInDiem ? diemLegDiem : wstDiemLegInDiem;
+  const low = diemLegDiem > wstDiemLegInDiem ? wstDiemLegInDiem : diemLegDiem;
+  if (low === 0n) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Number((high * 10_000n) / low) / 10_000;
+}
+
+function formatImbalanceRatio(ratio: number): string {
+  return Number.isFinite(ratio) ? ratio.toFixed(2) : "∞";
 }
 
 /**
@@ -256,7 +394,17 @@ export async function buildFromChainSizingReport(input: {
   // constructing the client.
   assertFromChainCompatibleOptions(options);
 
-  const { seeds, provenance } = await seedFromChain({ config, client, planningBlock });
+  // Curve-seed precedence (SPEC003 §5): an explicit curve flag wins over the chain seed, and
+  // `--preset liquidity-sweep` still SWEEPS curve depth. Only otherwise do we chain-seed the two
+  // legs (and inject a single live get_dy exit slippage) — mixing a hypothetical/swept leg grid
+  // with one real get_dy quote would be internally inconsistent.
+  const anyExplicitCurveFlag = Boolean(
+    explicitFlags.curveDepthDiem || explicitFlags.curveDiemLeg || explicitFlags.curveWstdiemLeg,
+  );
+  const curveSweptByPreset = options.preset === "liquidity-sweep";
+  const seedCurve = !anyExplicitCurveFlag && !curveSweptByPreset;
+
+  const { seeds, provenance } = await seedFromChain({ config, client, planningBlock, seedCurve });
 
   const gridOptions: LoopSizingGridOptions = { ...options };
   const seededFields: SeedProvenance["seededFields"] = { ...provenance.seededFields };
@@ -279,6 +427,21 @@ export async function buildFromChainSizingReport(input: {
     gridOptions.morphoExistingBorrowDiem = seedAmountToGridValue(seeds.morphoExistingBorrowDiem);
   }
 
+  if (
+    seedCurve &&
+    seeds.curveDiemLegDiem !== undefined &&
+    seeds.curveWstDiemLegInDiem !== undefined
+  ) {
+    // Seed the two legs as single points (leg mode); drop any curve total so the leg/total
+    // mutual-exclusivity guard in `resolveCurveLegPairs` never trips.
+    delete gridOptions.curveDepthDiem;
+    gridOptions.curveDiemLeg = seedAmountToGridValue(seeds.curveDiemLegDiem);
+    gridOptions.curveWstdiemLeg = seedAmountToGridValue(seeds.curveWstDiemLegInDiem);
+    seededFields.curveDepthDiem = "chain";
+  } else if (anyExplicitCurveFlag) {
+    seededFields.curveDepthDiem = "flag";
+  }
+
   let scenarios;
   try {
     scenarios = buildLoopSizingScenarios(config, gridOptions);
@@ -286,12 +449,108 @@ export async function buildFromChainSizingReport(input: {
     throw new CliError("INVALID_INPUT", message(error));
   }
 
+  let authoritative = provenance.authoritative;
+  const warnings = [...provenance.warnings];
+
+  // Inject the live, direction-correct get_dy exit slippage per scenario (SPEC003 §4.2), pinned
+  // to the same block as every other seed read. Memoized by position size — a grid sweeping
+  // initial×leverage has few distinct sizes, so each distinct size reads once.
+  if (seedCurve && seeds.curveDiemLegDiem !== undefined) {
+    const injectionBySize = new Map<
+      string,
+      { exitSlippageBps?: number; readiness?: string }
+    >();
+    let getDyDemoted = false;
+    for (const scenario of scenarios) {
+      const positionCollateralDiem = positionCollateralForScenario(scenario);
+      // Key on BOTH inputs to `quoteCurveExitRoute`. `maxSlippageBps` is single-valued across the
+      // grid today (`sizingScenarios.ts` reads `[0]`) and `priceImpactBps` is slippage-independent,
+      // so this is defensive — but it keeps the cache correct if slippage ever becomes a swept dim.
+      const key = `${positionCollateralDiem.toString()}:${scenario.maxSlippageBps}`;
+      let injection = injectionBySize.get(key);
+      if (injection === undefined) {
+        injection = await computeExitSlippageInjection({
+          config,
+          client,
+          positionCollateralDiem,
+          slippageBps: scenario.maxSlippageBps,
+          blockNumber: provenance.blockNumber,
+        });
+        injectionBySize.set(key, injection);
+      }
+      if (injection.exitSlippageBps !== undefined) {
+        scenario.externalExitSlippageBps = injection.exitSlippageBps;
+      } else if (!getDyDemoted) {
+        // get_dy unavailable (readiness, e.g. pool returned 0) demotes the verdict but does NOT
+        // hard-fail — the engine falls back to the leg-aware estimate on the seeded legs (§6).
+        authoritative = false;
+        getDyDemoted = true;
+        warnings.push(
+          `get_dy exit quote unavailable (${injection.readiness ?? "no quote produced"}) — verdict is not authoritative`,
+        );
+      }
+    }
+  }
+
   const report = buildLoopSizingReport(scenarios);
   return {
     ...report,
-    seedProvenance: { ...provenance, seededFields },
-    authoritative: provenance.authoritative,
+    seedProvenance: { ...provenance, seededFields, authoritative, warnings },
+    authoritative,
   };
+}
+
+/**
+ * Resolve the live get_dy exit-slippage bps for one position size (SPEC003 §4.2). Reads
+ * `convertToShares(positionCollateralDiem)` — the exit sells wstDIEM shares, not the DIEM
+ * notional — then reuses `quoteCurveExitRoute` (`priceImpactBps`) at the pinned block. A
+ * convertToShares or quote REVERT fails closed; a `readiness`-only result (no quote) does not
+ * inject and returns the reason so the caller can demote the verdict.
+ */
+async function computeExitSlippageInjection(input: {
+  config: AppConfig;
+  client: FromChainSeedClient;
+  positionCollateralDiem: bigint;
+  slippageBps: number;
+  blockNumber: bigint;
+}): Promise<{ exitSlippageBps?: number; readiness?: string }> {
+  const { config, client, positionCollateralDiem, slippageBps, blockNumber } = input;
+  const inferenceVault = config.contracts.inferenceVault;
+  if (inferenceVault === null) {
+    throw new CliError(
+      SEED_BLOCKED,
+      "inferenceVault must be configured to quote get_dy exit slippage",
+    );
+  }
+
+  let wstDiemIn: bigint;
+  try {
+    wstDiemIn = toBigInt(
+      await client.readContract({
+        address: inferenceVault,
+        abi: inferenceVaultAbi,
+        functionName: "convertToShares",
+        args: [positionCollateralDiem],
+        blockNumber,
+      }),
+    );
+  } catch (error) {
+    throw new CliError(SEED_BLOCKED, `InferenceVault.convertToShares reverted: ${message(error)}`);
+  }
+
+  let quote;
+  try {
+    quote = await quoteCurveExitRoute({ config, client, wstDiemIn, slippageBps, blockNumber });
+  } catch (error) {
+    throw new CliError(SEED_BLOCKED, `Curve get_dy exit quote reverted: ${message(error)}`);
+  }
+
+  if (quote.quote !== undefined) {
+    // Clamp into the rev-2 validator's [0, 10000] window; a >10000 impact means block anyway.
+    const clamped = Math.min(Math.max(Math.round(quote.quote.priceImpactBps), 0), 10_000);
+    return { exitSlippageBps: clamped };
+  }
+  return { readiness: quote.readiness.join("; ") || undefined };
 }
 
 function message(error: unknown): string {
