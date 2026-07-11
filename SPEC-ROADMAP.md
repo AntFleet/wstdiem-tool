@@ -160,8 +160,9 @@ live-seed — and any future model change — must conform to.
   - **Verdict: REVISE → SPLIT (both reviewers' recommendation).** The 5 seeds split by risk:
     - **Part A (ship-ready, locked):** `rateAtTargetApyBps` (direct read) + `morphoSupplyDiem` /
       `morphoExistingBorrowDiem` — feed the model's wei-precision terms; pure garbage-in removal.
-    - **Part B (gated):** `curveDepthDiem` + `vaultApyBps` — feed the softest, verdict-flipping inputs;
-      blocked until **SPEC002 rev-2**.
+    - **Part B (was gated on SPEC002 rev-2; now un-gated and further split):** `curveDepthDiem` +
+      `vaultApyBps` — the softest, verdict-flipping inputs. **B-1** = curve legs + live `get_dy` exit
+      slippage (§4.2); **B-2** = `vaultApyBps` 7-day DB window (§4.3).
   - **Central product-safety rule added:** any degraded/unseeded input sets `authoritative:false` and
     **demotes the verdict token itself**, not just a warnings sidecar.
   - **Part A IMPLEMENTED + SHIPPED (7d74aa4)** — the first code of the spec-first pipeline, end-to-end:
@@ -170,6 +171,22 @@ live-seed — and any future model change — must conform to.
     and fail-closed; `src/loop/fromChainSeed.ts` + 30 tests; offline output byte-for-byte unchanged. The
     review gate (run before code) + approval pass caught the design and every carried-over bug; the
     inversion fallback was consciously cut (direct-read revert fails closed).
+  - **Part B-1 IMPLEMENTED + SHIPPED (5f07111)** — now that SPEC002 rev-2 is live, `--from-chain` seeds
+    the two curve legs (`balances(0)` / `convertToAssets(balances(1))`) and injects a direction-correct,
+    convex **live `get_dy` exit slippage** into the rev-2 `externalExitSlippageBps` seam, per scenario
+    (exit sells wstDIEM shares → `convertToShares(positionCollateral)` → the reused
+    `quoteCurveExitRoute` + `priceImpactBps` rail), memoized by size, block-pinned. Fail-closed vs
+    demote split: a genuine revert / both-legs-zero / codeless curve address fails closed; a merely
+    unavailable `get_dy` or a >2:1 imbalance **demotes** (authoritative:false + estimate fallback).
+    `positionCollateralForScenario` is now the shared helper so the live quote is sized identically to
+    the gate it feeds. Approval pass APPROVE / 0C / 0H; its Medium/Low items closed pre-commit (curve
+    has-code parity, slippage in the memo key, a non-identity-NAV mock that catches a convertToShares-skip
+    regression, and a flip test proving the leg-aware estimate would block where the live quote clears).
+    Offline output byte-for-byte unchanged; from-chain 41 tests.
+  - **Next code step: Part B-2** — `vaultApyBps` from the 7-day SQLite window (`applyYieldWindowMetrics`
+    + a `loadVaultApyWindow` adapter), `×10000`-corrected (computeBaseApy returns a fraction); insufficient/
+    low-density history → `not-seeded` + authoritative:false + sizing continues (never a 0 seed). Resolve
+    OQ2 (sample-density floor N) as a documented constant.
 
 ### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B) — IMPLEMENTED + SHIPPED (2026-07-11, ee169d6)
 
