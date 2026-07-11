@@ -2,7 +2,7 @@ import Table from "cli-table3";
 import type { AlertEvaluation, AppConfig, CliJsonOutput, MetricSnapshot } from "../types/domain.js";
 import { formatWad } from "../metrics/math.js";
 import type { LoopReadinessResult } from "../loop/readiness.js";
-import type { LoopSizingReport } from "../loop/sizing.js";
+import type { LoopSizingReport, LoopSizingResult } from "../loop/sizing.js";
 
 export function stringifyJson(value: unknown): string {
   return JSON.stringify(
@@ -171,6 +171,21 @@ function formatHealthFactor(healthFactorBps: number | null): string {
   return healthFactorBps === null ? "Infinity" : (healthFactorBps / 10_000).toFixed(2);
 }
 
+/**
+ * The rendered verdict token. When `authoritative` is false (a degraded chain seed,
+ * SPEC003 §6) the token itself degrades — a `viable` reads `candidate — unverified seed`
+ * at the same glance as the verdict — while the underlying gate status is untouched.
+ */
+function loopStatusToken(result: LoopSizingResult, authoritative: boolean | undefined): string {
+  if (authoritative === false && result.status === "viable") {
+    return "candidate — unverified seed";
+  }
+  if (authoritative === false && result.status === "marginal") {
+    return "marginal — unverified seed";
+  }
+  return `${result.status}${result.firstBlocker === null ? "" : `: ${result.firstBlocker}`}`;
+}
+
 export function renderLoopSizingTable(report: LoopSizingReport): string {
   const table = new Table({
     head: [
@@ -200,7 +215,7 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
       formatHealthFactor(result.healthFactorBps),
       `${formatBps(result.postDrawUtilizationBps)}→${formatBps(result.effectiveBorrowApyBps)}`,
       formatBps(result.netApyBps),
-      `${result.status}${result.firstBlocker === null ? "" : `: ${result.firstBlocker}`}`,
+      loopStatusToken(result, report.authoritative),
     ]);
   }
 
@@ -241,5 +256,35 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
       `broadcast ${report.assumptions.broadcastAvailable ? "available" : "disabled"}; audit required ${report.assumptions.auditRequired}`,
     ],
   );
-  return `${table.toString()}\n${summaryTable.toString()}`;
+
+  if (report.seedProvenance === undefined) {
+    return `${table.toString()}\n${summaryTable.toString()}`;
+  }
+
+  const provenance = report.seedProvenance;
+  const seedTable = new Table({
+    head: ["Seed provenance", "Value"],
+    wordWrap: true,
+  });
+  seedTable.push(
+    ["Source", `seeded from block ${provenance.blockNumber} (chainId ${provenance.chainId})`],
+    [
+      "Fields",
+      Object.entries(provenance.seededFields)
+        .map(([field, source]) => `${field}:${source}`)
+        .join("; "),
+    ],
+    ["rateAtTarget", provenance.rateAtTargetSource],
+    [
+      "Authoritative",
+      provenance.authoritative
+        ? "yes"
+        : "no — verdicts shown as unverified candidates",
+    ],
+    ["Warnings", provenance.warnings.length === 0 ? "none" : provenance.warnings.join("; ")],
+  );
+  const banner = provenance.authoritative
+    ? ""
+    : "UNVERIFIED SEED: chain-seeded verdicts are candidates, not authoritative (see seed provenance)\n";
+  return `${banner}${table.toString()}\n${summaryTable.toString()}\n${seedTable.toString()}`;
 }

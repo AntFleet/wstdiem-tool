@@ -515,7 +515,7 @@ function validateFlashLoanLiquidityEvidence(
   return null;
 }
 
-async function readMorphoMarket(
+export async function readMorphoMarket(
   config: AppConfig,
   client: LoopPreflightClient,
   blockNumber?: bigint,

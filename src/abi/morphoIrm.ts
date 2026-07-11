@@ -30,4 +30,11 @@ export const morphoIrmAbi = [
     ],
     outputs: [{ name: "", type: "uint256" }],
   },
+  {
+    type: "function",
+    name: "rateAtTarget",
+    stateMutability: "view",
+    inputs: [{ name: "id", type: "bytes32" }],
+    outputs: [{ name: "", type: "int256" }],
+  },
 ] as const;

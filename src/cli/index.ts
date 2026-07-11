@@ -14,6 +14,10 @@ import { buildConfiguredLoopSafetyEvidence } from "../loop/safetyEvidence.js";
 import { simulateLoopExecutorCall } from "../loop/simulator.js";
 import { buildLoopSizingReport } from "../loop/sizing.js";
 import { buildLoopSizingScenarios, type LoopSizingGridOptions } from "../loop/sizingScenarios.js";
+import {
+  assertFromChainCompatibleOptions,
+  buildFromChainSizingReport,
+} from "../loop/fromChainSeed.js";
 import { evaluateReadinessAlerts } from "../monitor/readinessAlerts.js";
 import type { AppConfig, Severity } from "../types/domain.js";
 import { CliError, toCliError } from "./errors.js";
@@ -263,19 +267,68 @@ loop
   .option("--min-health-factor <value>", "minimum post-loop health factor")
   .option("--min-net-apy-bps <bps>", "minimum acceptable net APY in bps")
   .option("--holding-days <days>", "holding period for annualizing one-time costs")
+  .option(
+    "--from-chain",
+    "seed rateAtTarget, Morpho supply, and existing borrow from live Base reads",
+    false,
+  )
+  .option("--planning-block <n>", "pin the on-chain seed reads to a specific block (default latest)")
   .action(async function (this: Command) {
-    await runAction(this, "loop sizing", (config) => {
-      let scenarios;
+    await runAction(this, "loop sizing", async (config) => {
+      const options = this.opts<
+        LoopSizingGridOptions & { fromChain?: boolean; planningBlock?: string }
+      >();
+      const wantsJson = this.optsWithGlobals<GlobalOptions>().json;
+
+      if (!options.fromChain) {
+        let scenarios;
+        try {
+          scenarios = buildLoopSizingScenarios(config, options);
+        } catch (error) {
+          throw new CliError(
+            "INVALID_INPUT",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        const report = buildLoopSizingReport(scenarios);
+        return wantsJson ? report : renderLoopSizingTable(report);
+      }
+
+      // Static conflict guards run BEFORE any RPC client is constructed, so a
+      // flat-model/current-zero conflict errors without touching the network.
+      assertFromChainCompatibleOptions(options);
+
+      const planningBlock =
+        options.planningBlock === undefined
+          ? undefined
+          : BigInt(parseStrictInteger(options.planningBlock, "--planning-block"));
+      let client: Awaited<ReturnType<typeof createViemLoopSimulationClient>>;
       try {
-        scenarios = buildLoopSizingScenarios(config, this.opts<LoopSizingGridOptions>());
+        client = await createViemLoopSimulationClient(config);
       } catch (error) {
-        throw new CliError("INVALID_INPUT", error instanceof Error ? error.message : String(error));
+        throw new CliError(
+          "FROM_CHAIN_SEED_BLOCKED",
+          `RPC unavailable for --from-chain seeding: ${errorMessage(error)}`,
+        );
       }
-      const report = buildLoopSizingReport(scenarios);
-      if (this.optsWithGlobals<GlobalOptions>().json) {
-        return report;
+      if (client === null) {
+        throw new CliError(
+          "FROM_CHAIN_SEED_BLOCKED",
+          "at least one RPC URL must be configured for --from-chain seeding",
+        );
       }
-      return renderLoopSizingTable(report);
+      const report = await buildFromChainSizingReport({
+        config,
+        client,
+        options,
+        explicitFlags: {
+          rateAtTargetApyBps: this.getOptionValueSource("rateAtTargetApyBps") === "cli",
+          morphoSupplyDiem: this.getOptionValueSource("morphoSupplyDiem") === "cli",
+          morphoExistingBorrowDiem: this.getOptionValueSource("morphoExistingBorrowDiem") === "cli",
+        },
+        planningBlock,
+      });
+      return wantsJson ? report : renderLoopSizingTable(report);
     });
   });
 

@@ -58,9 +58,12 @@ convert with `perSecWadToAprBps` (`src/loop/morphoRate.ts`). Requires **adding `
   zero read (that would silently seed 0.1% APR and inflate `netApy` toward `viable`). On zero: error,
   or fall back to the genesis 400 bps default with `rateAtTargetSource: "uninitialized-default"` and
   `authoritative: false`.
-- **Fallback inversion** (`borrowRateView ÷ curveMultiplierWad(currentUtil)`) only if the direct read
-  reverts; mark `rateAtTargetSource: "inverted"`, and `"inverted-ill-conditioned"` (with a warning)
-  when `currentUtil` is in the shallow zone. Clamp **non-zero** results to `[10, 20000]` bps.
+- **On a direct-read revert → fail-closed** (throw, no report). The inversion fallback
+  (`borrowRateView ÷ curveMultiplierWad`) is **deferred out of Part A**: the direct read is the robust
+  path this spec exists to use, and adding a fragile, ill-conditioned inversion for an edge that
+  already fails safe is not worth it. (If ever revived, it belongs in a later revision with its own
+  `inverted` / `inverted-ill-conditioned` source + low-util warning.) Clamp **non-zero** direct reads
+  to `[10, 20000]` bps.
 
 ### 3.2 `morphoSupplyDiem` / `morphoExistingBorrowDiem` ← market read
 
@@ -133,7 +136,13 @@ reader.
   (`--from-chain --morpho-supply-diem 100,1000` → grid on that dim, `seededFields.morphoSupplyDiem =
   "flag"`); seeded values are otherwise single points while non-seeded dims sweep as usual.
 - **`--from-chain` + `--preset current-zero` → error** (the preset forces depth/supply to 0 while
-  `--from-chain` seeds them — conflicting sources for the same dims).
+  `--from-chain` seeds them — a direct zero-vs-value conflict). The static conflict guards
+  (this and the flat-model error, §3.3) are checked **before** the RPC client is built, so a
+  misconfigured invocation reports the real conflict rather than an RPC error.
+- **`--preset liquidity-sweep` is allowed** — a chain-seeded dim (Morpho supply) collapses that
+  preset's sweep on that dim to the live point, while the un-seeded dims (curve depth) still sweep.
+  Provenance records the collapsed dim as `"chain"`. (This is the useful "sweep curve depth against
+  today's real Morpho supply" case, not a conflict.)
 
 ## 6. Verdict integrity & provenance (extends SPEC002 §7)
 
@@ -148,7 +157,7 @@ does not.
 interface SeedProvenance {
   blockNumber: bigint;                 // the pinned block for the on-chain reads (NOT vaultApy)
   chainId: number;
-  rateAtTargetSource: "direct" | "inverted" | "inverted-ill-conditioned" | "uninitialized-default";
+  rateAtTargetSource: "direct" | "uninitialized-default";   // inversion deferred out of Part A (§3.1)
   vaultApySource: "measured-7d" | "not-seeded";           // Part B
   curveDiemLegDiem?: bigint; curveWstDiemLegDiem?: bigint; // Part B
   curveImbalanceRatio?: number;                            // Part B
@@ -158,8 +167,12 @@ interface SeedProvenance {
 }
 ```
 
-JSON nests `seedProvenance` (bigint legs as wei strings, SPEC002 §7.3). Table prints `seeded from
-block N (chainId 8453)`, per-field source, the (possibly degraded) verdict, and warnings.
+JSON nests `seedProvenance` (bigint legs as wei strings, SPEC002 §7.3) and a top-level
+`authoritative`. Table prints `seeded from block N (chainId 8453)`, per-field source, the
+(possibly degraded) verdict, and warnings. **JSON integrator note:** the per-scenario
+`results[].status` carries the *true gate* result (`viable`/`marginal`/`blocked`) — the degradation
+lives only in the human table token; a JSON consumer must **AND-combine** `results[].status` with the
+top-level `authoritative` (a `viable` under `authoritative:false` is a candidate, not a pass).
 
 ## 7. What it explicitly does NOT do
 
@@ -171,8 +184,11 @@ fail-closed, SPEC001); or make a `viable` safe on a thin pool without the fork `
 **Part A:**
 1. `perSecWadToAprBps(686605546) === 217` (durable); the live-block value is a time-sensitive smoke test.
 2. `rateAtTarget == 0` → fail-closed / `uninitialized-default` + `authoritative:false` — **not** clamp-to-10.
-3. Non-zero rate clamps to `[10, 20000]`; fallback inversion flagged `inverted-ill-conditioned` at low util.
-4. Fail-closed matrix: RPC down / `chainId≠8453` / market revert / stale pin / `totalSupplyAssets==0` → error, **no report**.
+3. Non-zero rate clamps to `[10, 20000]`; a direct-read **revert fails closed** (inversion deferred, §3.1).
+4. Fail-closed matrix: RPC down / `chainId≠8453` / `marketId` null / market revert / zero-or-codeless
+   IRM/Morpho address / `totalSupplyAssets==0` → error, **no report**. (The "pinned block > threshold
+   behind head" stale-pin arm is **deferred pending Open Question 1**'s threshold; `latest` mode pins
+   to head so it cannot be stale, and `--planning-block` staleness is operator-intentional.)
 5. `--from-chain --borrow-rate-model flat` → error (or seeds `borrowApyBps` + records it in provenance).
 6. Precedence: an explicit `--morpho-supply-diem` overrides the seed (`seededFields.morphoSupplyDiem === "flag"`).
 7. Block-pinning: the on-chain reads share one `blockNumber`; vaultApy exempt.

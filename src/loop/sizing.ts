@@ -93,6 +93,27 @@ export interface LoopSizingResult {
   unwindRepayRequiredDiem: bigint;
 }
 
+/**
+ * How a chain-seeded input reached the sizing engine (SPEC003 §6). Present only on a
+ * `loop sizing --from-chain` report; the offline path leaves it undefined so its output
+ * stays byte-for-byte unchanged. Only the Part-A fields are populated — the Part-B curve
+ * legs / vault-APY provenance are gated behind SPEC002 rev-2.
+ *
+ * `rateAtTargetSource` is only ever `"direct"` (a normal non-zero on-chain read) or
+ * `"uninitialized-default"` (rateAtTarget read as 0; fail-closed to the genesis 400 bps
+ * default). The `borrowRateView`-inversion fallback is deferred out of Part A (SPEC003
+ * §3.1) — a direct-read revert fails closed instead, so no `"inverted"` /
+ * `"inverted-ill-conditioned"` source is produced by this engine.
+ */
+export interface SeedProvenance {
+  blockNumber: bigint;
+  chainId: number;
+  rateAtTargetSource: "direct" | "uninitialized-default";
+  seededFields: Record<string, "chain" | "flag" | "default">;
+  authoritative: boolean;
+  warnings: string[];
+}
+
 export interface LoopSizingReport {
   assumptions: LoopSizingAssumptions;
   results: LoopSizingResult[];
@@ -109,6 +130,10 @@ export interface LoopSizingReport {
       scenarioId: string;
     }>;
   };
+  // Additive, present ONLY under `--from-chain`. When `authoritative` is false the
+  // rendered verdict token degrades (SPEC003 §6); the underlying gate status is untouched.
+  seedProvenance?: SeedProvenance;
+  authoritative?: boolean;
 }
 
 function ceilDiv(numerator: bigint, denominator: bigint): bigint {
