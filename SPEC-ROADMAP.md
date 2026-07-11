@@ -109,15 +109,30 @@ resolved); remaining product gaps captured as Open Questions #7–9. **rev-2 is 
 
 **Next:** Phase 2 — SPEC002 (Loop Sizing Engine), which rev-2 now formally forward-references.
 
-## Phase 2 — SPEC002 (Loop Sizing Engine) — DRAFT AUTHORED (2026-07-11), review gate running
+## Phase 2 — SPEC002 (Loop Sizing Engine) — DONE + LOCKED (2026-07-11)
 
 > Numbering freed once the old product SPEC002–004 were purged in Phase 0.
 
-Draft `SPEC002.md` authored against verified code + the three test files (which pin exact acceptance
+`SPEC002.md` authored against verified code + the three test files (which pin exact acceptance
 values: blocker order, `requiredCurveDepth`/`requiredMorphoSupply`, `healthFactorBps=25800`, the IRM
 0.25×/1×/4× pins and 217-bps on-chain reproduction, JSON wei-string serialization). Supersedes the
-non-normative `docs/deployment/loop-sizing.md`. **Next: the two-agent review gate (adversarial
-technical + product) before lock**, applied from the start given how much it caught in Phase 1.
+non-normative `docs/deployment/loop-sizing.md`.
+
+**Review gate passed.** Two-agent review (adversarial technical + product), applied from the start:
+- **Technical: ACCEPT-WITH-RESERVATIONS** — 0 Critical, 0 Major, 1 Medium, 5 Low (vs Phase 1's 2
+  Critical + 4 Major), validating the author-against-verified-code approach. Fixed all: §7.3
+  non-finite→`"Infinity"` string serialization; §4 `postDrawUtilization` operand + `borrowAprAtFull…`
+  name + slippage edge-order; §5 the two throw-not-blocked `scenario_invalid` conditions; §1 gate
+  enumeration.
+- **Product: honesty corrections applied** — §8 reframed so the headline limitation is *single-scalar
+  `curveDepthDiem` + pool imbalance* (not textbook convexity), with the denomination defined (§2);
+  added the missing caveats (`vaultApyBps` is a leverage-amplified guess; HF is an entry-time
+  structural check, not liquidation distance; single-block no-price-path; gas+MEV excluded); §5 now
+  states the exit-slippage sub-gate — not `unwind_not_covered` — is the primary safety constraint
+  under defaults; §10 flags the `--from-chain` idle-regime inversion as ill-conditioned.
+- Code-change recommendations (shortfall outputs, `--gas-cost-diem`, liquidation-distance,
+  stressed-rate netAPY, `viable`→`candidate` rename) captured in SPEC002 §11 as future work, not
+  spec'd as current.
 
 Goal: spec the largest, most financially-sensitive unspecified surface.
 

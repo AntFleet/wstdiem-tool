@@ -9,8 +9,10 @@
 ## 1. Purpose & scope
 
 `loop sizing` sweeps a grid of scenarios and, for each, decides **viable / marginal / blocked**
-against six independent gates (Curve depth, Morpho supply, slippage, health factor, net APY, unwind
-coverage). It is pure integer/bigint arithmetic over caller-supplied assumptions; it reads nothing
+against **five economic gates** (Curve depth **+ exit slippage**, Morpho supply, health factor, net
+APY, unwind coverage) plus a `scenario_invalid` validity gate — six blockers total (§5); there is no
+standalone "slippage" blocker (it is folded into the Curve-depth gate). It is pure integer/bigint
+arithmetic over caller-supplied assumptions; it reads nothing
 from chain. A `viable` verdict is a candidate for deeper fork/live validation — **never** approval to
 act. All token amounts are WAD (1e18) bigint; all rates are basis points (bps) unless noted.
 
@@ -41,6 +43,11 @@ One priced scenario. Fields and their CLI source:
 | `minNetApyBps` | bps | `--min-net-apy-bps` (single) | `0` |
 | `exitRepayBufferBps` | bps | (config) | `execution.exitRepayBufferBps` (200) |
 | `holdingPeriodDays` | days | `--holding-days` (single) | `365` |
+
+**`curveDepthDiem` denomination.** It is the pool's **total two-sided** depth in DIEM-equivalent
+(both legs). Slippage (§4) divides the traded notional by this *total* — see §8 for why a single
+scalar cannot represent a drained/imbalanced pool and why dividing by total (not the DIEM side an
+exit draws from) understates trade-vs-traded-side by ~2×.
 
 ### 2.2 Grid expansion (`buildLoopSizingScenarios`)
 
@@ -110,25 +117,26 @@ borrowAmountDiem         = max(0, positionCollateralDiem − initialCollateralDi
 equityDiem               = initialCollateralDiem
 
 requiredCurveDepthDiem   = ceilDiv(positionCollateralDiem · BPS, maxCurvePositionShareBps)
-requiredCurveDiemDepth   = requiredCurveDepthDiem / 2      (wstDIEM side = remainder)
+requiredCurveDiemDepth   = requiredCurveDepthDiem / 2                           (integer div)
+requiredCurveWstDiemDepth= requiredCurveDepthDiem − requiredCurveDiemDepth      (remainder; handles odd WAD)
 requiredMorphoSupplyDiem = ceilDiv(borrowAmountDiem · BPS, maxMorphoUtilizationBps)
 utilizationBorrowLimit   = floor(morphoSupplyDiem · maxMorphoUtilizationBps / BPS)
 availableMorphoBorrowDiem= max(0, utilizationBorrowLimit − morphoExistingBorrowDiem)
 
 estimatedEntrySlippageBps= ceil(curveFeeBps + ratioBps(borrowAmountDiem, curveDepthDiem))
 estimatedExitSlippageBps = ceil(curveFeeBps + ratioBps(positionCollateralDiem, curveDepthDiem))
-   // curveDepth == 0 → +Infinity; trade == 0 → curveFeeBps
+   // trade == 0 → curveFeeBps (checked first); else curveDepth == 0 → +Infinity
 flashFeeCostDiem         = ceilDiv(borrowAmountDiem · flashFeeBps, BPS)
 oneTimeCostDiem          = entrySlippageCostDiem + exitSlippageCostDiem + flashFeeCostDiem
 annualizedOneTimeCostBps = ceil(ratioBps(oneTimeCostDiem, initialCollateralDiem) · 365/holdingPeriodDays)
 
 grossVaultApyBps         = round(leverage · vaultApyBps)
 postDrawUtilizationWad   = morphoSupplyDiem>0 ? (morphoExistingBorrowDiem+borrowAmountDiem)·WAD/morphoSupplyDiem
-                                              : (borrow>0 ? WAD : 0)   // uncapped; may exceed 100%
+                                              : ((morphoExistingBorrowDiem+borrowAmountDiem) > 0 ? WAD : 0)   // uncapped; may exceed 100%
 postDrawUtilizationBps   = postDrawUtilizationWad → bps
 effectiveBorrowApyBps    = flat ? borrowApyBps : adaptiveBorrowAprBps(min(util,WAD), rateAtTargetApyBps)
-borrowAprAtTargetBps     = adaptiveBorrowAprBps(90%, rateAtTargetApyBps)      // reference
-borrowAprAtFullUtilBps   = adaptiveBorrowAprBps(100%, rateAtTargetApyBps)     // reference
+borrowAprAtTargetBps        = adaptiveBorrowAprBps(90%, rateAtTargetApyBps)      // reference
+borrowAprAtFullUtilizationBps = adaptiveBorrowAprBps(100%, rateAtTargetApyBps)   // reference
 borrowCostApyBps         = round((leverage − 1) · effectiveBorrowApyBps)
 netApyBps                = grossVaultApyBps − borrowCostApyBps − annualizedOneTimeCostBps
 
@@ -139,7 +147,9 @@ unwindRepayRequiredDiem  = ceilDiv(borrowAmountDiem · (BPS + exitRepayBufferBps
 
 Slippage cost uses the estimated bps applied to the traded notional (entry on `borrowAmountDiem`,
 exit on `positionCollateralDiem`); if slippage is non-finite the cost is capped at the position
-notional. `ratioBps(n, d) = n/d` expressed in bps with 2-decimal precision.
+notional. `ratioBps(n, d) = Number(n · 1_000_000 / d) / 100` — i.e. `n/d` in bps to 2-decimal
+precision as a JS number (then `ceil`'d where used in slippage and annualized cost); `d = 0` →
+`+Infinity`. All amounts are WAD bigint until the ratio, which crosses to `number`.
 
 **Worked reference** (100 DIEM, 1.5×, defaults): `positionCollateral=150`, `borrow=50`,
 `requiredCurveDepth=1000` (150/0.15), `requiredMorphoSupply=62.5` (50/0.80), `healthFactorBps=25800`
@@ -158,8 +168,17 @@ Blockers are appended in this fixed order; `firstBlocker` is the first appended 
 | 4 | `health_factor_below_threshold` | `healthFactorBps ≠ null` **and** `healthFactorBps < minHealthFactorBps` |
 | 5 | `unwind_not_covered` | `unwindDiemOut < unwindRepayRequiredDiem` |
 
-`unwind_not_covered` is the safety-critical gate: it fails when protected Curve exit output can't
-cover the borrow plus the exit buffer and flash fee — the on-chain exit rail, modeled offline.
+`unwind_not_covered` models the on-chain exit rail: protected Curve exit output must cover the borrow
+plus the exit buffer and flash fee. **Gate interaction (important):** under the default
+`maxSlippageBps = 300`, gate 1's exit-slippage sub-condition blocks at exit trade > ~2.96% of depth,
+while `unwind_not_covered` only binds at far higher slippage (~31% at 3×, ~7% at 10×). So under
+defaults the **exit-slippage sub-condition of gate 1 — not unwind coverage — is the primary safety
+constraint**, and `unwind_not_covered` is a backstop that activates only when `--slippage-bps` is
+relaxed well above 300. The primary constraint is fed the model's softest number (§8, Curve depth).
+
+Two `scenario_invalid` sub-conditions (`maxCurvePositionShareBps ≤ 0`, `maxMorphoUtilizationBps ≤ 0`)
+are **API-only edge cases**: the code pushes the blocker but then throws in `ceilDiv` (denominator
+≤ 0) rather than returning a blocked result. Unreachable from the CLI (both flags parse ≥ 1).
 
 ## 6. Status classification
 
@@ -173,6 +192,8 @@ status = blockers.length > 0 ? "blocked"
 - **slippage near cap**: `max(entrySlip, exitSlip) > maxSlippageBps · 0.8`, or
 - **HF near floor**: `healthFactorBps < ceil(minHealthFactorBps · 1.1)`, or
 - **APY near floor**: `netApyBps < minNetApyBps + 200`.
+
+The band constants (`0.8`, `1.1`, `+200 bps`) are fixed heuristics — not configurable.
 
 ## 7. Output contract
 
@@ -199,7 +220,13 @@ unwindDiemOut, unwindRepayRequiredDiem`.
 ### 7.3 JSON envelope & serialization
 `--json` wraps the report in the standard `CliJsonOutput` (`ok`, `command: "loop sizing"`, `chainId`,
 `data`). **All bigint token amounts serialize as integer wei strings** (e.g. `100 DIEM →
-"100000000000000000000"`); bps/ratios are numbers; `healthFactorBps` may be `null`.
+"100000000000000000000"`). bps/ratios are numbers, **except non-finite bps serialize as the strings
+`"Infinity"` / `"-Infinity"`** — `estimatedEntrySlippageBps`/`estimatedExitSlippageBps` when
+`curveDepthDiem = 0` (which is the **first default grid value** and the whole `current-zero` preset,
+so a default `--json` run emits them), and `annualizedOneTimeCostBps` when `initialCollateralDiem = 0`.
+`healthFactorBps` may be `null`. `chainId` is the configured static value — nothing is read from
+chain. **All economic fields are populated even when `status = blocked`** (e.g. `postDrawUtilization
+→ WAD` when supply is 0), so a consumer must not treat blocked ⇒ null.
 
 ### 7.4 Table (`renderLoopSizingTable`)
 Columns: `Scenario | Lev | Equity | Borrow | Curve req/actual | Morpho req/actual | Slip entry/exit |
@@ -210,14 +237,39 @@ given"), **Read-only** (`broadcast disabled; audit required true`).
 
 ## 8. Assumptions & limitations
 
-- **Curve**: conservative **linear depth-share** slippage (`fee + trade/depth`), not a StableSwap
-  invariant. Understates large-trade exit slippage — a known conservatism gap.
+- **Curve depth is a single scalar and cannot represent a drained/imbalanced pool — the headline
+  risk.** `curveDepthDiem` is total two-sided depth; slippage is `fee + ratioBps(trade, total)`
+  (§4). On a drained/off-peg wstDIEM/DIEM pool — the market state this tool exists to evaluate — the
+  DIEM side an exit draws into is nearly empty, so real slippage is dramatically worse and convex,
+  yet the model has no notion of imbalance; dividing the trade by *total* depth also understates
+  trade-vs-traded-side by ~2×. A `viable, exit slip 296 bps` reading can therefore be badly
+  optimistic on exactly the pool it is meant to guard against. This matters because the exit-slippage
+  sub-condition of gate 1 is the **primary** safety constraint (§5) and it consumes this softest
+  input — treat `viable` on a thin/off-peg pool as unsafe pending a fork `get_dy` proof. (Textbook
+  linear-vs-convex StableSwap error is second-order: the slippage cap already blocks trades > ~3% of
+  depth.)
+- **`vaultApyBps` is an assumed input, not measured — and leverage amplifies it.** `grossVaultApyBps
+  = round(leverage · vaultApyBps)`; the largest term in `netApyBps` is a hand-typed number (default
+  1500) multiplied by leverage, so a 300 bps guess error becomes ~900 bps at 3×. Vault APY is only
+  estimable live after ~2 compound cycles; the borrow side, by contrast, is modeled to wei precision.
+- **`healthFactorBps` is an entry-time structural check, not a liquidation measure.** It is a pure
+  function of leverage and LLTV (`floor(L·lltvBps/(L−BPS))`) — it never touches a price, so every
+  scenario at a given leverage gets the identical HF. It answers "is this leverage below the LLTV
+  ceiling, assuming oracle = NAV," not "how far to liquidation." NAV/oracle is assumed static and
+  equal to Morpho's oracle; `--wstdiem-nav` is a typed-in value.
+- **Single-block snapshot — no price path.** The model prices today's liquidity at t=0;
+  `holdingPeriodDays` only annualizes one-time cost. It assumes exit-time depth equals entry and that
+  nothing is liquidated in between. "Viable for 365 days" is not a year of modeled risk.
+- **Gas and MEV are excluded** from `oneTimeCostDiem` (entry slip + exit slip + flash fee only).
+  Entry/exit are multi-call txns and the Curve leg is MEV-exposed on exactly the thin pool this
+  targets; at default ~100-DIEM sizes gas alone can flip `netApyBps` negative while status reads
+  `viable`.
 - **Morpho liquidity**: `supply − existing borrow`, capped at `maxMorphoUtilizationBps`.
 - **APY**: simple-annualized, not compounded; effective APY is marginally higher.
-- **Borrow rate**: **instantaneous** at post-draw utilization for the supplied `rateAtTarget`. It does
+- **Borrow rate**: **instantaneous** at post-draw utilization for the supplied `rateAtTarget`; does
   **not** model multi-day `rateAtTarget` drift (rises under sustained high utilization, falls when
   idle), so sustained-high-utilization scenarios are **understated** — pass the current on-chain
-  `rateAtTarget` and treat those as optimistic.
+  `rateAtTarget`.
 - Not a substitute for a fork-backed `get_dy` proof or live readiness evidence. `viable` = candidate
   for validation, not approval to broadcast (broadcast is disabled — SPEC001 §5, §9).
 
@@ -244,3 +296,30 @@ given"), **Read-only** (`broadcast disabled; audit required true`).
 `curveDepthDiem`, and the empirical vault APY from the existing readers — turning the simulator from
 typed assumptions into "what today's actual pool supports." Must conform to this contract; specified
 when built.
+
+**Caveats for that spec:** (a) the `rateAtTarget` inversion is **ill-conditioned in the current
+near-idle regime** — inverting through the 0.25× multiplier zone amplifies a small read error (§3:
+an idle read understates the full-pool rate by >8×), so it must be gated/annotated, not trusted
+blindly; (b) it reintroduces RPC into an otherwise no-RPC command, so it needs fail-closed /
+stale-read discipline; (c) it upgrades *inputs*, not the *model* — the §8 limits (imbalance,
+gas/MEV, no price path) are unchanged, so it must **not** be shipped as "now the numbers are real."
+
+## 11. Recommended enhancements (not built — future revision)
+
+These are **not** in the current engine or this contract; they are the review's product recommendations, recorded so the contract does not silently omit them:
+
+- **Shortfall outputs (highest value).** Expose per-scenario `curveDepthShortfallDiem`,
+  `morphoSupplyShortfallDiem`, `netApyShortfallBps`, so `firstBlocker` becomes actionable ("blocked
+  by how much / what would unblock it"). The data exists — `firstViableByLeverage` already reasons
+  about the cheapest unlock.
+- **Gas + MEV cost.** A `--gas-cost-diem` input folded into `oneTimeCostDiem`, with an MEV caveat
+  scaling to pool thinness. At default sizes this flips verdicts (§8).
+- **Liquidation-distance output.** Margin-to-liquidation / liquidation price, since `healthFactorBps`
+  is a pure leverage/LLTV identity (parallels SPEC001 Open Question #9).
+- **Stressed-rate netAPY.** A second net APY at `borrowAprAtFullUtilizationBps` (or a rateAtTarget-
+  drift multiplier) to bound the sustained-high-utilization case.
+- **Naming.** `viable` is the loudest token in a tool that cannot execute; consider
+  `candidate`/`passes-gates`, and reconsider `firstViableByLeverage` (which answers "how big can I
+  go") as a recommendation surface.
+- Reconcile the default `rateAtTargetApyBps = 400` ("conservative") against the runbook-recommended
+  live value (~217 on 2026-07-11).
