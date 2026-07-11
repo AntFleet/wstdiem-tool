@@ -2,8 +2,9 @@
 
 > **Status — 2026-07-11.** This describes the **shipping tool**: an **offline-first, exit-only,
 > broadcast-disabled** operator CLI for monitoring wstDIEM loop positions and running conservative,
-> evidence-gated simulations of the exit path before any live execution. Broadcast is fail-closed
-> at two independent layers and stays disabled pending a production executor audit. Behaviour that
+> evidence-gated simulations ("rehearsals") of the exit path. **It executes no state-changing action
+> — monitor-and-rehearse only** (§5). Broadcast is fail-closed at two independent layers and stays
+> disabled pending a production executor audit. Behaviour that
 > is specified but **not** in the current tool — the multi-action executor (`open`/`rebalance`),
 > broadcast enablement, the auto-deleverager, a persistent watch daemon/TUI, and hardware-wallet
 > signing — lives in **Appendix A (Deferred)**, not the main body.
@@ -39,27 +40,19 @@ interface InferenceVaultContract {
   asset(): Promise<Address>;
   totalAssets(): Promise<Uint256>;
   totalSupply(): Promise<Uint256>;
-  balanceOf(owner: Address): Promise<Uint256>;
   convertToAssets(shares: Uint256): Promise<Uint256>;
-  currentDepositFeeBps(): Promise<Uint256>;
-  vaultOwnedShares(): Promise<Uint256>;
-  feeRouter(): Promise<Address>;
-  withdrawalsEnabled(): Promise<boolean>;
 }
 
-interface FeeRouterContract {
-  pendingWETH(): Promise<Uint256>;
-  pendingVVV(): Promise<Uint256>;
-  maxSlippageBps(): Promise<Uint256>;
-  vvvBatchThreshold(): Promise<Uint256>;
-  curvePool(): Promise<Address>;
+// FeeRouter is observed ONLY via its harvest events (see Event Schemas). The tool
+// makes no FeeRouter function calls today — its ABI (`src/abi/feeRouter.ts`) contains
+// only the three harvest event definitions.
+
+interface Erc20Contract {
+  balanceOf(owner: Address): Promise<Uint256>; // DIEM / wstDIEM balances (`src/abi/erc20.ts`)
 }
 
 interface CurvePoolContract {
-  get_virtual_price(): Promise<Uint256>;
   balances(i: Uint256): Promise<Uint256>;
-  balanceOf(owner: Address): Promise<Uint256>;
-  totalSupply(): Promise<Uint256>;
   get_dy(i: Int128, j: Int128, dx: Uint256): Promise<Uint256>;
 }
 
@@ -99,12 +92,11 @@ interface CurveTokenExchangeEvent { buyer: Address; sold_id: bigint; tokens_sold
 
 Every command reads current state per-invocation (there is no long-running poller — see §4). The
 tool reads: RPC `eth_chainId` + latest block (connectivity / staleness); vault `asset`,
-`totalAssets`, `totalSupply`, `convertToAssets(1e18)`, `vaultOwnedShares`, `currentDepositFeeBps`,
-`withdrawalsEnabled`; DIEM/wstDIEM ERC-20 balances; `FeeRouter` pending/threshold reads; Morpho
+`totalAssets`, `totalSupply`, `convertToAssets(1e18)`; DIEM/wstDIEM ERC-20 `balanceOf`; Morpho
 `idToMarketParams`, `market`, `position`, `isAuthorized`, IRM `borrowRateView`; the Morpho oracle
-`price()`; and Curve `balances`, `get_virtual_price`, `get_dy`, `totalSupply`. Historical
-harvest/credit/swap logs are backfilled from the last saved block with a reorg-safety overlap and
-persisted to SQLite (§6).
+`price()`; and Curve `balances(0)`, `balances(1)`, `get_dy`. `FeeRouter` is not called — its
+harvest cadence is inferred from logs. Historical harvest/credit/swap logs are backfilled from the
+last saved block with a reorg-safety overlap and persisted to SQLite (§6).
 
 Derived metrics:
 
@@ -165,12 +157,17 @@ oracleDeviation     = abs(onchainOracle.price() - computedOraclePrice) / compute
 ```
 
 > Note: the offline **loop-sizing** engine models `netAPY` under a utilization-aware Adaptive Curve
-> borrow rate rather than a flat `borrowRate`; see §5 and SPEC002.
+> borrow rate rather than a flat `borrowRate`; see §5 and SPEC002 (planned).
 
 ## 3. Alert System
 
-Alerts are evaluated on the state read by `status`, `watch --once`, and `monitor`; delivery is
-opt-in on `monitor --alert`. There is no daemon continuously evaluating them (§4).
+This **metric-alert** table is evaluated by `status` and `watch --once` (`src/cli/status.ts` →
+`evaluateAlerts`), with cooldown/dedup applied via the `alert_state` table. `monitor` evaluates a
+**separate readiness-alert set** (`src/monitor/readinessAlerts.ts` → `evaluateReadinessAlerts`:
+`curve_liquidity_empty`, `vault_not_ready`, `morpho_liquidity_empty`, `executor_missing`/
+`_no_code`/`_config_mismatch`, `owner_missing`/`_position_missing`, `executor_not_authorized`) and,
+with `--alert`, delivers **without** the metric-alert cooldown. There is no daemon continuously
+evaluating either set (§4).
 
 | Alert | Level | Condition | Suggested action | Cooldown |
 |---|---|---|---|---:|
@@ -187,13 +184,18 @@ opt-in on `monitor --alert`. There is no daemon continuously evaluating them (§
 | RPC stale | WARN | `latestBlockAge > 60s` | Fail over to fallback RPC | 5m |
 | Simulation failure | CRITICAL | `eth_call reverted` | Inspect revert; tx not broadcast | none |
 
+> **Advisory only.** The suggested-action column names the risk response; the tool **executes none
+> of them** — it is monitor-and-rehearse (§5). Treat these as signals to act out-of-band. The
+> **Simulation failure** row is surfaced as a `CliError` (`LIVE_SIMULATION_FAILED`) on the exit
+> path, not delivered through the alert channels below.
+
 Delivery channels (`src/alerts/deliver.ts`):
 
 - **Stderr** (`chalk`): always on. INFO gray/blue, WARN yellow, CRITICAL red bold.
 - **Webhook**: optional Discord/Slack-compatible JSON POST via `undici`, including `severity`,
   `alertKey`, `message`, `metrics`, `suggestedAction`, `chainId`, `blockNumber`, `timestamp`.
-- **Telegram**: optional bot token/chat id, same payload as Markdown-safe text via raw HTTP
-  (`undici`) — there is no `telegraf` dependency.
+- **Telegram**: optional bot token/chat id, same payload as concise plain text via raw HTTP
+  (`undici`) — there is no `telegraf` dependency, and no `parse_mode`/escaping is applied today.
 - Dedup key: `chainId:positionAddress:alertKey:level`, with cooldown state persisted in the
   `alert_state` table (§6).
 
@@ -234,11 +236,11 @@ Dashboard content (rendered one-shot by `status`/`monitor`, not a live TUI):
 | Group | Fields |
 |---|---|
 | Chain | chainId, latest block, RPC name, RPC lag |
-| Vault | totalAssets, totalShares, NAV, depositFeeBps, withdrawalsEnabled |
+| Vault | totalAssets, totalShares, NAV |
 | Yield | rolling7dCreditDIEM, baseAPY, lastCreditAt, lastHarvestAt |
 | Morpho market | marketId, LLTV, utilization, totalSupplyAssets, totalBorrowAssets, borrowRate |
 | Position | collateral wstDIEM, collateral DIEM value, borrowedDIEM, leverage, healthFactor |
-| Curve | DIEM balance, wstDIEM balance, TVL DIEM, virtualPrice, 24h volume |
+| Curve | DIEM balance, wstDIEM balance, TVL DIEM, 24h volume |
 | Risk | netAPY(3.5x), spreadScore, oracleDeviation, positionSizeVsCurveDepth |
 | Alerts | active count by severity, last alert, next allowed repeat |
 
@@ -250,18 +252,30 @@ engine. `open` and `rebalance` are specified in Appendix A and are dead-gated in
 multi-action executor exists. **No command broadcasts** — broadcast is fail-closed pending audit
 (§9, Appendix A).
 
+**Execution status (important) — monitor-and-rehearse only.** Because broadcast is disabled, this
+tool performs **no state-changing action** — it monitors, sizes, and *simulates* ("rehearses") the
+exit. **There is no supported in-tool execution path while broadcast is fail-closed** (decided
+2026-07-11): the operator **cannot act on a critical alert through this tool**. Creating a position
+(`open`) is out of band (Appendix A1); there is **no automated liquidation protection** (Appendix A3),
+so against the 86% LLTV market the operator must react manually — and any such execution is entirely
+out-of-band and unsupported until the executor audit gate clears (Appendix A2). The alert "suggested
+actions" in §3 are advisory signals, not in-tool commands.
+
 ### `loop sizing` (offline)
 A pure offline economic simulator that sweeps a grid of leverage × Curve depth × Morpho supply ×
 vault APY and prices each scenario through curve-liquidity, Morpho-supply, entry/exit slippage,
 health-factor, net-APY, and unwind-coverage gates. It models borrow cost with a faithful Morpho
 Adaptive Curve IRM (flat model also available). No chain reads. Its full input/gate/output contract
-is specified separately in **SPEC002 (Loop Sizing Engine)**; this section only records that it is
-part of the CLI. Key flags: `--preset`, `--initial-diem`/`--initial-wstdiem`, `--target-leverage`,
+is **to be specified in SPEC002 (Loop Sizing Engine) — planned, not yet authored**; until then
+`loop sizing` has **no committed spec contract** (the closest reference is the non-normative
+`docs/deployment/loop-sizing.md` runbook). Key flags: `--preset`, `--initial-diem`/`--initial-wstdiem`, `--target-leverage`,
 `--curve-depth-diem`, `--morpho-supply-diem`, `--borrow-rate-model`, `--rate-at-target-apy-bps`,
 `--vault-apy-bps`, `--json`.
 
 ### `loop authorize-executor`
-Inputs: `--owner` (defaults wallet address), `--live`, `--dry-run`, `--json`.
+Inputs: `--owner` (defaults to `config.position.owner`; with the default `null` the command errors
+`AUTHORIZATION_UNAVAILABLE`), `--live`, `--json`. `--dry-run` is accepted but currently a no-op —
+the command never broadcasts, so it always behaves as a dry run.
 
 - Read `morpho.isAuthorized(owner, loopExecutor)`.
 - If already authorized, report `alreadyAuthorized: true` without building a tx.
@@ -369,13 +383,13 @@ tables plus `alert_state` for cooldown/dedup:
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE metric_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, block_number INTEGER NOT NULL, nav TEXT NOT NULL, base_apy REAL NOT NULL, borrow_rate REAL NOT NULL, net_apy_35 REAL NOT NULL, spread_score REAL NOT NULL, health_factor REAL, curve_tvl_diem TEXT NOT NULL, oracle_deviation REAL NOT NULL);
+CREATE TABLE metric_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, block_number INTEGER NOT NULL, nav TEXT NOT NULL, base_apy REAL NOT NULL, borrow_rate REAL NOT NULL, net_apy_35 REAL NOT NULL, spread_score REAL NOT NULL, health_factor REAL, curve_tvl_diem TEXT NOT NULL, oracle_deviation REAL NOT NULL, vault_total_assets_diem TEXT NOT NULL DEFAULT '0');
 CREATE TABLE credit_events (tx_hash TEXT NOT NULL, log_index INTEGER NOT NULL, block_number INTEGER NOT NULL, timestamp INTEGER NOT NULL, source TEXT NOT NULL, amount_diem TEXT NOT NULL, PRIMARY KEY (tx_hash, log_index));
 CREATE TABLE harvest_events (tx_hash TEXT NOT NULL, log_index INTEGER NOT NULL, block_number INTEGER NOT NULL, timestamp INTEGER NOT NULL, event_name TEXT NOT NULL, token_in TEXT, amount_in TEXT, amount_out TEXT, PRIMARY KEY (tx_hash, log_index));
 CREATE TABLE curve_swaps (tx_hash TEXT NOT NULL, log_index INTEGER NOT NULL, block_number INTEGER NOT NULL, timestamp INTEGER NOT NULL, sold_id INTEGER NOT NULL, bought_id INTEGER NOT NULL, tokens_sold TEXT NOT NULL, tokens_bought TEXT NOT NULL, volume_diem TEXT NOT NULL, PRIMARY KEY (tx_hash, log_index));
 CREATE TABLE position_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, block_number INTEGER NOT NULL, owner TEXT NOT NULL, collateral_wstdiem TEXT NOT NULL, borrowed_diem TEXT NOT NULL, leverage REAL NOT NULL, health_factor REAL);
 CREATE TABLE alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, alert_key TEXT NOT NULL, severity TEXT NOT NULL, message TEXT NOT NULL, metrics_json TEXT NOT NULL, delivered_channels_json TEXT NOT NULL);
-CREATE TABLE alert_state (alert_key TEXT PRIMARY KEY, last_delivered_at INTEGER NOT NULL, last_level TEXT NOT NULL);
+CREATE TABLE alert_state (dedupe_key TEXT PRIMARY KEY, last_delivered_at INTEGER NOT NULL);   -- dedupe_key = chainId:positionAddress:alertKey:level
 CREATE TABLE tx_history (tx_hash TEXT PRIMARY KEY, timestamp INTEGER NOT NULL, command TEXT NOT NULL, status TEXT NOT NULL, params_json TEXT NOT NULL, projected_metrics_json TEXT NOT NULL, receipt_json TEXT);
 ```
 
@@ -401,6 +415,7 @@ contracts:
   morphoBlue: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
   adaptiveCurveIrm: "0x46415998764C29aB2a25CbeA6254146D50D22687"
   curveFactory: "0xd2002373543Ce3527023C75e7518C274A51ce712"
+  uniswapV4PoolManager: "0x498581fF718922c3f8e6A244956aF099B2652b2b"   # inert; rejected flash provider (§5)
   inferenceVault: "0xe49FA849cB37b0e7A42B2335e333fb99474167ba"
   feeRouter: "0xa13a6e75d696bAceB38236389eeFD6eCa5FD4ED3"
   agentTgeRegistry: "0xb13830e7f72Eef167A7F188285feBa5f7C1198Ef"
@@ -460,7 +475,7 @@ execution:
   maxSlippageBps: 300
   maxCurvePriceImpactBps: 100
   exitRepayBufferBps: 200
-  maxBaseApyStalenessBlocks: 43200
+  maxBaseApyStalenessBlocks: 7200
   transactionDeadlineSeconds: 300
 ```
 
@@ -471,7 +486,7 @@ execution:
 | `status` | One-shot snapshot | `--owner`, `--config`, `--json` | Table or JSON |
 | `watch --once` | One monitoring iteration + persist | `--once`, `--no-tui`, `--config`, `--json` | Table, stderr alerts |
 | `monitor` | Live operator dashboard | `--owner`, `--loop-executor`, `--alert` | Dashboard, optional alert delivery |
-| `loop sizing` | Offline sizing simulator (→ SPEC002) | `--preset`, `--target-leverage`, `--curve-depth-diem`, `--morpho-supply-diem`, `--borrow-rate-model`, `--rate-at-target-apy-bps`, `--vault-apy-bps`, `--json` | Sizing grid table/JSON |
+| `loop sizing` | Offline sizing simulator (→ SPEC002, planned) | `--preset`, `--target-leverage`, `--curve-depth-diem`, `--morpho-supply-diem`, `--borrow-rate-model`, `--rate-at-target-apy-bps`, `--vault-apy-bps`, + ~13 more, `--json` | Sizing grid table/JSON |
 | `loop readiness` | Live exit-readiness checklist | `--owner`, `--loop-executor`, `--strict-evidence`, `--json` | Curve/Morpho/executor/owner/audit blockers |
 | `loop authorize-executor` | Authorize executor on Morpho | `--owner`, `--live`, `--dry-run`, `--json` | Authorization status/calldata |
 | `loop simulate` | Dry-run (live-optional) exit projection | `--action exit`, `--live`, `--force`, `--owner`, `--from`, `--json` | JSON/table projection |
@@ -497,16 +512,13 @@ interface CliJsonOutput<T> {
 
 ## 9. Error Handling & Safety
 
-RPC read failover (`src/contracts/rpc.ts`):
+RPC read failover (`src/contracts/rpc.ts`) — **actual current behavior**:
 
-```text
-attemptDelayMs = min(30_000, 500 * 2^attempt) + jitter(0..250)
-maxAttempts    = 5 for reads
-```
-
-- On read failure, retry primary then fail over to fallback RPC; on inconsistent results prefer the
-  RPC with the highest finalized block and matching chain id. *(RPC failover/health-check logic is
-  currently under-tested — a known coverage gap tracked for Phase 3.)*
+- Up to `maxAttempts = 5` retries per endpoint, fired **immediately** (there is no backoff, delay,
+  or jitter in the current code — `rpc.ts:42-67`), then failover to the configured fallback URLs.
+- On inconsistent results, prefer the RPC with the highest finalized block and matching chain id.
+- *Jittered exponential backoff and a broadcast retry policy (`maxAttempts = 1`) are **not built** —
+  see Appendix A2; RPC failover/health-check logic is also currently under-tested (Phase 3 gap).*
 - **Broadcast is disabled.** No command sends a transaction; `assertBroadcastNotAllowed` throws and
   readiness reports `broadcastAvailable: false`, `auditRequired: true`. The broadcast contract
   (never-broadcast-on-revert, `pending_unknown` receipt handling, `--force-gas`) is specified in
@@ -537,8 +549,9 @@ Executor safety invariants (enforced by `contracts/LoopExecutor.sol`, fork-teste
 | Format/lint | `prettier`, `eslint`, `typescript-eslint` | ✅ |
 | ~~TUI `ink` + `react`~~ | — | ✖ deferred (no daemon) |
 | ~~Telegram `telegraf`~~ | raw `undici` | ✖ not a dependency |
+| Env loading | `dotenv` | ✅ |
 | ~~Hardware wallet `@ledgerhq/*`~~ | — | ✖ deferred |
-| Optional Morpho helpers `@morpho-org/blue-sdk*` | cross-check math | optional |
+| ~~`@morpho-org/blue-sdk*`~~ | — | ✖ not a dependency (potential future cross-check) |
 
 Testing split:
 
@@ -608,3 +621,17 @@ Ledger (`@ledgerhq/*`) and/or Safe transaction-building support is deferred; not
 4. Hardware-wallet scope (Ledger only vs also Safe) — deferred with A5.
 5. Confirm whether `riskFreeRate = 5%` stays static or is later read from an external USDC-yield
    source.
+6. **Interim exit execution — RESOLVED 2026-07-11: monitor-and-rehearse only.** While broadcast is
+   fail-closed there is **no supported in-tool execution path**; the tool surfaces and simulates
+   risk but the operator cannot act on a critical alert through it. Execution is out-of-band and
+   unsupported until the executor audit gate clears (Appendix A2). Consequences applied: the §5
+   execution-status note and the §3 advisory note. (Accepted trade-off: the monitoring/readiness
+   surface is decision-support and rehearsal, not an actionable kill-switch.)
+7. **Scheduler exit-code contract.** Under `watch --once` + cron (D2), what exit code should the CLI
+   return by outcome class (all-clear / WARN / CRITICAL / RPC-unavailable / readiness-blocked)?
+   Today it sets only a generic `1` on internal error, so a CRITICAL alert still exits `0` and a
+   scheduler cannot gate on severity via exit status.
+8. **Threshold source of truth.** When the §3 alert table values differ from `config.thresholds`
+   (§7), which is authoritative? (Presumably config — state it.)
+9. **Liquidation readout.** Should the dashboard surface margin-to-liquidation / liquidation price
+   (not just HF), given there is no automated liquidation protection?

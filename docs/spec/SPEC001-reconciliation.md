@@ -125,3 +125,33 @@ broadcast fail-closed (document the gate, defer the enablement spec).
 7. Add a short **"Deferred (not in the current tool)"** appendix collecting: multi-action executor (open/rebalance), broadcast enablement (behind the audit gate), auto-deleverager, persistent daemon/TUI, hardware wallet.
 
 **Net:** ~40% of SPEC001 describes an unbuilt future (daemon, broadcast, multi-action, auto-deleverager). rev-2 keeps that as an explicitly-labeled Deferred appendix and makes the main body a true description of the shipping tool.
+
+---
+
+## Post-review corrections (2026-07-11)
+
+rev-2 went through a two-agent review gate (adversarial technical + product-design). The technical
+reviewer found — and I verified against code — that rev-2 (and this ledger) had **carried over
+original-spec text without checking the ABIs**. Corrected in rev-2:
+
+| Finding | Was | Now | Evidence |
+|---|---|---|---|
+| §1 fabricated vault/FeeRouter/Curve reads | listed methods not in the ABIs | trimmed to actual ABI (vault: 4 fns; FeeRouter: events only; Curve: `balances`+`get_dy`) | `src/abi/{inferenceVault,feeRouter,curvePool}.ts` |
+| §9 RPC backoff | `min(30s,500·2^a)+jitter` | 5 immediate retries, no backoff (accurate) | `src/contracts/rpc.ts:42-67` |
+| §7 `maxBaseApyStalenessBlocks` | 43200 | 7200 | `config/defaults.ts:87`, test-locked |
+| §6 `alert_state` DDL | `(alert_key, last_delivered_at, last_level)` | `(dedupe_key, last_delivered_at)` | `sqlite.ts:111` |
+| §6 `metric_snapshots` | missing column | added `vault_total_assets_diem` | `sqlite.ts:126` |
+| §3 alert attribution | "evaluated by … monitor" | `monitor` uses a disjoint readiness-alert set | `readinessAlerts.ts` |
+| §5 `authorize-executor --owner` | "defaults wallet address" | defaults to `config.position.owner` | `index.ts:527` |
+| §10 deps | `@morpho-org` optional; no `dotenv` | `@morpho-org` absent; `dotenv` present | `package.json` |
+| §7 contracts | missing `uniswapV4PoolManager` | added (inert) | `defaults.ts:22` |
+| SPEC002 | "is specified" | "planned — not yet authored" | plan only |
+
+**Ledger self-correction:** this ledger originally certified §1 as `✅ built-as-spec` — wrong; it
+checked that ABI *files* exist, not that the spec's method lists match ABI *contents*. §1 is now
+`built-differently` (over-listed reads, corrected).
+
+The product reviewer's structural findings are **not spec-truth defects** but real product gaps,
+surfaced as SPEC001 Open Questions #6–9: the interim exit-execution path (blocking), the scheduler
+exit-code contract, threshold source-of-truth, and a liquidation readout. These need product
+decisions, not edits.
