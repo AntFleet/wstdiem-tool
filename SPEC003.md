@@ -96,12 +96,20 @@ for the flat model."* (Provenance would otherwise misrepresent the borrow side.)
 
 ### 4.2 `curveDepthDiem` ← live `get_dy` (once rev-2 lands)
 
-With leg-aware slippage in the model, `--from-chain` seeds the exit-slippage input from a live
-`get_dy(1→0, plannedExitSize)` at the pinned block — direction-correct and convex. It still reads both
-legs (`balances(0)` DIEM, `balances(1)` wstDIEM via `convertToAssets`) for provenance and
-`curveImbalanceRatio`. Guards: **both legs zero → fail-closed** (empty pool); define
-`curveImbalanceRatio = 1` (force a warning) when both legs are 0 to avoid a `0/0 → NaN` that would
-*suppress* the warning on the most-drained pool.
+With leg-aware slippage in the model, `--from-chain` fills SPEC002 rev-2's `externalExitSlippageBps`
+seam from a live `get_dy` quote at the pinned block — direction-correct and convex. **Reuse
+`quoteCurveExitRoute` + `priceImpactBps` (`src/loop/routeQuote.ts`)** — do not re-derive. The exit
+sells the position's **wstDIEM shares**, not the DIEM notional (SPEC002 rev-2 R2):
+
+```text
+wstDiemIn               = convertToShares(positionCollateralDiem)          // NOT positionCollateralDiem — get_dy dx is wstDIEM
+externalExitSlippageBps = priceImpactBps(convertToAssets(wstDiemIn), get_dy(1, 0, wstDiemIn))
+```
+
+It also reads both legs (`balances(0)` DIEM, `convertToAssets(balances(1))` wstDIEM→DIEM) to seed
+`curveDiemLegDiem` / `curveWstDiemLegDiem` and compute `curveImbalanceRatio` for provenance. Guards:
+**both legs zero → fail-closed** (empty pool); define `curveImbalanceRatio = 1` (force a warning) when
+both legs are 0 to avoid a `0/0 → NaN` that would *suppress* the warning on the most-drained pool.
 
 > *Interim only (discouraged):* if Part B must ship before rev-2, seed a conservative
 > `2 × min(diemLeg, wstDiemLegInDiem)` and **label it interim** — it merely penalizes imbalance, still

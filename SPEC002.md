@@ -327,74 +327,142 @@ These are **not** in the current engine or this contract; they are the review's 
 ## rev-2 — model fidelity (Phase 3.5, FORWARD — not yet implemented)
 
 > **Committed forward changes** to the engine, the hard prerequisite for **SPEC003 Part B**. Until
-> implemented, §1–§10 describe the shipped behavior; rev-2 promotes three §11 items to committed work
-> and revises §4 (slippage/cost) + §8 (assumptions). Same spec-first gate applies (two-agent review →
-> lock → executor → verify).
+> implemented, §1–§10 describe the shipped behavior. Revised after a two-agent review gate (both
+> verdicts REVISE → this pass): the leg-draw direction and the ~2× correction were verified correct
+> against Curve `exchange(1,0)` semantics; the fixes below close the denomination, override-scope, and
+> spec-consistency gaps. Same spec-first gate applies (review → lock → executor → verify).
 
 ### R1 — Leg-aware, direction-correct slippage (fixes §8's headline blind spot at the model layer)
 
 Today (`sizing.ts:248-253`) every trade divides by a single `curveDepthDiem` scalar, which cannot
 represent an imbalanced/drained pool, is direction-blind, and divides by *total* depth (understating
-trade-vs-traded-side by ~2×, §8). rev-2 models the pool as **two legs** in DIEM-equivalent:
+trade-vs-traded-side by ~2×, §8). rev-2 models the pool as **two legs** in DIEM-equivalent (WAD bigint):
 
 - `curveDiemLegDiem` — the DIEM side (`balances(0)`).
 - `curveWstDiemLegDiem` — the wstDIEM side in DIEM (`convertToAssets(balances(1))`).
 
-Each trade divides by the leg it **draws** (selling into a StableSwap leg depletes it):
+Each trade divides by the leg it **draws down** — a Curve `exchange(i,j)` pays OUT coin `j`, depleting
+the `j` leg (verified: exit is `exchange(1,0)` → DIEM leg drawn; entry `exchange(0,1)` → wstDIEM leg):
 
 ```text
-estimatedExitSlippageBps  = curveFeeBps + ratioBps(positionCollateralDiem, curveDiemLegDiem)      // exit sells wstDIEM → draws DIEM leg
-estimatedEntrySlippageBps = curveFeeBps + ratioBps(borrowAmountDiem,       curveWstDiemLegDiem)   // entry buys wstDIEM → draws wstDIEM leg
-// a zero drawn leg → +Infinity (as rev-1)
+estimatedExitSlippageBps  = curveFeeBps + ratioBps(positionCollateralDiem, curveDiemLegDiem)      // exit sells wstDIEM → draws OUT of the DIEM leg
+estimatedEntrySlippageBps = curveFeeBps + ratioBps(borrowAmountDiem,       curveWstDiemLegDiem)   // entry buys wstDIEM → draws OUT of the wstDIEM leg
+// a zero DRAWN leg → +Infinity (as rev-1); default grid curveDepth=0 → both legs 0 → both +Infinity
 ```
 
 Direction-correct: on a DIEM-drained pool the **exit** (÷ small DIEM leg) is correctly costly while the
 **entry** (÷ large wstDIEM leg) is correctly cheap — the case rev-1's single scalar and SPEC003's
 rejected `2×min` heuristic both got wrong.
 
-**Input & backward-compat.** Add `--curve-diem-leg` / `--curve-wstdiem-leg` (DIEM-equivalent) grid
-inputs; keep `--curve-depth-diem <total>` as a **balanced** convenience: `curveDiemLegDiem =
-curveWstDiemLegDiem = total / 2`. **Intended correction (breaking):** for the same nominal
-`--curve-depth-diem`, rev-2 exit/entry slippage is ~**2× higher** than rev-1 (it divides by ~half the
-pool — the traded leg — not the total). This *is* the §8 ~2× understatement fix, not a regression;
-rev-1 acceptance fixtures update to the corrected values. Still a **linear per-leg** estimate — true
-convexity comes from a live quote (R2).
+**Total depth stays defined.** The engine reconstructs `curveDepthDiem = curveDiemLegDiem +
+curveWstDiemLegDiem` for the *depth-based* (not slippage-based) parts of gate 1: the depth-sufficiency
+sub-condition `curveDepthDiem < requiredCurveDepthDiem` (`sizing.ts:310`) and the `requiredCurveDepthDiem`
+/ `requiredCurveDiemDepth` / `requiredCurveWstDiemDepth` outputs (§4/§7.2) are unchanged and keyed off
+this reconstructed total. (A per-leg sufficiency check is a §11 future refinement, not rev-2.)
+
+**Input, precedence & backward-compat.** Add `--curve-diem-leg` / `--curve-wstdiem-leg`
+(DIEM-equivalent) grid inputs. Keep `--curve-depth-diem <total>` as a **balanced** convenience:
+`curveDiemLegDiem = curveWstDiemLegDiem = total / 2` (odd-WAD remainder to the wstDIEM leg, mirroring
+`requiredCurveWstDiemDepth`). `--curve-depth-diem` and the leg flags are **mutually exclusive** (both
+supplied → `scenario_invalid`), mirroring the §2.4 `--initial-diem` / `--initial-wstdiem` rule.
+
+**Intended correction (breaking, verdict-affecting).** For the same nominal `--curve-depth-diem`, the
+`ratioBps` *term* is ~**2× larger** than rev-1 (it divides by ~half the pool — the traded leg — not the
+total; the flat `curveFeeBps` term is unchanged). This *is* the §8 understatement fix, not a
+double-count. It flips verdicts: the canonical §9 case (100 DIEM @1.5×, `curveDepthDiem=10000`) is
+rev-1 exit slip `4 + ratioBps(150,10000) = 154 bps → viable`, but rev-2 (legs 5000) `4 +
+ratioBps(150,5000) = 304 bps > 300 → blocked`. **Resolution: the canonical §9 example re-pins to
+`curveDepthDiem = 20000`** (legs 10000 → 154 bps → stays `viable`); the §4 worked reference is
+slippage-free and is unaffected. Every rev-1 fixture with a nonzero exit trade re-baselines (§AC).
+
+**Offline is conservative by design.** A purely-offline run (no `get_dy`, R2) may now `blocked` on the
+2×-inflated *linear* estimate — intentional: offline slippage is an explicit conservative upper bound,
+which `loop sizing --from-chain` refines with a real convex `get_dy` quote (R2). The
+`assumptions.curveDepthModel` label bumps `"linear-depth-share"` → `"linear-per-leg-depth-share"` so
+consumers detect the change. The §6 marginal band (`slippage > 0.8·maxSlippage`) will classify more
+scenarios `marginal` now that slippage ~doubles — expected.
 
 ### R2 — Live `get_dy` exit-quote injection (the seam SPEC003 Part B fills)
 
-Add an optional `externalExitSlippageBps?: number` scenario input. When present it **overrides** the R1
-exit estimate; the exit gate uses it verbatim, and the report records `exitSlippageSource: "get_dy" |
-"estimate"`. This is the seam by which `loop sizing --from-chain` (SPEC003 Part B) injects a **real
-convex** exit slippage from a live `get_dy(1→0, positionCollateralDiem)` at the pinned block:
+Add an optional `externalExitSlippageBps?: number` scenario input. **When present it replaces
+`estimatedExitSlippageBps` at every consumption site** — gate 1 (`sizing.ts:311`), the exit slippage
+cost → `netApy` (`:258-261`), the `unwindDiemOut` → `unwind_not_covered` backstop, gate 5
+(`:300-303,327`), and the `isMarginal` band (`:209`) — so the verdict stays internally consistent
+(rename the field `estimatedExitSlippageBps` → `exitSlippageBps` since it can now hold a live quote). A
+negative or `>10000` injected value is `scenario_invalid` (gate 0).
+
+**Reuse the existing exit rail — do not re-derive.** The live quote is exactly `routeQuote.ts`'s
+already-tested `quoteCurveExitRoute` + `priceImpactBps` (`routeQuote.ts:44-50,52-99`), which handles the
+denomination correctly. The exit sells the position's **wstDIEM shares**, not a DIEM amount:
 
 ```text
-externalExitSlippageBps = max(0, round((1 − diemOut / expectedDiemOutAtNav) · 10000))
+wstDiemIn               = convertToShares(positionCollateralDiem)          // wstDIEM to sell (NOT the DIEM notional)
+expectedDiemOutAtNav    = convertToAssets(wstDiemIn)   ( ≈ positionCollateralDiem )
+quotedDiemOut           = get_dy(WSTDIEM_INDEX=1, DIEM_INDEX=0, wstDiemIn)  // at the pinned block
+externalExitSlippageBps = priceImpactBps(expectedDiemOutAtNav, quotedDiemOut)   // (expected − quoted)/expected in bps, clamped ≥ 0
 ```
 
-Offline runs (no injection) use the R1 leg-aware estimate. Entry keeps the R1 estimate — the exit gate
-is the primary safety constraint (§5); an entry-quote seam is a later option. This is the correct
-layer for convexity: a real quote, not an offline heuristic.
+`get_dy`'s `dx` is a **wstDIEM** amount (SPEC001 §1); passing the DIEM-denominated `positionCollateralDiem`
+would mis-quote by the live NAV factor (NAV ratchets ≥ 1), so the `convertToShares` step is mandatory.
+Sharing the one `priceImpactBps` helper between the sizing seam and the live preflight rail guarantees
+the offline estimate and the execution rail cannot silently diverge.
+
+Offline runs (no injection) use the R1 leg-aware estimate. Entry keeps the R1 estimate — exit is the
+only *gating* slippage (there is no entry-slippage blocker), and on a DIEM-drained pool the entry draws
+the fat wstDIEM leg where convexity is smallest. The report records **`exitSlippageSource: "get_dy" |
+"estimate"`** (entry is always `"estimate"` — state so, so a `--from-chain` report never implies both
+legs are chain-real). `exitSlippageSource` **extends the existing `SeedProvenance`** (`sizing.ts:108-115`,
+SPEC003 §6) — no parallel provenance system; a non-`get_dy` exit source or an imbalanced pool is a
+soft-seed condition that trips SPEC003 §6's `authoritative: false` verdict demotion.
 
 ### R3 — Gas in one-time cost; MEV as a caveat
 
 `oneTimeCostDiem = entrySlippageCost + exitSlippageCost + flashFeeCost + gasCostDiem`, with a new
-`gasCostDiem` (`--gas-cost-diem`, default `0`). At default ~100-DIEM sizes gas alone can flip
-`netApyBps` negative, so it must be a first-class term (`sizing.ts:261`). **MEV stays a caveat, not a
-number** — unbounded and venue/timing-specific; §8 documents that it scales with pool thinness on the
-Curve leg and that a thin-pool `viable` is MEV-exposed regardless of the modeled slippage.
+single-valued `gasCostDiem` (`--gas-cost-diem`, default `0`; not a grid dim). At default ~100-DIEM
+sizes gas alone can flip `netApyBps` negative, so it must be a first-class term (`sizing.ts:261`).
 
-### §8 / §11 reconciliation
+**Honest default.** With the default `0`, a run that does not set `--gas-cost-diem` still excludes gas
+exactly as rev-1 did — so the §8 caveat is **reworded, not dropped**, and when `gasCostDiem == 0` a
+**`gas unmodeled` warning rides the verdict** (parallel to SPEC003 §6's demotion), not just §8 prose.
+(We deliberately do not auto-estimate gas — that would import gas-unit/base-fee/ETH-DIEM assumptions the
+offline engine has no basis for; the operator supplies a real figure or is warned it's excluded.)
+
+**MEV stays a caveat, not a number** — unbounded and venue/timing-specific. §8 documents it scales with
+pool thinness on the Curve leg, and like the imbalance caveat, on a thin/imbalanced pool the MEV caveat
+**rides the verdict token** — because `viable` is most MEV-misleading exactly there.
+
+### §7 field additions
+- **Scenario inputs:** `curveDiemLegDiem` / `curveWstDiemLegDiem` (WAD bigint, grid dims), `gasCostDiem`
+  (WAD bigint, single), `externalExitSlippageBps?` (number; injected by `--from-chain`, not an offline flag).
+- **Result/report:** the two curve legs and `exitSlippageSource` echo into §7.2 (legs as WAD, wei-string
+  per §7.3); `assumptions.curveDepthModel` → `"linear-per-leg-depth-share"`.
+
+### §8 / §9 / §11 reconciliation
 - §8 Curve bullet → "leg-aware, direction-correct, imbalance-aware; still linear per leg unless a live
-  `get_dy` quote is injected (R2)."
-- §8 → gas now **included** (R3); MEV still excluded numerically (caveat, R3).
+  `get_dy` quote is injected (R2); offline is a conservative upper bound."
+- §8 → gas is a **first-class input but defaults to 0** (a default run still excludes it, warned on the
+  verdict); MEV still excluded numerically (verdict-adjacent caveat).
+- **§9 / §4** → the canonical `viable` example re-pins to `curveDepthDiem = 20000` (R1); the §4 worked
+  reference is slippage-free and unchanged.
 - §11 → "leg-aware/`get_dy` slippage" and "gas + MEV" are promoted to this committed rev-2; shortfall
-  outputs and liquidation-distance remain §11 future.
+  outputs, liquidation-distance, and a per-leg depth-sufficiency check remain §11 future.
 
 ### Acceptance criteria (tests when built)
-1. Exit slippage divides by the DIEM leg, entry by the wstDIEM leg (the direction map).
+1. Exit slippage divides by the DIEM leg, entry by the wstDIEM leg (the verified direction map).
 2. Imbalanced fixture (DIEM leg ≪ wstDIEM leg) → high exit / low entry slippage; mirror pool → reverse.
-3. `--curve-depth-diem T` → balanced legs `T/2`; exit `= fee + ratioBps(trade, T/2)` (the corrected ~2× vs rev-1 — rev-1 fixtures updated).
-4. `externalExitSlippageBps` overrides the exit estimate; `exitSlippageSource` records `"get_dy"` vs `"estimate"`.
-5. `gasCostDiem` folds into `oneTimeCostDiem` → `netApyBps` (a large-enough gas value flips a marginal `viable` to blocked).
-6. Zero drawn leg → `+Infinity` slippage (fail-safe, as rev-1; JSON serializes `"Infinity"` per §7.3).
-7. Integration: SPEC003 Part B seeds both legs from `balances` + the exit quote from `get_dy`, and its soft-seed verdict-demotion (SPEC003 §6) fires on an imbalanced pool.
+3. `--curve-depth-diem T` → balanced legs `T/2`; exit `= fee + ratioBps(trade, T/2)`. **Re-baseline every
+   rev-1 fixture with a nonzero exit trade** — the `viable` case (re-pinned to 20000), the grid
+   `firstViableByLeverage`, and the `isMarginal` band — not only depth cases.
+4. `--curve-depth-diem` with either leg flag → `scenario_invalid` (mutual exclusion).
+5. `externalExitSlippageBps` replaces the exit value at **all four** sites — assert it moves gate 1,
+   `netApy`, the `unwind_not_covered` backstop, AND the marginal classification; a negative/`>10000`
+   value → `scenario_invalid`.
+6. Seam-vs-rail: `externalExitSlippageBps` via `quoteCurveExitRoute` + `priceImpactBps` equals what
+   `routeQuote.ts` produces for the same `wstDiemIn` at the same block (guards denomination + no divergence).
+7. `gasCostDiem` folds into `oneTimeCostDiem` → `netApyBps` (large-enough gas flips a marginal `viable`
+   to `net_apy_below_threshold`); `gasCostDiem == 0` emits the `gas unmodeled` warning.
+8. Total reconstruction: `curveDepthDiem = diemLeg + wstDiemLeg` feeds gate 1's depth-sufficiency
+   sub-condition and the `requiredCurve*` outputs.
+9. Zero drawn leg → `+Infinity` slippage (fail-safe, as rev-1; JSON serializes `"Infinity"` per §7.3).
+10. Integration: SPEC003 Part B seeds both legs from `balances` + the exit quote from `get_dy`, and its
+    soft-seed verdict-demotion (SPEC003 §6) fires on an imbalanced pool or a non-`get_dy` exit source.

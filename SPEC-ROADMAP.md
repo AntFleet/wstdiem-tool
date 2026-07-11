@@ -171,7 +171,7 @@ live-seed — and any future model change — must conform to.
     review gate (run before code) + approval pass caught the design and every carried-over bug; the
     inversion fallback was consciously cut (direct-read revert fails closed).
 
-### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B) — DRAFT AUTHORED, review running
+### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B) — REVIEWED + LOCKED (2026-07-11)
 
 Drafted as the `## rev-2` section in `SPEC002.md`. The design resolves the "get_dy is a chain read but
 SPEC002 is offline" tension **two-layered**:
@@ -186,7 +186,20 @@ SPEC002 is offline" tension **two-layered**:
 - **R3 — gas in `oneTimeCostDiem`** (`--gas-cost-diem`); MEV stays a caveat, not a number.
 
 Then SPEC003 Part B seeds both legs from `balances` + the exit quote from `get_dy`, and vaultApyBps
-(×10000-corrected), into the fixed model. **Next: two-agent review gate before lock.**
+(×10000-corrected), into the fixed model.
+
+**Review gate passed (both agents REVISE → applied).** The verifier confirmed the load-bearing design
+— the leg-draw direction is correct (verified vs Curve `exchange(1,0)`) and the ~2× is a genuine fix,
+not a double-count. Fixes folded in: (1) the R2 `get_dy` seam was mis-denominated (passed a DIEM amount
+into a wstDIEM `dx`) — corrected to quote `convertToShares(positionCollateralDiem)` and to **reuse the
+already-tested `quoteCurveExitRoute` + `priceImpactBps`** rail (which also *defines* the previously-undefined
+`expectedDiemOutAtNav`); (2) the override now replaces exit slippage at **all four** sites (gate 1, netApy,
+the unwind backstop, the marginal band), not just gate 1; (3) total depth reconstructed
+(`diemLeg + wstDiemLeg`) for gate-1's depth-sufficiency sub-condition; (4) the ~2× flips the canonical
+§9 `viable` example → re-pinned to `curveDepthDiem = 20000`, §9/§4 added to the reconciliation;
+(5) gas default 0 kept but honest — a `gas unmodeled` warning rides the verdict, no over-claim of
+"included"; (6) new field specs + `curveDepthModel` label bump + leg-flag mutual exclusion. SPEC003 §4.2
+aligned to the corrected denomination + rail reuse.
 
 ## Traceability & verification
 
