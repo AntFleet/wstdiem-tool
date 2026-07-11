@@ -301,6 +301,17 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
       ]);
     }
   }
+  // Part B-2 vault-APY provenance (SPEC003 §4.3/§6). Present only when a store was supplied;
+  // a `not-seeded` row (with the `authoritative:false` banner above) reads at the same glance
+  // as the verdict that the vault APY is the default/grid, not a chain-measured value.
+  if (provenance.vaultApySource !== undefined) {
+    seedTable.push([
+      "vaultApy",
+      provenance.vaultApySource === "measured-7d"
+        ? "measured-7d"
+        : "not-seeded (using default/grid)",
+    ]);
+  }
   seedTable.push(
     [
       "Authoritative",

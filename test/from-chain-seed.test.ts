@@ -3,14 +3,18 @@ import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import {
   assertFromChainCompatibleOptions,
   buildFromChainSizingReport,
+  loadVaultApyWindow,
+  MIN_VAULT_APY_WINDOW_SAMPLES,
   seedFromChain,
   type FromChainExplicitFlags,
   type FromChainSeedClient,
+  type VaultApyWindowStore,
 } from "../src/loop/fromChainSeed.js";
 import { perSecWadToAprBps } from "../src/loop/morphoRate.js";
 import { renderLoopSizingTable } from "../src/cli/output.js";
 import { buildLoopSizingReport } from "../src/loop/sizing.js";
 import { buildLoopSizingScenarios } from "../src/loop/sizingScenarios.js";
+import type { CreditWindowSample, VaultAssetWindowSample } from "../src/metrics/collector.js";
 import { WAD } from "../src/metrics/math.js";
 import type { Address, AppConfig, Hex } from "../src/types/domain.js";
 
@@ -41,6 +45,12 @@ interface MockOptions {
   curveWstDiemBalance?: bigint;
   vaultNavBps?: number;
   getDyOutRateBps?: number;
+  // Part B-2 vault reads used by `collectVaultMetrics` (block-pinning EXEMPT). `vaultAsset` must
+  // equal DIEM for `validity.vault` to hold; leaving it unset returns the zero address (a mismatch
+  // → validity.vault false, no current sample appended).
+  vaultAsset?: Address;
+  vaultTotalAssets?: bigint;
+  vaultTotalSupply?: bigint;
 }
 
 const DEFAULT_CURVE_LEG_RAW = 1_000_000n * WAD;
@@ -118,6 +128,16 @@ class MockSeedClient implements FromChainSeedClient {
       const expectedDiemOut = (dx * navBps) / 10_000n;
       return (expectedDiemOut * BigInt(this.options.getDyOutRateBps ?? 10_000)) / 10_000n;
     }
+    // Part B-2 vault reads (collectVaultMetrics). Only reached when a store is supplied.
+    if (args.functionName === "asset") {
+      return this.options.vaultAsset ?? ZERO_ADDRESS;
+    }
+    if (args.functionName === "totalAssets") {
+      return this.options.vaultTotalAssets ?? 0n;
+    }
+    if (args.functionName === "totalSupply") {
+      return this.options.vaultTotalSupply ?? 0n;
+    }
     throw new Error(`unexpected readContract ${args.functionName}`);
   }
 }
@@ -145,6 +165,54 @@ class ThrowingSeedClient implements FromChainSeedClient {
   async readContract(): Promise<unknown> {
     throw new Error("network touched: readContract");
   }
+}
+
+const DAY_SECONDS = 24 * 60 * 60;
+
+/**
+ * A fake `VaultApyWindowStore` that builds its samples RELATIVE to the `windowStart` it is called
+ * with (which the adapter derives from `Date.now()`), so tests never race the wall clock. Records
+ * call counts to prove the adapter is (not) consulted.
+ */
+class FakeVaultApyStore implements VaultApyWindowStore {
+  vaultCalls = 0;
+  creditCalls = 0;
+
+  constructor(
+    private readonly vaultSamples: (windowStart: number) => VaultAssetWindowSample[],
+    private readonly creditSamples: (windowStart: number) => CreditWindowSample[] = () => [],
+  ) {}
+
+  listVaultAssetSamplesForWindow(windowStart: number): VaultAssetWindowSample[] {
+    this.vaultCalls += 1;
+    return this.vaultSamples(windowStart);
+  }
+
+  listCreditSamplesSince(ts: number): CreditWindowSample[] {
+    this.creditCalls += 1;
+    return this.creditSamples(ts);
+  }
+}
+
+/**
+ * A constant-value vault-asset window: an anchor at/before `windowStart` plus `inWindowCount`
+ * points across the 7 days, all `assetsDiem`. A constant series makes the time-weighted average
+ * exactly `assetsDiem` regardless of spacing — so `computeBaseApy` reduces to `credit/assets ×
+ * 365/7`, keeping the magnitude assertions arithmetic-clean.
+ */
+function constantVaultWindow(
+  assetsDiem: bigint,
+  inWindowCount: number,
+): (windowStart: number) => VaultAssetWindowSample[] {
+  return (windowStart: number) => {
+    const samples: VaultAssetWindowSample[] = [
+      { timestamp: windowStart - 10, totalAssetsDiem: assetsDiem },
+    ];
+    for (let i = 1; i <= inWindowCount; i += 1) {
+      samples.push({ timestamp: windowStart + i * DAY_SECONDS, totalAssetsDiem: assetsDiem });
+    }
+    return samples;
+  };
 }
 
 describe("loop sizing --from-chain (SPEC003 Part A)", () => {
@@ -788,5 +856,250 @@ describe("assertFromChainCompatibleOptions (static, pre-network guards)", () => 
         explicitFlags: NO_EXPLICIT,
       }),
     ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+});
+
+describe("loop sizing --from-chain (SPEC003 Part B-2: vaultApyBps ← 7-day DB window)", () => {
+  // Credit samples that sum to 7 DIEM inside the window. With a constant 7300 DIEM asset window,
+  // computeBaseApy = (7/7300) × (365/7) = 0.05 exactly → a clean 5% measured APY.
+  const fivePercentCredit = (windowStart: number): CreditWindowSample[] => [
+    { timestamp: windowStart + DAY_SECONDS, amountDiem: 3n * WAD },
+    { timestamp: windowStart + 4 * DAY_SECONDS, amountDiem: 4n * WAD },
+  ];
+
+  // Acceptance 10 (direct) — the ×10000 magnitude guard, isolated on the adapter. A measured 5%
+  // window → 500 bps. Without the mandatory ×10000 this would be 0 (the 10,000×-too-small bug).
+  it("magnitude (acceptance 10, direct): a measured 5% window → vaultApyBps 500 (guards the 10,000× bug)", async () => {
+    const config = baseConfig();
+    const nowSeconds = 1_000_000;
+    const store = new FakeVaultApyStore(constantVaultWindow(7_300n * WAD, 3), fivePercentCredit);
+    const client = new MockSeedClient({
+      vaultAsset: config.contracts.diem,
+      vaultTotalAssets: 7_300n * WAD,
+      vaultTotalSupply: 7_300n * WAD,
+    });
+
+    const result = await loadVaultApyWindow({ config, client, store, nowSeconds });
+
+    expect(result.source).toBe("measured-7d");
+    if (result.source === "measured-7d") {
+      expect(result.vaultApyBps).toBe(500);
+      expect(result.sampleCount).toBeGreaterThanOrEqual(MIN_VAULT_APY_WINDOW_SAMPLES);
+    }
+    // vaultApy is block-pinning EXEMPT (§2): none of the vault reads carried a blockNumber.
+    expect(client.readBlockNumbers.every((block) => block === undefined)).toBe(true);
+  });
+
+  // Acceptance 10 (e2e) — the seeded 500 bps flows into every scenario as measured-7d/authoritative.
+  it("magnitude (acceptance 10, e2e): every scenario is seeded vaultApyBps 500 as measured-7d", async () => {
+    const config = baseConfig();
+    const store = new FakeVaultApyStore(constantVaultWindow(7_300n * WAD, 3), fivePercentCredit);
+    const report = await buildFromChainSizingReport({
+      config,
+      client: new MockSeedClient({
+        marketSupply: 100_000n * WAD,
+        vaultAsset: config.contracts.diem,
+        vaultTotalAssets: 7_300n * WAD,
+        vaultTotalSupply: 7_300n * WAD,
+      }),
+      options: { initialDiem: "100", targetLeverage: "1.5,2" },
+      explicitFlags: NO_EXPLICIT,
+      store,
+    });
+
+    expect(report.seedProvenance?.vaultApySource).toBe("measured-7d");
+    expect(report.seedProvenance?.seededFields.vaultApyBps).toBe("chain");
+    expect(report.results.every((result) => result.scenario.vaultApyBps === 500)).toBe(true);
+    // Clean rate + balanced curve + measured vault → the verdict stays authoritative.
+    expect(report.authoritative).toBe(true);
+    expect(renderLoopSizingTable(report)).toContain("measured-7d");
+  });
+
+  // Acceptance 11 — insufficient history → not-seeded + authoritative:false + sizing CONTINUES on
+  // the SPEC002 default (never a 0 seed, never a hard error). The verdict token degrades.
+  it("insufficient history (acceptance 11): not-seeded, authoritative false, sizing continues on the default", async () => {
+    const config = baseConfig();
+    // Empty window → applyYieldWindowMetrics returns the "insufficient history" readiness, no APY.
+    const store = new FakeVaultApyStore(() => []);
+    const report = await buildFromChainSizingReport({
+      config,
+      client: new MockSeedClient({ marketSupply: 100_000n * WAD }),
+      options: { initialDiem: "100", targetLeverage: "1.5", curveDepthDiem: "20000" },
+      explicitFlags: NO_EXPLICIT,
+      store,
+    });
+
+    expect(report.seedProvenance?.vaultApySource).toBe("not-seeded");
+    expect(report.seedProvenance?.seededFields.vaultApyBps).toBe("default");
+    expect(report.authoritative).toBe(false);
+    // Sizing still ran end-to-end (full report, no throw) and stayed viable.
+    expect(report.results.length).toBeGreaterThan(0);
+    expect(report.summary.viable).toBe(1);
+    // vaultApyBps fell back to the SPEC002 default (1500), NEVER 0 (a 0 blocks every scenario).
+    expect(report.results.every((result) => result.scenario.vaultApyBps === 1500)).toBe(true);
+    expect(report.results.every((result) => result.scenario.vaultApyBps !== 0)).toBe(true);
+    expect(report.seedProvenance?.warnings.join(" ")).toContain(
+      "insufficient 7-day vault asset history",
+    );
+
+    const rendered = renderLoopSizingTable(report);
+    expect(rendered).toContain("candidate — unverified seed");
+    expect(rendered).toContain("UNVERIFIED SEED");
+    expect(rendered).toContain("not-seeded (using default/grid)");
+  });
+
+  // Low-density floor — a full 7-day span with a computable TWA but only 3 points (< 4) is
+  // not-seeded. This proves the DENSITY floor gates, not merely the span.
+  it("low-density floor: a valid 7-day span with too few samples is not-seeded (proves the floor)", async () => {
+    const config = baseConfig();
+    // anchor + 1 in-window (2 stored) + the appended current sample = 3 < MIN(4).
+    const store = new FakeVaultApyStore(constantVaultWindow(7_300n * WAD, 1));
+    const report = await buildFromChainSizingReport({
+      config,
+      client: new MockSeedClient({
+        marketSupply: 100_000n * WAD,
+        vaultAsset: config.contracts.diem,
+        vaultTotalAssets: 7_300n * WAD,
+        vaultTotalSupply: 7_300n * WAD,
+      }),
+      options: { initialDiem: "100", targetLeverage: "1.5", curveDepthDiem: "20000" },
+      explicitFlags: NO_EXPLICIT,
+      store,
+    });
+
+    expect(report.seedProvenance?.vaultApySource).toBe("not-seeded");
+    expect(report.seedProvenance?.seededFields.vaultApyBps).toBe("default");
+    expect(report.authoritative).toBe(false);
+    // The window was measurable (TWA computed) — DENSITY, not span, gated it.
+    expect(report.seedProvenance?.warnings.join(" ")).toContain("sample density");
+    expect(report.seedProvenance?.warnings.join(" ")).toContain(`(3/${MIN_VAULT_APY_WINDOW_SAMPLES})`);
+    // Fell back to the default, not 0.
+    expect(report.results.every((result) => result.scenario.vaultApyBps === 1500)).toBe(true);
+  });
+
+  // Precedence — an explicit --vault-apy-bps wins: the adapter is NOT consulted, the field is
+  // "flag", and (the JUDGMENT CALL, §6-literal) the un-measured APY demotes the verdict.
+  it("precedence: an explicit --vault-apy-bps wins, the adapter is not consulted, and demotes the verdict", async () => {
+    const config = baseConfig();
+    // A store that WOULD seed cleanly if consulted — proving the flag short-circuits it.
+    const store = new FakeVaultApyStore(constantVaultWindow(7_300n * WAD, 5), fivePercentCredit);
+    const report = await buildFromChainSizingReport({
+      config,
+      client: new MockSeedClient({
+        marketSupply: 100_000n * WAD,
+        vaultAsset: config.contracts.diem,
+        vaultTotalAssets: 7_300n * WAD,
+        vaultTotalSupply: 7_300n * WAD,
+      }),
+      options: {
+        initialDiem: "100",
+        targetLeverage: "1.5",
+        vaultApyBps: "800",
+        curveDepthDiem: "20000",
+      },
+      explicitFlags: { ...NO_EXPLICIT, vaultApyBps: true },
+      store,
+    });
+
+    expect(report.seedProvenance?.seededFields.vaultApyBps).toBe("flag");
+    expect(report.seedProvenance?.vaultApySource).toBe("not-seeded");
+    // The adapter was never consulted — the operator flag short-circuits the window read.
+    expect(store.vaultCalls).toBe(0);
+    expect(store.creditCalls).toBe(0);
+    // JUDGMENT CALL: an un-measured, operator-supplied APY is not chain-authoritative → demote.
+    expect(report.authoritative).toBe(false);
+    // The explicit 800 bps flows through the normal SPEC002 path onto every scenario.
+    expect(report.results.every((result) => result.scenario.vaultApyBps === 800)).toBe(true);
+  });
+
+  // No store — the report is byte-identical to Part B-1: no vault seeding, no vaultApySource, and
+  // `authoritative` is exactly what B-1 produced. This guards every existing Part-A/B-1 test.
+  it("no store: no vaultApySource and authoritative unchanged from Part B-1", async () => {
+    const report = await buildFromChainSizingReport({
+      config: baseConfig(),
+      client: new MockSeedClient({ marketSupply: 100_000n * WAD }),
+      options: { initialDiem: "100", targetLeverage: "1.5", vaultApyBps: "1500" },
+      explicitFlags: NO_EXPLICIT,
+      // no store supplied
+    });
+
+    expect(report.seedProvenance?.vaultApySource).toBeUndefined();
+    // A clean rate + balanced curve seed stays authoritative — vault seeding never engaged.
+    expect(report.authoritative).toBe(true);
+    const rendered = renderLoopSizingTable(report);
+    expect(rendered).not.toContain("measured-7d");
+    expect(rendered).not.toContain("not-seeded (using default/grid)");
+  });
+
+  // §4.3 never-hard-fail: a vault LIVE-read revert (RPC error on totalAssets) must NOT abort the
+  // whole command — the rate/Morpho/curve seeds already succeeded. With a rich DB the window still
+  // measures-7d from history alone (the failed live read is just a skipped current sample).
+  it("does not hard-fail when the vault live read reverts — falls back to the DB-only window", async () => {
+    const config = baseConfig();
+    const store = new FakeVaultApyStore(constantVaultWindow(7_300n * WAD, 3), fivePercentCredit);
+    const report = await buildFromChainSizingReport({
+      config,
+      client: new MockSeedClient({
+        marketSupply: 100_000n * WAD,
+        vaultAsset: config.contracts.diem,
+        revertFunction: "totalAssets", // the live current-sample read reverts
+      }),
+      options: { initialDiem: "100", targetLeverage: "1.5" },
+      explicitFlags: NO_EXPLICIT,
+      store,
+    });
+
+    // The command completed (no abort) and measured the APY from the DB history alone.
+    expect(report.seedProvenance?.vaultApySource).toBe("measured-7d");
+    expect(report.results.every((result) => result.scenario.vaultApyBps === 500)).toBe(true);
+  });
+
+  // §4.3 never-hard-fail (demote arm): the same live-read revert with an EMPTY DB demotes to
+  // not-seeded + a full report — never an uncaught throw that emits no report at all.
+  it("demotes (not aborts) when the vault live read reverts and the DB is empty", async () => {
+    const config = baseConfig();
+    const store = new FakeVaultApyStore(() => []);
+    const report = await buildFromChainSizingReport({
+      config,
+      client: new MockSeedClient({
+        marketSupply: 100_000n * WAD,
+        vaultAsset: config.contracts.diem,
+        revertFunction: "totalAssets",
+      }),
+      options: { initialDiem: "100", targetLeverage: "1.5", curveDepthDiem: "20000" },
+      explicitFlags: NO_EXPLICIT,
+      store,
+    });
+
+    expect(report.seedProvenance?.vaultApySource).toBe("not-seeded");
+    expect(report.authoritative).toBe(false);
+    expect(report.results.length).toBeGreaterThan(0);
+    expect(report.results.every((result) => result.scenario.vaultApyBps === 1500)).toBe(true);
+  });
+
+  // §6 composition — a get_dy demotion and a vault SUCCESS in the same report: authoritative is the
+  // AND of all sources, so vault `measured-7d` must NOT overturn the get_dy-driven `false`.
+  it("composes demotions: a get_dy failure keeps authoritative false even when vault APY is measured-7d", async () => {
+    const config = baseConfig();
+    const store = new FakeVaultApyStore(constantVaultWindow(7_300n * WAD, 3), fivePercentCredit);
+    const report = await buildFromChainSizingReport({
+      config,
+      client: new MockSeedClient({
+        marketSupply: 100_000n * WAD,
+        vaultAsset: config.contracts.diem,
+        vaultTotalAssets: 7_300n * WAD,
+        vaultTotalSupply: 7_300n * WAD,
+        getDyOutRateBps: 0, // get_dy returns 0 → quoteCurveExitRoute readiness → get_dy demotion
+      }),
+      options: { initialDiem: "100", targetLeverage: "1.5" },
+      explicitFlags: NO_EXPLICIT,
+      store,
+    });
+
+    // The vault seed succeeded independently…
+    expect(report.seedProvenance?.vaultApySource).toBe("measured-7d");
+    // …but the get_dy demotion still forces the composite verdict to non-authoritative.
+    expect(report.authoritative).toBe(false);
+    expect(report.seedProvenance?.warnings.join(" ")).toContain("get_dy");
   });
 });

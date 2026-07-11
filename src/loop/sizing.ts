@@ -133,6 +133,12 @@ export interface SeedProvenance {
   curveDiemLegDiem?: bigint;
   curveWstDiemLegDiem?: bigint;
   curveImbalanceRatio?: number;
+  // Part B-2 vault-APY provenance (SPEC003 §4.3/§6). `"measured-7d"` when a 7-day DB window
+  // produced a chain-measured vault APY; `"not-seeded"` when the operator supplied an explicit
+  // `--vault-apy-bps` OR the window was too short / low-density (fell back to the default/grid).
+  // Absent when no store is supplied (offline / Part-A/B-1 callers). Anything other than
+  // `"measured-7d"` demotes the verdict (§6). vaultApy is block-pinning EXEMPT (§2).
+  vaultApySource?: "measured-7d" | "not-seeded";
   seededFields: Record<string, "chain" | "flag" | "default">;
   authoritative: boolean;
   warnings: string[];

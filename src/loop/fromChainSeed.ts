@@ -1,7 +1,14 @@
 import { curvePoolAbi } from "../abi/curvePool.js";
 import { inferenceVaultAbi } from "../abi/inferenceVault.js";
 import { morphoIrmAbi } from "../abi/morphoIrm.js";
-import { formatWad } from "../metrics/math.js";
+import { formatWad, makeEmptySnapshot } from "../metrics/math.js";
+import {
+  applyYieldWindowMetrics,
+  collectVaultMetrics,
+  YIELD_WINDOW_SECONDS,
+  type CreditWindowSample,
+  type VaultAssetWindowSample,
+} from "../metrics/collector.js";
 import type { Address, AppConfig, Hex } from "../types/domain.js";
 import { CliError } from "../cli/errors.js";
 import {
@@ -76,7 +83,32 @@ export interface FromChainExplicitFlags {
   curveDepthDiem?: boolean;
   curveDiemLeg?: boolean;
   curveWstdiemLeg?: boolean;
+  // Part B-2: the operator passed `--vault-apy-bps`. Optional so Part-A/B-1 callers/tests need
+  // not enumerate it; absent reads as "not explicit" and the vault APY is chain-seeded.
+  vaultApyBps?: boolean;
 }
+
+/**
+ * The minimal read seam `loadVaultApyWindow` needs onto SQLite storage (SPEC003 §4.3). The real
+ * `Storage` satisfies it structurally, and tests inject a fake — so the vault-APY window logic is
+ * exercised without a live DB. Mirrors the two reads `status.ts` uses to assemble the same window.
+ */
+export interface VaultApyWindowStore {
+  listVaultAssetSamplesForWindow(windowStart: number): VaultAssetWindowSample[];
+  listCreditSamplesSince(ts: number): CreditWindowSample[];
+}
+
+/**
+ * SPEC003 OQ2 sample-density floor (tunable). ≥ N samples across the window before a
+ * chain-measured vault APY is stamped authoritative — a 7-day span with 1-2 points is not enough
+ * to trust a leverage-amplified APY. Fails SAFE: below the floor → not-seeded (never a 0 seed).
+ */
+export const MIN_VAULT_APY_WINDOW_SAMPLES = 4;
+
+/** Result of the 7-day vault-APY DB window adapter (SPEC003 §4.3). */
+export type VaultApyWindowResult =
+  | { source: "measured-7d"; vaultApyBps: number; sampleCount: number }
+  | { source: "not-seeded"; sampleCount: number; reason: string };
 
 function toBigInt(value: unknown): bigint {
   return BigInt(value as bigint | number | string);
@@ -352,6 +384,80 @@ function formatImbalanceRatio(ratio: number): string {
 }
 
 /**
+ * Load a chain-measured vault APY from the 7-day SQLite window (SPEC003 §4.3), mirroring the
+ * assembly in `status.ts`. vaultApy is block-pinning EXEMPT (§2): the current vault assets are a
+ * plain latest read, so NO `blockNumber` is passed to `collectVaultMetrics`. A `collectVaultMetrics`
+ * readiness/failure only means `validity.vault` is false → the current sample is not appended; it
+ * never hard-fails the seed.
+ *
+ * Fails SAFE: on a short OR low-density window it returns `not-seeded` (never a 0 seed, never a
+ * throw) so `--from-chain` stays usable on a fresh checkout. On success the returned bps value is
+ * `Math.round(baseApy × 10_000)` — the ×10000 is MANDATORY because `computeBaseApy` returns a
+ * FRACTION; omitting it seeds a value 10,000× too small (blocks every scenario; acceptance 10).
+ */
+export async function loadVaultApyWindow(input: {
+  config: AppConfig;
+  client: FromChainSeedClient;
+  store: VaultApyWindowStore;
+  nowSeconds: number;
+}): Promise<VaultApyWindowResult> {
+  const { config, client, store, nowSeconds } = input;
+
+  // Latest (block-pinning EXEMPT) read of the vault's current assets + DIEM-asset validity. A
+  // live-read revert / RPC error must NOT hard-fail the command (§4.3): fall back to the DB-only
+  // window (no current sample) so a rich DB can still measure-7d and a thin one demotes — never
+  // an uncaught throw. Mirrors status.ts, which wraps the identical collectVaultMetrics call.
+  let vaultSnapshot;
+  try {
+    const vault = await collectVaultMetrics(config, client, makeEmptySnapshot(nowSeconds));
+    vaultSnapshot = vault.snapshot;
+  } catch {
+    vaultSnapshot = makeEmptySnapshot(nowSeconds);
+  }
+
+  const windowStart = nowSeconds - YIELD_WINDOW_SECONDS;
+  const vaultAssetSamples = store.listVaultAssetSamplesForWindow(windowStart);
+  if (vaultSnapshot.validity.vault) {
+    vaultAssetSamples.push({
+      timestamp: nowSeconds,
+      totalAssetsDiem: vaultSnapshot.vaultTotalAssetsDiem,
+    });
+  }
+  const creditSamples = store.listCreditSamplesSince(windowStart);
+
+  const result = applyYieldWindowMetrics({
+    config,
+    snapshot: vaultSnapshot,
+    creditSamples,
+    vaultAssetSamples,
+    nowSeconds,
+  });
+  const sampleCount = vaultAssetSamples.length;
+
+  if (result.snapshot.validity.yieldWindow !== true) {
+    return {
+      source: "not-seeded",
+      sampleCount,
+      reason:
+        result.readiness[0] ??
+        "insufficient 7-day vault asset history for base APY evidence",
+    };
+  }
+  if (sampleCount < MIN_VAULT_APY_WINDOW_SAMPLES) {
+    return {
+      source: "not-seeded",
+      sampleCount,
+      reason: `insufficient sample density (${sampleCount}/${MIN_VAULT_APY_WINDOW_SAMPLES})`,
+    };
+  }
+
+  // computeBaseApy returns a FRACTION (src/metrics/math.ts:41). The ×10000 is the acceptance-10
+  // guard: without it a measured 5% window seeds 5 bps (10,000× too small) and blocks everything.
+  const vaultApyBps = Math.round(result.snapshot.baseApy * 10_000);
+  return { source: "measured-7d", vaultApyBps, sampleCount };
+}
+
+/**
  * Static (non-network) `--from-chain` conflict guards (SPEC003 §3.3/§5). The flat
  * borrow-rate model doesn't consume the seeded adaptive rate, and `--preset current-zero`
  * forces curve depth/Morpho supply to 0 — both conflict with seeding a chain value into the
@@ -387,8 +493,12 @@ export async function buildFromChainSizingReport(input: {
   options: LoopSizingGridOptions;
   explicitFlags: FromChainExplicitFlags;
   planningBlock?: bigint;
+  // Part B-2 (SPEC003 §4.3): the SQLite window seam for vault-APY seeding. When ABSENT, the report
+  // is byte-identical to Part B-1 (no vault seeding, `vaultApySource` undefined) — every existing
+  // Part-A/B-1 caller/test passes no store. The real `Storage` satisfies it structurally.
+  store?: VaultApyWindowStore;
 }): Promise<LoopSizingReport> {
-  const { config, client, options, explicitFlags, planningBlock } = input;
+  const { config, client, options, explicitFlags, planningBlock, store } = input;
 
   // Defense-in-depth for direct API/test callers; the CLI already runs this before
   // constructing the client.
@@ -442,6 +552,59 @@ export async function buildFromChainSizingReport(input: {
     seededFields.curveDepthDiem = "flag";
   }
 
+  // Part B-2 vault-APY seeding (SPEC003 §4.3/§5/§6). Precedence: an explicit `--vault-apy-bps`
+  // flag wins over the chain seed (and — being un-measured — still demotes, §6). The DB-window seed
+  // runs only when a `store` is supplied; with NO store AND no explicit flag the report is
+  // byte-identical to B-1 (`vaultApySource` stays undefined). Never seeds 0 and never hard-fails on
+  // a short/low-density window (§4.3): it demotes and lets SPEC002's default/grid stand. vaultApy is
+  // block-pinning EXEMPT (§2).
+  let vaultApySource: SeedProvenance["vaultApySource"];
+  let vaultAuthoritative = true;
+  const vaultWarnings: string[] = [];
+  if (explicitFlags.vaultApyBps) {
+    // The operator's explicit flag wins (§5): do NOT consult the adapter or overwrite the value.
+    // But an un-measured (operator-supplied) APY is not chain-authoritative — §6 literally demotes
+    // on `vaultApySource ≠ "measured-7d"`. JUDGMENT CALL: the conservative, §6-literal reading is
+    // to demote; the alternative reading (an explicit operator flag stays authoritative) is noted
+    // in the Part B-2 report. Chosen: demote.
+    seededFields.vaultApyBps = "flag";
+    vaultApySource = "not-seeded";
+    vaultAuthoritative = false;
+    vaultWarnings.push(
+      "vault APY is operator-supplied (--vault-apy-bps), not chain-measured — verdict is not authoritative",
+    );
+  } else if (store !== undefined) {
+    // §4.3 hard guarantee: a vault-subsystem failure (RPC read revert, DB error) must NOT abort the
+    // whole command — the rate/Morpho/curve seeds already succeeded. `loadVaultApyWindow` handles a
+    // live-read failure internally (DB-only fallback); this outer catch is the belt against ANY
+    // other throw, demoting the verdict rather than emitting no report at all.
+    try {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const vaultApy = await loadVaultApyWindow({ config, client, store, nowSeconds });
+      if (vaultApy.source === "measured-7d") {
+        gridOptions.vaultApyBps = String(vaultApy.vaultApyBps);
+        seededFields.vaultApyBps = "chain";
+        vaultApySource = "measured-7d";
+      } else {
+        // Short / low-density window: leave vaultApyBps to the normal SPEC002 path (explicit flag,
+        // else default/grid) — never seed 0, never throw. Demote the verdict and continue sizing.
+        seededFields.vaultApyBps = "default";
+        vaultApySource = "not-seeded";
+        vaultAuthoritative = false;
+        vaultWarnings.push(
+          `vault APY not seeded (${vaultApy.reason}) — verdict is not authoritative`,
+        );
+      }
+    } catch (error) {
+      seededFields.vaultApyBps = "default";
+      vaultApySource = "not-seeded";
+      vaultAuthoritative = false;
+      vaultWarnings.push(
+        `vault APY not seeded (${message(error)}) — verdict is not authoritative`,
+      );
+    }
+  }
+
   let scenarios;
   try {
     scenarios = buildLoopSizingScenarios(config, gridOptions);
@@ -449,8 +612,9 @@ export async function buildFromChainSizingReport(input: {
     throw new CliError("INVALID_INPUT", message(error));
   }
 
-  let authoritative = provenance.authoritative;
-  const warnings = [...provenance.warnings];
+  // Compose the vault demotion with Part A/B-1 (never lose a signal: `&&` keeps a prior false).
+  let authoritative = provenance.authoritative && vaultAuthoritative;
+  const warnings = [...provenance.warnings, ...vaultWarnings];
 
   // Inject the live, direction-correct get_dy exit slippage per scenario (SPEC003 §4.2), pinned
   // to the same block as every other seed read. Memoized by position size — a grid sweeping
@@ -495,7 +659,7 @@ export async function buildFromChainSizingReport(input: {
   const report = buildLoopSizingReport(scenarios);
   return {
     ...report,
-    seedProvenance: { ...provenance, seededFields, authoritative, warnings },
+    seedProvenance: { ...provenance, seededFields, authoritative, warnings, vaultApySource },
     authoritative,
   };
 }

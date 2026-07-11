@@ -332,20 +332,30 @@ loop
           "at least one RPC URL must be configured for --from-chain seeding",
         );
       }
-      const report = await buildFromChainSizingReport({
-        config,
-        client,
-        options,
-        explicitFlags: {
-          rateAtTargetApyBps: this.getOptionValueSource("rateAtTargetApyBps") === "cli",
-          morphoSupplyDiem: this.getOptionValueSource("morphoSupplyDiem") === "cli",
-          morphoExistingBorrowDiem: this.getOptionValueSource("morphoExistingBorrowDiem") === "cli",
-          curveDepthDiem: this.getOptionValueSource("curveDepthDiem") === "cli",
-          curveDiemLeg: this.getOptionValueSource("curveDiemLeg") === "cli",
-          curveWstdiemLeg: this.getOptionValueSource("curveWstdiemLeg") === "cli",
-        },
-        planningBlock,
-      });
+      // Open the SQLite window seam for vault-APY seeding (SPEC003 §4.3). A fresh checkout has an
+      // empty DB → `not-seeded` → demote (correct first-run behavior). Mirror status.ts open/close.
+      const store = new Storage(config.storage.sqlitePath);
+      let report;
+      try {
+        report = await buildFromChainSizingReport({
+          config,
+          client,
+          options,
+          store,
+          explicitFlags: {
+            rateAtTargetApyBps: this.getOptionValueSource("rateAtTargetApyBps") === "cli",
+            morphoSupplyDiem: this.getOptionValueSource("morphoSupplyDiem") === "cli",
+            morphoExistingBorrowDiem: this.getOptionValueSource("morphoExistingBorrowDiem") === "cli",
+            curveDepthDiem: this.getOptionValueSource("curveDepthDiem") === "cli",
+            curveDiemLeg: this.getOptionValueSource("curveDiemLeg") === "cli",
+            curveWstdiemLeg: this.getOptionValueSource("curveWstdiemLeg") === "cli",
+            vaultApyBps: this.getOptionValueSource("vaultApyBps") === "cli",
+          },
+          planningBlock,
+        });
+      } finally {
+        store.close();
+      }
       return wantsJson ? report : renderLoopSizingTable(report);
     });
   });
