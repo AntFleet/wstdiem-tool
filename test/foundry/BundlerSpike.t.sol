@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @notice Spike test for SPEC005 §6.4 architectural commitment.
+/// @notice Spike test for the protocol's Bundler3-adapter architectural commitment.
 /// @dev Verifies that a "Bundler3 Adapter-style router with signature-based initiator" composes:
 ///      - User signs an EIP-712 action digest off-chain.
 ///      - Keeper (msg.sender ≠ user) submits the digest.
 ///      - The router recovers the user from the signature and calls Morpho with onBehalf = recovered user.
-///      - Replay is prevented by a Permit2-style nonce bitmap (per §6.4 nonce model).
+///      - Replay is prevented by a Permit2-style nonce bitmap (per the protocol nonce model).
 /// @dev This is a pattern proof, not a Morpho integration test. The existing LoopExecutor.sol fork tests
 ///      already prove that Morpho.setAuthorization + onBehalf composes on Base mainnet.
 
@@ -58,7 +58,7 @@ contract MockMorpho {
     }
 }
 
-/// @notice Minimal SPEC005-style adapter with signature-based initiator instead of msg.sender-based.
+/// @notice Minimal protocol-style adapter with signature-based initiator instead of msg.sender-based.
 /// @dev Pattern: anyone may submit the action; signature determines onBehalf. Permit2-style nonce bitmap.
 contract SignatureAdapter {
     error InvalidSignature();

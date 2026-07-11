@@ -47,31 +47,43 @@ So this is a **spec refresh + retro-spec**, with a clean-up pass to make "the sp
 `proof:full-unwind`, `test:contracts{,:fork}`, `deploy:executor:dry-run`, `readiness:owner`.
 Removing them would break the CLI's proof/readiness/deploy pipeline.
 
-**Pre-split historical docs (16) — archived, not deleted:**
+**Pre-split internal docs — purged from public history (see below):**
 `SPEC002–005`, `PHASE-A-INTERFACE-SHAPES`, `PHASE-B-{GUIDANCE,PR1-PROMPT,PR2-PROMPT,PR5-LOCKS}`,
-`STEP-{5,5B,7}-*`, `INTERFACE-APPENDIX-A`, `BUNDLER3-SPIKE`, `DESIGN`, `THREAT-MODEL`.
+`STEP-{5,5B,7}-*`, `INTERFACE-APPENDIX-A`, `BUNDLER3-SPIKE`, `DESIGN`, `THREAT-MODEL`, plus
+`audit/`, `docs/design/`, `docs/research/`, `prototypes/`.
 
 ## Phase 0 — Baseline / declutter — DONE (2026-07-11)
 
 Goal: make "the specs" mean the tool's specs, nothing else.
 
-**Verification overturned the original "delete because mirrored" premise.** Blob-SHA comparison
-against `AntFleet/wstdiem` found **0 of 24 candidates content-mirrored and 23 of 24 absent by
-any name** — the protocol repo carries the *finished* outputs (`PROTOCOL.md`, `docs/{user,
-keeper,integrator}/`, `contracts/v2/`) but **none of the pre-split dev trail**. Two audit
-misclassifications were corrected: `contracts/`+foundry are load-bearing (kept); `THREAT-MODEL.md`
-(1165 lines) is unique security content the protocol repo lacks (its `SECURITY.md` is only a
-disclosure policy).
+**Verification overturned the original "delete because mirrored" premise, then surfaced an
+exposure.** Blob-SHA comparison against `AntFleet/wstdiem` found **0 of 24 candidates
+content-mirrored and 23 of 24 absent by any name** — the protocol repo carries the *finished*
+outputs (`PROTOCOL.md`, `docs/{user,keeper,integrator}/`, `contracts/v2/`) but **none of the
+pre-split dev trail**. Two audit misclassifications were corrected: `contracts/`+foundry are
+load-bearing (kept); `THREAT-MODEL.md` (1165 lines) is unique security content the protocol repo
+lacks. Critically, **both repos are PUBLIC**, and the pre-split internal dev trail (threat model,
+audit reports, protocol specs) had been newly pushed to public `wstdiem-tool` earlier this
+session — which violates the documented policy that this material stays out of public repos.
 
 Actions taken:
-1. **Verified** every candidate against the protocol repo (nothing safe to delete).
-2. **Archived** the 16 unique historical docs → `archive/` via `git mv` (reversible, zero loss);
-   repointed the cross-links from `audit/` and `docs/design/*` into `archive/`.
-3. **Kept** `contracts/`, `script/`, `test/foundry/`, `foundry.toml` in place.
-4. **Migrating** the protocol/threat dev-trail subset into `AntFleet/wstdiem` (`docs/history/
-   pre-split/`) via PR — its topically-correct home.
+1. **Verified** every candidate against the protocol repo (nothing was mirrored; nothing safe to
+   simply delete-as-duplicate).
+2. **Kept** `contracts/`, `script/`, `test/foundry/`, `foundry.toml` in place (load-bearing).
+3. **Preserved** the internal docs privately at `~/wstdiem-internal-docs/` (off-repo).
+4. **Purged** the internal dev trail (44 paths) from **all** `wstdiem-tool` history via
+   `git filter-repo` + force-push (`2f180c8` → `54e3176`); verified 0/44 paths remain and the
+   tool code/spec/deployment docs are intact.
+5. **Aborted** the migration into `AntFleet/wstdiem` — that repo is public and its policy
+   excludes this internal material; the pushed branch was deleted before any PR.
 
-**Result:** root now shows only `README.md`, `SPEC001.md`, `SPEC-ROADMAP.md` as governing docs.
+**Caveat:** the material was public for part of this session; a history purge reduces but does not
+guarantee full un-exposure (GitHub may retain cached/forked copies). Treat the threat model as
+having been briefly public.
+
+**Result:** `wstdiem-tool` now contains only the tool (code, `SPEC001.md`, `SPEC-ROADMAP.md`,
+`README.md`, `docs/deployment/`, contracts + foundry). Root governing docs: `README.md`,
+`SPEC001.md`, `SPEC-ROADMAP.md`.
 
 ## Phase 1 — SPEC001 rev-2 (reconcile with as-built)
 
