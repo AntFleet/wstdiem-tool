@@ -85,20 +85,22 @@ having been briefly public.
 `README.md`, `docs/deployment/`, contracts + foundry). Root governing docs: `README.md`,
 `SPEC001.md`, `SPEC-ROADMAP.md`.
 
-## Phase 1 — SPEC001 rev-2 (reconcile with as-built)
+## Phase 1 — SPEC001 rev-2 (reconcile with as-built) — DONE (2026-07-11)
 
 Goal: make SPEC001 **true** to the current CLI; mark intended-but-unbuilt explicitly.
 
-1. Clause-by-clause reconciliation table: each SPEC001 clause tagged
-   *built-as-spec / built-differently / spec-not-built / built-not-spec*.
-2. Fold in currently-undocumented surfaces: `monitor`, `loop simulate --live`, the `alert_state`
-   table, and the real RPC failover/health-check semantics (§9 detail).
-3. Apply decisions: §5 → exit-only (D1); §4 → `--once` + scheduler (D2); document the broadcast
-   gate as closed (D3).
-4. Remove the never-built specified items (persistent daemon, `--since`, `--channels`) or mark
-   them "deferred" per D2.
+Delivered:
+1. **Drift ledger** — clause-by-clause reconciliation at
+   [`docs/spec/SPEC001-reconciliation.md`](docs/spec/SPEC001-reconciliation.md); tags every section
+   built-as-spec / built-differently / spec-not-built / built-not-spec with file:line evidence.
+2. **`SPEC001.md` rev-2** — retitled offline-first / exit-only / broadcast-disabled; folded in the
+   built-but-unspecified `monitor` and `loop sizing` (→ SPEC002) commands, the `alert_state` table,
+   and the `flashLoan` config block; rebuilt the §8 CLI table; dropped `ink`/`react`/`telegraf`/
+   ledger from §10; and collected the unbuilt future (open/rebalance, broadcast enablement,
+   auto-deleverager, daemon/TUI, hardware wallet) into **Appendix A (Deferred)**. 1051 → 610 lines.
+3. Decisions applied: D1 exit-only current; D2 `watch --once` + scheduler; D3 broadcast fail-closed.
 
-**Deliverable:** `SPEC001.md` rev-2 + a reconciliation appendix (the drift ledger).
+**Next:** a scaled-down review-pass (verifier/critic) before rev-2 is treated as locked, then Phase 2.
 
 ## Phase 2 — SPEC002 (Loop Sizing Engine) — retro-spec
 
