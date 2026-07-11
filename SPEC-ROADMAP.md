@@ -183,10 +183,24 @@ live-seed — and any future model change — must conform to.
     has-code parity, slippage in the memo key, a non-identity-NAV mock that catches a convertToShares-skip
     regression, and a flip test proving the leg-aware estimate would block where the live quote clears).
     Offline output byte-for-byte unchanged; from-chain 41 tests.
-  - **Next code step: Part B-2** — `vaultApyBps` from the 7-day SQLite window (`applyYieldWindowMetrics`
-    + a `loadVaultApyWindow` adapter), `×10000`-corrected (computeBaseApy returns a fraction); insufficient/
-    low-density history → `not-seeded` + authoritative:false + sizing continues (never a 0 seed). Resolve
-    OQ2 (sample-density floor N) as a documented constant.
+  - **Part B-2 IMPLEMENTED + SHIPPED (8bfbd14) — SPEC003 Part B COMPLETE.** `--from-chain` seeds
+    `vaultApyBps` from the 7-day SQLite window via a `loadVaultApyWindow` adapter (mirrors `status.ts`:
+    `collectVaultMetrics` + `listVaultAssetSamplesForWindow`/`listCreditSamplesSince` + current-sample
+    append, aggregated by `applyYieldWindowMetrics`). `vaultApyBps = round(baseApy × 10000)` — the
+    ×10000 is mandatory (`computeBaseApy` returns a FRACTION); acceptance-10 test pins a measured 5% →
+    exactly 500. **Never seed 0, never hard-fail (§4.3):** insufficient/low-density (< `MIN_VAULT_APY_
+    WINDOW_SAMPLES` = 4, OQ2 resolved, tunable) → `not-seeded` + authoritative:false + sizing continues
+    on the SPEC002 default. Injectable `store` (real `Storage` in the CLI, a fake in tests); no store +
+    no explicit flag → byte-identical to B-1. Explicit `--vault-apy-bps` wins (§5) and, being un-measured,
+    demotes (§6-literal). `authoritative` composes as the AND of rate/curve + vault + get_dy demotions.
+    Approval pass found **1 HIGH** — `collectVaultMetrics` was called unwrapped, so a vault live-read
+    revert would abort the whole `--from-chain` command (violating §4.3's continue-on-vault-failure) — plus
+    2 MEDIUM paired tests; **all fixed before commit** (two-layer catch: DB-only fallback inner + demote-
+    on-any-throw outer; + regression tests). from-chain 50 tests; full suite 194 pass / 1 pre-existing fail.
+  - **SPEC003 fully shipped.** OQ1 (staleness) resolved as no-gate; OQ2 (density floor) resolved as
+    `MIN_VAULT_APY_WINDOW_SAMPLES = 4`. Follow-up chip filed: an exact-`windowStart`-boundary sample is
+    double-counted by `listVaultAssetSamplesForWindow` (pre-existing storage nit, now interacts with the
+    density floor).
 
 ### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B) — IMPLEMENTED + SHIPPED (2026-07-11, ee169d6)
 
