@@ -41,27 +41,37 @@ So this is a **spec refresh + retro-spec**, with a clean-up pass to make "the sp
   loop-executor, loop-sizing). Keep; fold their normative bits into the specs.
 - `README.md` — accurate one-paragraph purpose. Keep.
 
-**Protocol-era leftovers (Phase 0 — remove after verifying mirrored in `AntFleet/wstdiem`):**
-`SPEC005.md`, `PHASE-A-INTERFACE-SHAPES.md`, `INTERFACE-APPENDIX-A.md`, `BUNDLER3-SPIKE.md`,
-`PHASE-B-GUIDANCE.md`, `PHASE-B-PR5-LOCKS.md`, `THREAT-MODEL.md`, `contracts/`, `foundry.toml`
-(+ any Foundry config / `test/foundry`). These are Solidity-side and duplicated in the protocol repo.
+**Load-bearing — stays in place (audit misclassified as "leftover"):**
+`contracts/LoopExecutor.sol` (the v1 **exit-only executor the CLI operates**),
+`script/DeployLoopExecutor.s.sol`, `test/foundry/*`, `foundry.toml` — wired into
+`proof:full-unwind`, `test:contracts{,:fork}`, `deploy:executor:dry-run`, `readiness:owner`.
+Removing them would break the CLI's proof/readiness/deploy pipeline.
 
-**Product/process artifacts (Phase 0 — separate disposition, do NOT auto-delete):**
-`SPEC002.md`–`SPEC004.md` (product / token / points specs), `DESIGN.md` + `docs/design/*`
-(Phase-D web-app design), `PHASE-B-PR{1,2}-PROMPT.md`, `STEP-*.md`, `docs/research/*`, `audit/*`.
-Decide per-file: archive vs relocate vs keep-as-reference.
+**Pre-split historical docs (16) — archived, not deleted:**
+`SPEC002–005`, `PHASE-A-INTERFACE-SHAPES`, `PHASE-B-{GUIDANCE,PR1-PROMPT,PR2-PROMPT,PR5-LOCKS}`,
+`STEP-{5,5B,7}-*`, `INTERFACE-APPENDIX-A`, `BUNDLER3-SPIKE`, `DESIGN`, `THREAT-MODEL`.
 
-## Phase 0 — Baseline / declutter (prereq)
+## Phase 0 — Baseline / declutter — DONE (2026-07-11)
 
 Goal: make "the specs" mean the tool's specs, nothing else.
 
-1. For each protocol-era leftover, **verify it exists in `AntFleet/wstdiem`** before removing it
-   here (verify-before-delete; do not trust the "mirrored" claim blindly).
-2. Remove the verified leftovers + `contracts/` + Foundry config from the tool repo.
-3. Triage the product/process artifacts (archive vs keep) — a separate, non-destructive pass.
-4. Commit as a clearly-scoped hygiene change.
+**Verification overturned the original "delete because mirrored" premise.** Blob-SHA comparison
+against `AntFleet/wstdiem` found **0 of 24 candidates content-mirrored and 23 of 24 absent by
+any name** — the protocol repo carries the *finished* outputs (`PROTOCOL.md`, `docs/{user,
+keeper,integrator}/`, `contracts/v2/`) but **none of the pre-split dev trail**. Two audit
+misclassifications were corrected: `contracts/`+foundry are load-bearing (kept); `THREAT-MODEL.md`
+(1165 lines) is unique security content the protocol repo lacks (its `SECURITY.md` is only a
+disclosure policy).
 
-**Deliverable:** a docs surface where `SPEC001.md` + `docs/` are visibly the only governing specs.
+Actions taken:
+1. **Verified** every candidate against the protocol repo (nothing safe to delete).
+2. **Archived** the 16 unique historical docs → `archive/` via `git mv` (reversible, zero loss);
+   repointed the cross-links from `audit/` and `docs/design/*` into `archive/`.
+3. **Kept** `contracts/`, `script/`, `test/foundry/`, `foundry.toml` in place.
+4. **Migrating** the protocol/threat dev-trail subset into `AntFleet/wstdiem` (`docs/history/
+   pre-split/`) via PR — its topically-correct home.
+
+**Result:** root now shows only `README.md`, `SPEC001.md`, `SPEC-ROADMAP.md` as governing docs.
 
 ## Phase 1 — SPEC001 rev-2 (reconcile with as-built)
 
