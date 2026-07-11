@@ -204,18 +204,24 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
     wordWrap: true,
   });
   for (const result of report.results) {
+    const curveTotalDiem = result.scenario.curveDiemLegDiem + result.scenario.curveWstDiemLegDiem;
+    const verdict = loopStatusToken(result, report.authoritative);
+    const statusCell =
+      result.warnings.length === 0 ? verdict : `${verdict} [${result.warnings.join("; ")}]`;
     table.push([
       result.scenario.id,
       formatLeverage(result.scenario.targetLeverageBps),
       `${formatWad(result.equityDiem)} DIEM`,
       `${formatWad(result.borrowAmountDiem)} DIEM`,
-      `${formatWad(result.requiredCurveDepthDiem)}/${formatWad(result.scenario.curveDepthDiem)} DIEM`,
+      `${formatWad(result.requiredCurveDepthDiem)}/${formatWad(curveTotalDiem)} DIEM (D ${formatWad(
+        result.scenario.curveDiemLegDiem,
+      )}/W ${formatWad(result.scenario.curveWstDiemLegDiem)})`,
       `${formatWad(result.requiredMorphoSupplyDiem)}/${formatWad(result.scenario.morphoSupplyDiem)} DIEM`,
-      `${formatBps(result.estimatedEntrySlippageBps)}/${formatBps(result.estimatedExitSlippageBps)}`,
+      `${formatBps(result.estimatedEntrySlippageBps)}/${formatBps(result.exitSlippageBps)} (${result.exitSlippageSource})`,
       formatHealthFactor(result.healthFactorBps),
       `${formatBps(result.postDrawUtilizationBps)}→${formatBps(result.effectiveBorrowApyBps)}`,
       formatBps(result.netApyBps),
-      loopStatusToken(result, report.authoritative),
+      statusCell,
     ]);
   }
 

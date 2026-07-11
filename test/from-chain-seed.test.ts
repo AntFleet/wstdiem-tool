@@ -376,7 +376,9 @@ describe("loop sizing --from-chain (SPEC003 Part A)", () => {
       options: {
         initialDiem: "100",
         targetLeverage: "1.5",
-        curveDepthDiem: "10000",
+        // rev-2 re-baseline: total 20000 (balanced legs 10000) keeps exit slip at 154 bps < cap
+        // so this scenario stays viable and the verdict-token (de)promotion has a viable to act on.
+        curveDepthDiem: "20000",
         vaultApyBps: "1500",
       },
       explicitFlags: NO_EXPLICIT,
@@ -401,7 +403,9 @@ describe("loop sizing --from-chain (SPEC003 Part A)", () => {
       options: {
         initialDiem: "100",
         targetLeverage: "1.5",
-        curveDepthDiem: "10000",
+        // rev-2 re-baseline: total 20000 (balanced legs 10000) keeps exit slip at 154 bps < cap
+        // so this scenario stays viable and the verdict-token (de)promotion has a viable to act on.
+        curveDepthDiem: "20000",
         vaultApyBps: "1500",
       },
       explicitFlags: NO_EXPLICIT,
@@ -467,7 +471,9 @@ describe("loop sizing --from-chain (SPEC003 Part A)", () => {
     expect(distinctSupply).toEqual(new Set([2_000n * WAD]));
 
     const distinctCurveDepth = new Set(
-      report.results.map((result) => result.scenario.curveDepthDiem),
+      report.results.map(
+        (result) => result.scenario.curveDiemLegDiem + result.scenario.curveWstDiemLegDiem,
+      ),
     );
     expect(distinctCurveDepth.size).toBeGreaterThan(1);
   });

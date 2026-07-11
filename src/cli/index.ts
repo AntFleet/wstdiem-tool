@@ -234,7 +234,18 @@ loop
   .option("--initial-wstdiem <amounts>", "comma-separated initial wstDIEM collateral amounts")
   .option("--wstdiem-nav <amount>", "DIEM value of 1 wstDIEM when --initial-wstdiem is used", "1")
   .option("--target-leverage <values>", "comma-separated leverage targets", "1.5,2,3")
-  .option("--curve-depth-diem <amounts>", "comma-separated Curve TVL/depth assumptions in DIEM")
+  .option(
+    "--curve-depth-diem <amounts>",
+    "comma-separated total (two-sided) Curve depth in DIEM; split into balanced legs (mutually exclusive with --curve-*-leg)",
+  )
+  .option(
+    "--curve-diem-leg <amounts>",
+    "comma-separated Curve DIEM-side leg depths in DIEM (the exit draws this leg)",
+  )
+  .option(
+    "--curve-wstdiem-leg <amounts>",
+    "comma-separated Curve wstDIEM-side leg depths in DIEM-equivalent (the entry draws this leg)",
+  )
   .option("--morpho-supply-diem <amounts>", "comma-separated Morpho supply assumptions in DIEM")
   .option(
     "--morpho-existing-borrow-diem <amount>",
@@ -267,6 +278,10 @@ loop
   .option("--min-health-factor <value>", "minimum post-loop health factor")
   .option("--min-net-apy-bps <bps>", "minimum acceptable net APY in bps")
   .option("--holding-days <days>", "holding period for annualizing one-time costs")
+  .option(
+    "--gas-cost-diem <amount>",
+    "one-time gas cost in DIEM folded into net APY (default 0; gas is otherwise unmodeled and a warning rides the verdict)",
+  )
   .option(
     "--from-chain",
     "seed rateAtTarget, Morpho supply, and existing borrow from live Base reads",

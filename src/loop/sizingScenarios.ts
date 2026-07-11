@@ -9,6 +9,8 @@ import {
 const DEFAULT_INITIAL_DIEM = "100";
 const DEFAULT_TARGET_LEVERAGE = "1.5,2,3";
 const DEFAULT_CURVE_DEPTH_DIEM = "0,100,1000,10000";
+// Balanced per-leg halves of DEFAULT_CURVE_DEPTH_DIEM — used when only one leg flag is given.
+const DEFAULT_CURVE_LEG_DIEM = "0,50,500,5000";
 const DEFAULT_MORPHO_SUPPLY_DIEM = "0,100,1000,10000";
 const DEFAULT_VAULT_APY_BPS = "1500";
 const DEFAULT_BORROW_APY_BPS = "800";
@@ -21,6 +23,11 @@ export interface LoopSizingGridOptions {
   wstDiemNav?: string;
   targetLeverage?: string;
   curveDepthDiem?: string;
+  // Per-leg Curve depth grids (SPEC002 rev-2 R1). Mutually exclusive with `curveDepthDiem`.
+  // Field names match commander's camelCase for `--curve-diem-leg` / `--curve-wstdiem-leg`.
+  curveDiemLeg?: string;
+  curveWstdiemLeg?: string;
+  gasCostDiem?: string;
   morphoSupplyDiem?: string;
   morphoExistingBorrowDiem?: string;
   vaultApyBps?: string;
@@ -139,6 +146,66 @@ function initialCollateralValues(options: LoopSizingGridOptions): bigint[] {
   );
 }
 
+interface CurveLegPair {
+  diemLeg: bigint;
+  wstDiemLeg: bigint;
+}
+
+/**
+ * Resolve the Curve grid dimension into per-leg (DIEM, wstDIEM) pairs (SPEC002 rev-2 R1).
+ *
+ * - Leg mode (either `--curve-diem-leg` / `--curve-wstdiem-leg` supplied): the Cartesian
+ *   product of the two leg grids (a missing leg defaults to the balanced-half default).
+ * - Balanced mode (`--curve-depth-diem <total>`, the backward-compatible convenience): each
+ *   total splits into `diemLeg = total/2`, `wstDiemLeg = total - diemLeg` (odd-WAD remainder
+ *   to the wstDIEM leg, mirroring `requiredCurveWstDiemDepth`).
+ *
+ * A curve total and the leg flags are mutually exclusive, mirroring the
+ * `--initial-diem` / `--initial-wstdiem` rule. The conflict check reads the POST-preset
+ * `options.curveDepthDiem`, so it also rejects a leg flag combined with a preset that supplies a
+ * curve total (`current-zero`, `liquidity-sweep`) — otherwise that preset's curve intent would be
+ * silently dropped (the unspecified leg would expand to the balanced default grid instead). The
+ * check is gated on `legModeRequested`, so a preset filling the total in balanced mode (no leg
+ * flags) never false-triggers it.
+ */
+function resolveCurveLegPairs(
+  rawOptions: LoopSizingGridOptions,
+  options: LoopSizingGridOptions,
+): CurveLegPair[] {
+  const legModeRequested =
+    rawOptions.curveDiemLeg !== undefined || rawOptions.curveWstdiemLeg !== undefined;
+  if (legModeRequested && options.curveDepthDiem !== undefined) {
+    throw new Error(
+      "--curve-depth-diem (including a preset-supplied curve total) and --curve-diem-leg/--curve-wstdiem-leg are mutually exclusive",
+    );
+  }
+  if (legModeRequested) {
+    const diemLegs = parseAmountGrid(
+      options.curveDiemLeg ?? DEFAULT_CURVE_LEG_DIEM,
+      "--curve-diem-leg",
+    );
+    const wstDiemLegs = parseAmountGrid(
+      options.curveWstdiemLeg ?? DEFAULT_CURVE_LEG_DIEM,
+      "--curve-wstdiem-leg",
+    );
+    const pairs: CurveLegPair[] = [];
+    for (const diemLeg of diemLegs) {
+      for (const wstDiemLeg of wstDiemLegs) {
+        pairs.push({ diemLeg, wstDiemLeg });
+      }
+    }
+    return pairs;
+  }
+  const totals = parseAmountGrid(
+    options.curveDepthDiem ?? DEFAULT_CURVE_DEPTH_DIEM,
+    "--curve-depth-diem",
+  );
+  return totals.map((total) => {
+    const diemLeg = total / 2n;
+    return { diemLeg, wstDiemLeg: total - diemLeg };
+  });
+}
+
 function applyPreset(options: LoopSizingGridOptions): LoopSizingGridOptions {
   if (options.preset === undefined || options.preset === "baseline") {
     return options;
@@ -172,10 +239,7 @@ export function buildLoopSizingScenarios(
     options.targetLeverage ?? DEFAULT_TARGET_LEVERAGE,
     "--target-leverage",
   );
-  const curveDepthDiem = parseAmountGrid(
-    options.curveDepthDiem ?? DEFAULT_CURVE_DEPTH_DIEM,
-    "--curve-depth-diem",
-  );
+  const curveLegPairs = resolveCurveLegPairs(rawOptions, options);
   const morphoSupplyDiem = parseAmountGrid(
     options.morphoSupplyDiem ?? DEFAULT_MORPHO_SUPPLY_DIEM,
     "--morpho-supply-diem",
@@ -245,11 +309,15 @@ export function buildLoopSizingScenarios(
     options.holdingDays === undefined
       ? defaults.holdingPeriodDays
       : parsePositiveInteger(options.holdingDays, "--holding-days");
+  const gasCostDiem =
+    options.gasCostDiem === undefined
+      ? defaults.gasCostDiem
+      : parseSingleDecimalToUnits(options.gasCostDiem, "--gas-cost-diem");
 
   const scenarios: LoopSizingScenario[] = [];
   for (const initial of initialCollateralDiem) {
     for (const leverage of targetLeverageBps) {
-      for (const curveDepth of curveDepthDiem) {
+      for (const curveLeg of curveLegPairs) {
         for (const morphoSupply of morphoSupplyDiem) {
           for (const vaultApy of vaultApyBps) {
             for (const borrowDim of borrowDimension) {
@@ -259,7 +327,8 @@ export function buildLoopSizingScenarios(
                 id,
                 initialCollateralDiem: initial,
                 targetLeverageBps: leverage,
-                curveDepthDiem: curveDepth,
+                curveDiemLegDiem: curveLeg.diemLeg,
+                curveWstDiemLegDiem: curveLeg.wstDiemLeg,
                 morphoSupplyDiem: morphoSupply,
                 morphoExistingBorrowDiem,
                 vaultApyBps: vaultApy,
@@ -274,6 +343,7 @@ export function buildLoopSizingScenarios(
                 minHealthFactorBps,
                 minNetApyBps,
                 holdingPeriodDays,
+                gasCostDiem,
               });
             }
           }

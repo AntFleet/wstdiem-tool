@@ -33,7 +33,11 @@ export interface LoopSizingScenario {
   id: string;
   initialCollateralDiem: bigint;
   targetLeverageBps: number;
-  curveDepthDiem: bigint;
+  // The Curve pool as TWO legs in DIEM-equivalent (SPEC002 rev-2 R1). The exit draws the
+  // DIEM leg, the entry draws the wstDIEM leg; the total (their sum) still feeds the
+  // depth-sufficiency check. A single `--curve-depth-diem <total>` splits into balanced legs.
+  curveDiemLegDiem: bigint;
+  curveWstDiemLegDiem: bigint;
   morphoSupplyDiem: bigint;
   morphoExistingBorrowDiem: bigint;
   vaultApyBps: number;
@@ -50,10 +54,17 @@ export interface LoopSizingScenario {
   minNetApyBps: number;
   exitRepayBufferBps: number;
   holdingPeriodDays: number;
+  // One-time gas cost folded into `oneTimeCostDiem` (SPEC002 rev-2 R3). Defaults to 0
+  // (unmodeled); the engine never auto-estimates gas, it warns when this is 0.
+  gasCostDiem: bigint;
+  // Optional live `get_dy` exit-slippage quote (SPEC002 rev-2 R2). When present it replaces
+  // the leg-aware exit ESTIMATE at every consumption site. Injected by `--from-chain`
+  // (SPEC003 Part B); the offline path leaves it undefined. Out of [0, 10000] -> invalid.
+  externalExitSlippageBps?: number;
 }
 
 export interface LoopSizingAssumptions {
-  curveDepthModel: "linear-depth-share";
+  curveDepthModel: "linear-per-leg-depth-share";
   morphoLiquidityModel: "supply-minus-existing-borrow";
   apyModel: "simple-annualized";
   borrowRateModel: "flat" | "adaptive-curve-instantaneous";
@@ -76,7 +87,14 @@ export interface LoopSizingResult {
   requiredMorphoSupplyDiem: bigint;
   availableMorphoBorrowDiem: bigint;
   estimatedEntrySlippageBps: number;
-  estimatedExitSlippageBps: number;
+  // The exit-slippage bps ACTUALLY used by every gate/cost (SPEC002 rev-2 R1/R2). Holds the
+  // leg-aware estimate, or a live `get_dy` quote when `externalExitSlippageBps` is injected.
+  exitSlippageBps: number;
+  // "get_dy" when a live exit quote was injected, else "estimate". Entry is always "estimate".
+  exitSlippageSource: "get_dy" | "estimate";
+  // Verdict-adjacent caveats that ride the status (SPEC002 rev-2 R3): "gas unmodeled" when
+  // `gasCostDiem == 0`, and a leg-imbalance warning when the pool is materially lopsided.
+  warnings: string[];
   flashFeeCostDiem: bigint;
   oneTimeCostDiem: bigint;
   annualizedOneTimeCostBps: number;
@@ -165,16 +183,17 @@ function numberRatioBps(numerator: bigint, denominator: bigint): number {
 
 function estimateSlippageBps(
   tradeDiem: bigint,
-  curveDepthDiem: bigint,
+  drawnLegDiem: bigint,
   curveFeeBps: number,
 ): number {
   if (tradeDiem === 0n) {
     return curveFeeBps;
   }
-  if (curveDepthDiem === 0n) {
+  // A zero DRAWN leg cannot absorb the trade -> +Infinity (SPEC002 rev-2 R1).
+  if (drawnLegDiem === 0n) {
     return Number.POSITIVE_INFINITY;
   }
-  return curveFeeBps + numberRatioBps(tradeDiem, curveDepthDiem);
+  return curveFeeBps + numberRatioBps(tradeDiem, drawnLegDiem);
 }
 
 function capFiniteBps(value: number): number {
@@ -186,12 +205,19 @@ function capFiniteBps(value: number): number {
 
 function validateScenario(scenario: LoopSizingScenario): LoopSizingBlocker[] {
   const blockers: LoopSizingBlocker[] = [];
+  const externalExitOutOfRange =
+    scenario.externalExitSlippageBps !== undefined &&
+    (scenario.externalExitSlippageBps < 0 ||
+      scenario.externalExitSlippageBps > BPS_DENOMINATOR);
   if (
     scenario.initialCollateralDiem <= 0n ||
     scenario.targetLeverageBps <= BPS_DENOMINATOR ||
-    scenario.curveDepthDiem < 0n ||
+    scenario.curveDiemLegDiem < 0n ||
+    scenario.curveWstDiemLegDiem < 0n ||
     scenario.morphoSupplyDiem < 0n ||
     scenario.morphoExistingBorrowDiem < 0n ||
+    scenario.gasCostDiem < 0n ||
+    externalExitOutOfRange ||
     scenario.maxCurvePositionShareBps <= 0 ||
     scenario.maxMorphoUtilizationBps <= 0 ||
     scenario.maxMorphoUtilizationBps > BPS_DENOMINATOR ||
@@ -206,7 +232,7 @@ function validateScenario(scenario: LoopSizingScenario): LoopSizingBlocker[] {
 
 function isMarginal(result: Omit<LoopSizingResult, "status">): boolean {
   const slippageNearCap =
-    Math.max(result.estimatedEntrySlippageBps, result.estimatedExitSlippageBps) >
+    Math.max(result.estimatedEntrySlippageBps, result.exitSlippageBps) >
     result.scenario.maxSlippageBps * 0.8;
   const healthNearFloor =
     result.healthFactorBps !== null &&
@@ -245,20 +271,39 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
     utilizationBorrowLimit > scenario.morphoExistingBorrowDiem
       ? utilizationBorrowLimit - scenario.morphoExistingBorrowDiem
       : 0n;
+  // Total two-sided depth, RECONSTRUCTED from the legs (SPEC002 rev-2 R1). It feeds only the
+  // depth-based parts of gate 1 (the sufficiency sub-condition and the `requiredCurve*`
+  // outputs); slippage is per-leg below.
+  const curveDepthDiem = scenario.curveDiemLegDiem + scenario.curveWstDiemLegDiem;
+  // Leg-aware, direction-correct slippage (SPEC002 rev-2 R1): a Curve exchange(i,j) pays OUT
+  // coin j, depleting the j leg. The EXIT sells wstDIEM (exchange(1,0)) -> draws the DIEM leg;
+  // the ENTRY buys wstDIEM (exchange(0,1)) -> draws the wstDIEM leg. A zero DRAWN leg -> +Inf.
   const estimatedEntrySlippageBps = capFiniteBps(
-    estimateSlippageBps(borrowAmountDiem, scenario.curveDepthDiem, scenario.curveFeeBps),
+    estimateSlippageBps(borrowAmountDiem, scenario.curveWstDiemLegDiem, scenario.curveFeeBps),
   );
   const estimatedExitSlippageBps = capFiniteBps(
-    estimateSlippageBps(positionCollateralDiem, scenario.curveDepthDiem, scenario.curveFeeBps),
+    estimateSlippageBps(positionCollateralDiem, scenario.curveDiemLegDiem, scenario.curveFeeBps),
   );
+  // A live get_dy quote (SPEC002 rev-2 R2), when injected, REPLACES the exit estimate at every
+  // consumption site (gate 1, exit cost -> netApy, the unwind backstop, the marginal band) so
+  // the verdict stays internally consistent. Entry is always an estimate.
+  const exitSlippageSource: "get_dy" | "estimate" =
+    scenario.externalExitSlippageBps === undefined ? "estimate" : "get_dy";
+  const exitSlippageBps =
+    scenario.externalExitSlippageBps === undefined
+      ? estimatedExitSlippageBps
+      : capFiniteBps(scenario.externalExitSlippageBps);
   const flashFeeCostDiem = mulDivCeil(borrowAmountDiem, scenario.flashFeeBps);
   const entrySlippageCostDiem = Number.isFinite(estimatedEntrySlippageBps)
     ? mulDivCeil(borrowAmountDiem, estimatedEntrySlippageBps)
     : positionCollateralDiem;
-  const exitSlippageCostDiem = Number.isFinite(estimatedExitSlippageBps)
-    ? mulDivCeil(positionCollateralDiem, estimatedExitSlippageBps)
+  const exitSlippageCostDiem = Number.isFinite(exitSlippageBps)
+    ? mulDivCeil(positionCollateralDiem, exitSlippageBps)
     : positionCollateralDiem;
-  const oneTimeCostDiem = entrySlippageCostDiem + exitSlippageCostDiem + flashFeeCostDiem;
+  // Gas is a first-class one-time cost (SPEC002 rev-2 R3); it defaults to 0 (unmodeled), and a
+  // `gas unmodeled` warning then rides the verdict. MEV stays a caveat, not a number.
+  const oneTimeCostDiem =
+    entrySlippageCostDiem + exitSlippageCostDiem + flashFeeCostDiem + scenario.gasCostDiem;
   const annualizedOneTimeCostBps = Math.ceil(
     numberRatioBps(oneTimeCostDiem, scenario.initialCollateralDiem) *
       (DAYS_PER_YEAR / scenario.holdingPeriodDays),
@@ -298,18 +343,15 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
             (scenario.targetLeverageBps - BPS_DENOMINATOR),
         );
   const unwindDiemOut =
-    Number.isFinite(estimatedExitSlippageBps) && estimatedExitSlippageBps < BPS_DENOMINATOR
-      ? mulDivFloor(positionCollateralDiem, BPS_DENOMINATOR - estimatedExitSlippageBps)
+    Number.isFinite(exitSlippageBps) && exitSlippageBps < BPS_DENOMINATOR
+      ? mulDivFloor(positionCollateralDiem, BPS_DENOMINATOR - exitSlippageBps)
       : 0n;
   const unwindRepayRequiredDiem = mulDivCeil(
     borrowAmountDiem,
     BPS_DENOMINATOR + scenario.exitRepayBufferBps + scenario.flashFeeBps,
   );
 
-  if (
-    scenario.curveDepthDiem < requiredCurveDepthDiem ||
-    estimatedExitSlippageBps > scenario.maxSlippageBps
-  ) {
+  if (curveDepthDiem < requiredCurveDepthDiem || exitSlippageBps > scenario.maxSlippageBps) {
     blockers.push("curve_liquidity_insufficient");
   }
   if (
@@ -328,6 +370,23 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
     blockers.push("unwind_not_covered");
   }
 
+  // Verdict-adjacent caveats (SPEC002 rev-2 R3). Gas is unmodeled unless the operator supplies
+  // a figure; a materially lopsided pool (|diemLeg - wstDiemLeg| / total > 20%) is where a
+  // `viable` reading is most optimistic, so it rides the verdict too.
+  const warnings: string[] = [];
+  if (scenario.gasCostDiem === 0n) {
+    warnings.push("gas unmodeled");
+  }
+  if (curveDepthDiem > 0n) {
+    const legImbalance =
+      scenario.curveDiemLegDiem > scenario.curveWstDiemLegDiem
+        ? scenario.curveDiemLegDiem - scenario.curveWstDiemLegDiem
+        : scenario.curveWstDiemLegDiem - scenario.curveDiemLegDiem;
+    if (legImbalance * 5n > curveDepthDiem) {
+      warnings.push("curve legs imbalanced");
+    }
+  }
+
   const baseResult = {
     scenario,
     blockers,
@@ -341,7 +400,9 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
     requiredMorphoSupplyDiem,
     availableMorphoBorrowDiem,
     estimatedEntrySlippageBps,
-    estimatedExitSlippageBps,
+    exitSlippageBps,
+    exitSlippageSource,
+    warnings,
     flashFeeCostDiem,
     oneTimeCostDiem,
     annualizedOneTimeCostBps,
@@ -397,7 +458,7 @@ export function buildLoopSizingReport(scenarios: LoopSizingScenario[]): LoopSizi
   const usesFlat = results.every((result) => result.borrowRateModel === "flat");
   return {
     assumptions: {
-      curveDepthModel: "linear-depth-share",
+      curveDepthModel: "linear-per-leg-depth-share",
       morphoLiquidityModel: "supply-minus-existing-borrow",
       apyModel: "simple-annualized",
       borrowRateModel:
@@ -424,13 +485,15 @@ export function defaultSizingValues(
   | "id"
   | "initialCollateralDiem"
   | "targetLeverageBps"
-  | "curveDepthDiem"
+  | "curveDiemLegDiem"
+  | "curveWstDiemLegDiem"
   | "morphoSupplyDiem"
   | "vaultApyBps"
   | "borrowApyBps"
 > {
   return {
     morphoExistingBorrowDiem: 0n,
+    gasCostDiem: 0n,
     curveFeeBps: 4,
     maxSlippageBps: config.execution.maxSlippageBps,
     flashFeeBps: Math.ceil((config.flashLoan.feeTier ?? 0) / 100),

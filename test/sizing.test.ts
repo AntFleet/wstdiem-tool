@@ -15,7 +15,11 @@ function scenario(overrides: Partial<Parameters<typeof sizeLoopScenario>[0]> = {
     id: "test",
     initialCollateralDiem: parseDecimalToUnits("100"),
     targetLeverageBps: 15_000,
-    curveDepthDiem: parseDecimalToUnits("10000"),
+    // SPEC002 rev-2: legs 10000/10000 (total 20000). The canonical viable case re-pins from a
+    // total of 10000 to 20000 so the leg-aware exit slippage (4 + ratioBps(150, 10000) = 154 bps)
+    // stays under the 300 bps cap.
+    curveDiemLegDiem: parseDecimalToUnits("10000"),
+    curveWstDiemLegDiem: parseDecimalToUnits("10000"),
     morphoSupplyDiem: parseDecimalToUnits("100"),
     vaultApyBps: 1500,
     borrowApyBps: 800,
@@ -27,7 +31,8 @@ describe("loop sizing simulator", () => {
   it("blocks on Curve liquidity first when depth is too low", () => {
     const result = sizeLoopScenario(
       scenario({
-        curveDepthDiem: 0n,
+        curveDiemLegDiem: 0n,
+        curveWstDiemLegDiem: 0n,
         morphoSupplyDiem: parseDecimalToUnits("10000"),
       }),
     );
@@ -40,7 +45,11 @@ describe("loop sizing simulator", () => {
   it("blocks on Morpho supply first when borrow liquidity is unavailable", () => {
     const result = sizeLoopScenario(
       scenario({
-        curveDepthDiem: parseDecimalToUnits("10000"),
+        // Total 20000 (legs 10000) so exit slip 154 bps < 300 cap — Curve passes and Morpho
+        // (supply 0) is the first blocker. rev-1 used total 10000, which under leg-aware
+        // slippage would itself block on exit slip (304 bps).
+        curveDiemLegDiem: parseDecimalToUnits("10000"),
+        curveWstDiemLegDiem: parseDecimalToUnits("10000"),
         morphoSupplyDiem: 0n,
       }),
     );
@@ -53,7 +62,8 @@ describe("loop sizing simulator", () => {
   it("blocks on net APY when borrow cost overwhelms vault yield (flat model)", () => {
     const result = sizeLoopScenario(
       scenario({
-        curveDepthDiem: parseDecimalToUnits("20000"),
+        curveDiemLegDiem: parseDecimalToUnits("10000"),
+        curveWstDiemLegDiem: parseDecimalToUnits("10000"),
         morphoSupplyDiem: parseDecimalToUnits("10000"),
         targetLeverageBps: 20_000,
         borrowRateModel: "flat",
@@ -85,7 +95,8 @@ describe("loop sizing simulator", () => {
 
   it("adaptive-curve blocks a loop whose own draw spikes the borrow rate that flat misses", () => {
     const base = {
-      curveDepthDiem: parseDecimalToUnits("100000"),
+      curveDiemLegDiem: parseDecimalToUnits("50000"),
+      curveWstDiemLegDiem: parseDecimalToUnits("50000"),
       morphoSupplyDiem: parseDecimalToUnits("250"),
       initialCollateralDiem: parseDecimalToUnits("100"),
       targetLeverageBps: 30_000, // 3x -> borrow 200 against 250 supply = 80% post-draw util
@@ -137,20 +148,25 @@ describe("loop sizing simulator", () => {
 
     expect(scenarios).toHaveLength(12);
     expect(report.summary.total).toBe(12);
+    // rev-2 re-baseline: under leg-aware slippage the total-10000 scenarios (balanced legs 5000)
+    // now block on exit slip (1.5x -> 304 bps, 2x -> 404 bps), so the cheapest UNBLOCKED
+    // scenario per leverage shifts to the total-20000 rows (scenario-0006, scenario-0012). The
+    // required-depth / required-supply / status values are unchanged (required depth is a pure
+    // function of position size, not actual depth).
     expect(report.summary.firstViableByLeverage).toEqual([
       {
         targetLeverageBps: 15_000,
         requiredCurveDepthDiem: parseDecimalToUnits("1000"),
         requiredMorphoSupplyDiem: parseDecimalToUnits("62.5"),
         status: "viable",
-        scenarioId: "scenario-0004",
+        scenarioId: "scenario-0006",
       },
       {
         targetLeverageBps: 20_000,
         requiredCurveDepthDiem: parseDecimalToUnits("1333.333333333333333334"),
         requiredMorphoSupplyDiem: parseDecimalToUnits("125"),
         status: "marginal",
-        scenarioId: "scenario-0010",
+        scenarioId: "scenario-0012",
       },
     ]);
   });
