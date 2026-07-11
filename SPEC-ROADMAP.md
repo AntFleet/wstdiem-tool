@@ -171,15 +171,22 @@ live-seed — and any future model change — must conform to.
     review gate (run before code) + approval pass caught the design and every carried-over bug; the
     inversion fallback was consciously cut (direct-read revert fails closed).
 
-### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B)
+### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B) — DRAFT AUTHORED, review running
 
-Model-fidelity fixes SPEC002 §11 flagged and the SPEC003 review made blocking for the soft seeds:
-- **Leg-aware / `get_dy` exit slippage** — replace the single-scalar linear `fee + trade/depth` on the
-  *primary* safety gate with a convex, direction-correct live `get_dy` quote (the right layer for the
-  imbalance fix, vs a seed-layer `2×min` heuristic).
-- **Gas + MEV** in `oneTimeCostDiem` (`--gas-cost-diem` + MEV caveat).
-- Then SPEC003 Part B seeds `curveDepthDiem` from `get_dy` and `vaultApyBps` (×10000-corrected) into
-  the fixed model.
+Drafted as the `## rev-2` section in `SPEC002.md`. The design resolves the "get_dy is a chain read but
+SPEC002 is offline" tension **two-layered**:
+- **R1 — leg-aware offline slippage.** Replace the single `curveDepthDiem` scalar with two legs
+  (`curveDiemLegDiem` / `curveWstDiemLegDiem`); each trade divides by the leg it draws (exit → DIEM leg,
+  entry → wstDIEM leg). Direction-correct + imbalance-aware, fixing §8's headline blind spot **at the
+  model layer** — no full StableSwap needed. `--curve-depth-diem` stays as a balanced convenience;
+  the intended ~2× slippage increase is the understatement fix, not a regression.
+- **R2 — live `get_dy` injection seam.** Optional `externalExitSlippageBps` overrides the R1 estimate;
+  SPEC003 Part B fills it from a real `get_dy(1→0)` convex quote. Convexity lives in the real quote,
+  not an offline heuristic.
+- **R3 — gas in `oneTimeCostDiem`** (`--gas-cost-diem`); MEV stays a caveat, not a number.
+
+Then SPEC003 Part B seeds both legs from `balances` + the exit quote from `get_dy`, and vaultApyBps
+(×10000-corrected), into the fixed model. **Next: two-agent review gate before lock.**
 
 ## Traceability & verification
 
