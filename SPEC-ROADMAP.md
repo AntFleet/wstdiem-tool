@@ -109,9 +109,15 @@ resolved); remaining product gaps captured as Open Questions #7–9. **rev-2 is 
 
 **Next:** Phase 2 — SPEC002 (Loop Sizing Engine), which rev-2 now formally forward-references.
 
-## Phase 2 — SPEC002 (Loop Sizing Engine) — retro-spec
+## Phase 2 — SPEC002 (Loop Sizing Engine) — DRAFT AUTHORED (2026-07-11), review gate running
 
-> Numbering freed once the old product SPEC002–004 are relocated in Phase 0.
+> Numbering freed once the old product SPEC002–004 were purged in Phase 0.
+
+Draft `SPEC002.md` authored against verified code + the three test files (which pin exact acceptance
+values: blocker order, `requiredCurveDepth`/`requiredMorphoSupply`, `healthFactorBps=25800`, the IRM
+0.25×/1×/4× pins and 217-bps on-chain reproduction, JSON wei-string serialization). Supersedes the
+non-normative `docs/deployment/loop-sizing.md`. **Next: the two-agent review gate (adversarial
+technical + product) before lock**, applied from the start given how much it caught in Phase 1.
 
 Goal: spec the largest, most financially-sensitive unspecified surface.
 
