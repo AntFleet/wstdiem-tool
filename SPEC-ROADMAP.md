@@ -145,13 +145,18 @@ live-seed — and any future model change — must conform to.
 
 **Deliverable:** `SPEC002.md` (Loop Sizing Engine) + tests traced to its clauses.
 
-## Phase 3 — Forward specs (spec-first from here on)
+## Phase 3 — Forward specs (spec-first from here on) — IN PROGRESS (2026-07-11)
 
-- **First application of the discipline:** spec the `loop sizing --from-chain` live-seed *before*
-  implementing it (seed `rateAtTarget`, Morpho supply/borrow, curve depth, and empirical vault
-  APY from the readers that already exist).
 - **Standing rule:** every new surface gets a spec section first → executor implements → verifier
   gate → merge. Every spec clause traces to at least one test.
+- **First forward spec — `SPEC003.md` (`loop sizing --from-chain`) — DRAFT AUTHORED, review running.**
+  Seeds `rateAtTargetApyBps`, `morphoSupplyDiem`/`morphoExistingBorrowDiem`, `curveDepthDiem`, and
+  empirical vault APY from readers that already exist, block-pinned. **Spec-before-build already paid
+  off:** verified on-chain that the AdaptiveCurveIrm exposes `rateAtTarget(marketId)` **directly**
+  (≈216.5 bps on 2026-07-11), so the fragile `borrowRateView ÷ curveMultiplier` inversion SPEC002 §10
+  assumed is unnecessary (kept only as a flagged fallback). Also designed a conservative curve-depth
+  seed (2× thinner leg + imbalance warning) that partially fixes SPEC002 §8's headline blind spot, and
+  a fail-closed vault-APY rule (7-day history required). **Next: two-agent review gate before lock.**
 
 ## Traceability & verification
 
