@@ -149,14 +149,31 @@ live-seed — and any future model change — must conform to.
 
 - **Standing rule:** every new surface gets a spec section first → executor implements → verifier
   gate → merge. Every spec clause traces to at least one test.
-- **First forward spec — `SPEC003.md` (`loop sizing --from-chain`) — DRAFT AUTHORED, review running.**
-  Seeds `rateAtTargetApyBps`, `morphoSupplyDiem`/`morphoExistingBorrowDiem`, `curveDepthDiem`, and
-  empirical vault APY from readers that already exist, block-pinned. **Spec-before-build already paid
-  off:** verified on-chain that the AdaptiveCurveIrm exposes `rateAtTarget(marketId)` **directly**
-  (≈216.5 bps on 2026-07-11), so the fragile `borrowRateView ÷ curveMultiplier` inversion SPEC002 §10
-  assumed is unnecessary (kept only as a flagged fallback). Also designed a conservative curve-depth
-  seed (2× thinner leg + imbalance warning) that partially fixes SPEC002 §8's headline blind spot, and
-  a fail-closed vault-APY rule (7-day history required). **Next: two-agent review gate before lock.**
+- **First forward spec — `SPEC003.md` (`loop sizing --from-chain`) — REVIEWED + SPLIT + Part A LOCKED.**
+  Seeds live Base reads into the sizing engine (SPEC002). **Spec-before-build paid off twice:** (1)
+  verified on-chain the AdaptiveCurveIrm exposes `rateAtTarget(marketId)` **directly** (217 bps on
+  2026-07-11), retiring the fragile `borrowRateView ÷ curveMultiplier` inversion; (2) the two-agent
+  review gate (adversarial + product) — run before any code — caught two numeric defects (a 10,000×
+  vault-APY unit bug, a 10× acceptance-criterion error), a `rateAtTarget==0` clamp fail-*open*, an
+  overstated-"reuse"/quorum error, and a flat-model provenance gap. **All fixed in the doc before a
+  line was written.**
+  - **Verdict: REVISE → SPLIT (both reviewers' recommendation).** The 5 seeds split by risk:
+    - **Part A (ship-ready, locked):** `rateAtTargetApyBps` (direct read) + `morphoSupplyDiem` /
+      `morphoExistingBorrowDiem` — feed the model's wei-precision terms; pure garbage-in removal.
+    - **Part B (gated):** `curveDepthDiem` + `vaultApyBps` — feed the softest, verdict-flipping inputs;
+      blocked until **SPEC002 rev-2**.
+  - **Central product-safety rule added:** any degraded/unseeded input sets `authoritative:false` and
+    **demotes the verdict token itself**, not just a warnings sidecar.
+
+### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B)
+
+Model-fidelity fixes SPEC002 §11 flagged and the SPEC003 review made blocking for the soft seeds:
+- **Leg-aware / `get_dy` exit slippage** — replace the single-scalar linear `fee + trade/depth` on the
+  *primary* safety gate with a convex, direction-correct live `get_dy` quote (the right layer for the
+  imbalance fix, vs a seed-layer `2×min` heuristic).
+- **Gas + MEV** in `oneTimeCostDiem` (`--gas-cost-diem` + MEV caveat).
+- Then SPEC003 Part B seeds `curveDepthDiem` from `get_dy` and `vaultApyBps` (×10000-corrected) into
+  the fixed model.
 
 ## Traceability & verification
 

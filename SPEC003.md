@@ -1,183 +1,193 @@
 # SPEC003 — Loop sizing: live on-chain seeding (`loop sizing --from-chain`)
 
-> **Forward spec** — authored **before** implementation (Phase 3 of the roadmap: spec-first for new
-> work). It defines the contract an implementer builds to; acceptance criteria (§10) become the tests.
-> **Conforms to [`SPEC002.md`](SPEC002.md)** — it seeds SPEC002's scenario inputs; it does not change
-> the sizing model, gates, or output contract.
+> **Forward spec** (authored before implementation; acceptance criteria = the tests to write).
+> **Conforms to [`SPEC002.md`](SPEC002.md).** **Staged** by risk: **Part A ships now**; **Part B is
+> gated behind a SPEC002 rev-2** (leg-aware/`get_dy` slippage + gas/MEV). Revised after a two-agent
+> review gate (adversarial technical + product) that returned REVISE; the fixes are folded in below.
 
-## 1. Purpose & scope
+## 1. Purpose, scope & staging
 
-`loop sizing --from-chain` turns the offline sizing engine from typed assumptions into "what today's
-actual Base pool supports" by seeding five scenario inputs from live reads, **reusing readers that
-already exist**:
+`loop sizing --from-chain` removes garbage-in by seeding sizing inputs from live Base reads. **It
+upgrades inputs, not the model** — every SPEC002 §8 limitation stands; a chain-seed is never "now the
+numbers are real." Broadcast stays disabled (SPEC001).
 
-| Seeds | from |
-|---|---|
-| `rateAtTargetApyBps` | AdaptiveCurveIrm `rateAtTarget(marketId)` (§3) |
-| `morphoSupplyDiem` | Morpho `market(marketId).totalSupplyAssets` |
-| `morphoExistingBorrowDiem` | Morpho `market(marketId).totalBorrowAssets` |
-| `curveDepthDiem` | Curve `balances(0)` + `convertToAssets(balances(1))` (§4) |
-| `vaultApyBps` | empirical 7-day base APY from the metrics DB (§5) |
+**Staging rationale (from the review).** The five seeds split by risk:
 
-**It upgrades *inputs*, not the *model*.** Every SPEC002 §8 limitation still stands (single-scalar
-depth cannot fully model convex off-peg slippage; gas/MEV excluded; HF is not liquidation distance;
-no price path). `--from-chain` must not be presented as "now the numbers are real" — it removes
-garbage-in on five inputs and adds provenance, nothing more. Broadcast stays disabled (SPEC001).
+- **Part A — safe (ship-ready):** `rateAtTargetApyBps`, `morphoSupplyDiem`, `morphoExistingBorrowDiem`.
+  These feed the terms SPEC002 models to wei precision. Seeding them is pure garbage-in removal — and
+  the headline win: SPEC002's default `rateAtTarget = 400` is ~2× the live ~217 bps.
+- **Part B — soft (GATED):** `curveDepthDiem` and `vaultApyBps`. These feed the model's softest,
+  verdict-flipping inputs — curve depth drives SPEC002 §5's *primary* exit-slippage gate; vault APY is
+  the leverage-amplified `netApy` term. Seeding them into **today's** model just makes a still-unsafe
+  `viable` look authoritative. Part B is blocked until **SPEC002 rev-2** (§4.1) lets the model consume
+  them without over-selling.
 
-## 2. The seeding map
+## 2. Shared mechanics (both parts)
 
-Each seed reuses an existing reader and is **block-pinned** to one planning block (§6):
+- **Block-pinning (on-chain reads only).** Read the target block once (`latest`, or `--planning-block
+  <n>`) and pin **every on-chain seed read** to it. Part B's `vaultApyBps` is a 7-day **DB** window,
+  **not** a single-block read — it is explicitly exempt from block-pinning (and from §8 criterion 8).
+- **RPC discipline.** Reuse `selectBestRpcEndpoint` (`src/contracts/rpc.ts`) for **endpoint failover
+  selection only** — it is single-best-by-liveness, **not** a quorum client. From the selected URL,
+  construct a **`latest`-pinned** read client (rpc.ts's own selection reads `blockTag: "finalized"`,
+  which lags head far past any useful staleness gate — do **not** pin seeds to finalized). Staleness:
+  reject if the pinned block is > threshold behind head (concrete value: Open Question 1).
+- **Fail-closed, no partial report.** RPC unavailable / `chainId ≠ 8453` / `marketId` null / any seed
+  read reverts / an implausible value (per-seed guards below) → the command errors and emits no report.
+- **Config plumbing.** `--from-chain` is `loop sizing`'s **first** RPC dependency (`sizing.ts` /
+  `sizingScenarios.ts` are pure-offline today). It reuses the `client` + `planningBlock` pattern from
+  `preflight.ts` / `readiness.ts` and adds address validation (nonzero + has-code; `marketId` non-null;
+  `chainId == 8453`). This is a thin integration, **not** free reader-reuse — see §3/§4 for the exact
+  export/adapter work each seed needs.
+- **Verdict integrity (central rule, §6).** Any degraded or unseeded input sets `authoritative: false`
+  and **demotes the verdict token itself** — not just a `warnings[]` sidecar.
 
-| Scenario field | Live source | Reused reader (file) |
-|---|---|---|
-| `rateAtTargetApyBps` | `AdaptiveCurveIrm.rateAtTarget(marketId)` → `int256` per-second WAD → `perSecWadToAprBps` | new ABI fn on `src/abi/morphoIrm.ts`; `perSecWadToAprBps` in `src/loop/morphoRate.ts` |
-| `morphoSupplyDiem` | `Morpho.market(marketId).totalSupplyAssets` | `readMorphoMarket` (`src/loop/preflight.ts:520`) |
-| `morphoExistingBorrowDiem` | `Morpho.market(marketId).totalBorrowAssets` | same |
-| `curveDepthDiem` | `Curve.balances(0)` + `InferenceVault.convertToAssets(balances(1))` | readiness curve reads (`src/loop/readiness.ts:299,306`) |
-| `vaultApyBps` | `computeBaseApy(rollingCreditDiem_7d, averageVaultAssets_7d)` | `applyYieldWindowMetrics` (`src/metrics/collector.ts:81`) |
+## 3. Part A — safe seeds (ship-ready)
 
-## 3. `rateAtTarget` — direct read, not inversion
+### 3.1 `rateAtTargetApyBps` ← direct read
 
-**Primary (required): read `rateAtTarget(marketId)` directly** from the AdaptiveCurveIrm. It is a
-public getter returning `int256` per-second WAD; convert to APR bps via `perSecWadToAprBps`. This is
-robust and has no conditioning problem.
+Read `rateAtTarget(marketId)` **directly** from the AdaptiveCurveIrm (`int256`, per-second WAD) and
+convert with `perSecWadToAprBps` (`src/loop/morphoRate.ts`). Requires **adding `rateAtTarget` to
+`src/abi/morphoIrm.ts`** (today it holds only `borrowRateView`).
 
-> Verified 2026-07-11, IRM `0x46415998764C29aB2a25CbeA6254146D50D22687`, market
-> `0xdd6b9f10…6c76`: `rateAtTarget = 686605546` per-second WAD → **≈ 216.5 bps**. (This is the value
-> the runbook recommends passing manually today.)
+> Verified 2026-07-11 (IRM `0x4641…2687`, market `0xdd6b…6c76`): `rateAtTarget = 686605546` per-second
+> WAD, and **`perSecWadToAprBps(686605546) === 217`** (integer bps).
 
-**This resolves the SPEC002 §10 caveat.** That section assumed seeding by *inverting*
-`borrowRateView ÷ curveMultiplier(currentUtil)`, which is ill-conditioned near the current ~42%/idle
-regime. The inversion is **unnecessary** given the direct getter — catching this is exactly the
-payoff of speccing before building.
+- **`rateAtTarget == 0` (uninitialized IRM: the mapping is 0 until the market's first rate accrual)
+  → fail-closed, NOT clamped.** The `[MORPHO_MIN…=10, MORPHO_MAX…=20000]` clamp must never absorb a
+  zero read (that would silently seed 0.1% APR and inflate `netApy` toward `viable`). On zero: error,
+  or fall back to the genesis 400 bps default with `rateAtTargetSource: "uninitialized-default"` and
+  `authoritative: false`.
+- **Fallback inversion** (`borrowRateView ÷ curveMultiplierWad(currentUtil)`) only if the direct read
+  reverts; mark `rateAtTargetSource: "inverted"`, and `"inverted-ill-conditioned"` (with a warning)
+  when `currentUtil` is in the shallow zone. Clamp **non-zero** results to `[10, 20000]` bps.
 
-**Fallback (only if the direct read reverts / is unavailable):** invert
-`borrowRateView ÷ curveMultiplierWad(currentUtil)`, and when `currentUtil` is in the shallow zone
-(multiplier < ~0.5×, i.e. util well below the 90% target) mark the seed `rateAtTargetSource:
-"inverted-ill-conditioned"` and surface a warning — do not silently trust it.
+### 3.2 `morphoSupplyDiem` / `morphoExistingBorrowDiem` ← market read
 
-**Both paths** clamp the result to Morpho's `[MORPHO_MIN_RATE_AT_TARGET_APR_BPS = 10,
-MORPHO_MAX_RATE_AT_TARGET_APR_BPS = 20000]` bounds (already exported by `morphoRate.ts`).
+`Morpho.market(marketId).totalSupplyAssets` / `.totalBorrowAssets`. Reuse `readMorphoMarket` — which
+**must be exported** (`src/loop/preflight.ts:518` is module-private today) or extracted into a shared
+helper (readiness re-inlines the same `market` read). Guard: `totalSupplyAssets == 0` → fail-closed
+(cannot size against an empty market).
 
-## 4. Curve depth — and the imbalance opportunity
+### 3.3 Flat-model interaction
 
-Reading `balances(0)` (DIEM leg) and `balances(1)` (wstDIEM leg) **separately** gives `--from-chain`
-the very data SPEC002 §8 named as the model's headline blind spot: pool imbalance. Two options for
-collapsing them into SPEC002's single `curveDepthDiem` scalar:
+Part A seeds the **adaptive** `rateAtTargetApyBps`. Under `--borrow-rate-model flat` the model instead
+uses `borrowApyBps` (default 800; `sizing.ts:262`), which Part A does **not** seed — so a naive
+`--from-chain --borrow-rate-model flat` would print a "seeded from block N" report on a **defaulted**
+borrow rate. Resolution: **error** — *"`--from-chain` seeds the adaptive rate; pass `--borrow-apy-bps`
+for the flat model."* (Provenance would otherwise misrepresent the borrow side.)
 
-- **(a) naive total** — `balances(0) + convertToAssets(balances(1))`. Inherits the imbalance blindness
-  (a drained/off-peg pool reads as deep). **Rejected as default.**
-- **(b) conservative (default):** `curveDepthDiem = 2 × min(diemLeg, wstDiemLegInDiem)` — treat the
-  pool as if balanced at its **thinner** leg, so exit slippage is priced against the drained side an
-  exit actually draws from. Additionally emit `curveImbalanceRatio =
-  |diemLeg − wstDiemLegInDiem| / (diemLeg + wstDiemLegInDiem)` and a warning when it exceeds a
-  threshold (default 0.20).
+## 4. Part B — soft seeds (GATED behind SPEC002 rev-2)
 
-So `--from-chain` is a **partial fix** for SPEC002's headline limitation, not merely an input upgrade.
-It does **not** fully solve it: the single-scalar model still cannot price convex off-peg slippage, so
-a fork `get_dy` proof remains required before trusting a `viable` verdict on a thin pool (SPEC002 §8).
+> **Do not implement Part B until SPEC002 rev-2 (§4.1) ships.** Seeding these into the current model
+> over-sells `viable` on exactly the pool/leverage the tool exists to guard.
 
-## 5. Vault APY needs history — fail-closed
+### 4.1 Prerequisite — SPEC002 rev-2 model fixes
 
-`vaultApyBps` is **not** a single RPC read. It is the 7-day rolling base APY
-(`computeBaseApy(rollingCreditDiem_7d, averageVaultAssets_7d)`) computed from `credit_events` +
-`metric_snapshots` in the SQLite DB (populated by prior `watch --once` runs). If the DB lacks ≥7 days
-of vault-asset history, `applyYieldWindowMetrics` returns *"insufficient 7-day vault asset history."*
+- **Leg-aware / `get_dy` exit slippage.** SPEC002's exit-slippage gate (its *primary* safety
+  constraint) must consume a **convex, direction-correct `get_dy` quote** at the planned trade size —
+  not the single-scalar linear `fee + trade/depth`. The `get_dy` reader already exists (SPEC001 §1).
+  This is the correct layer for the imbalance fix, replacing the seed-layer `2×min` heuristic.
+- **Gas + MEV.** `oneTimeCostDiem` gains a gas line (`--gas-cost-diem`) + MEV caveat (SPEC002 §11) —
+  otherwise gas alone can flip a small-position `viable` negative.
 
-**`--from-chain` must fail-closed on vault APY** — it must never silently seed a garbage or zero APY
-(which leverage would then amplify, SPEC002 §8). Default behavior: if history is insufficient, **error**
-and instruct the operator to either run `watch --once` over a ≥7-day span first or pass
-`--vault-apy-bps` explicitly. An `--allow-stale-vault-apy` escape hatch may seed it anyway, but then
-the scenario carries `vaultApySource: "insufficient-history"` and a prominent warning, and the run is
-marked non-authoritative.
+### 4.2 `curveDepthDiem` ← live `get_dy` (once rev-2 lands)
 
-## 6. RPC discipline (chain in an otherwise-offline command)
+With leg-aware slippage in the model, `--from-chain` seeds the exit-slippage input from a live
+`get_dy(1→0, plannedExitSize)` at the pinned block — direction-correct and convex. It still reads both
+legs (`balances(0)` DIEM, `balances(1)` wstDIEM via `convertToAssets`) for provenance and
+`curveImbalanceRatio`. Guards: **both legs zero → fail-closed** (empty pool); define
+`curveImbalanceRatio = 1` (force a warning) when both legs are 0 to avoid a `0/0 → NaN` that would
+*suppress* the warning on the most-drained pool.
 
-`--from-chain` is the **only** chain-reading path in `loop sizing`; the base command stays pure-offline
-(SPEC002 §1). It therefore carries its own discipline:
+> *Interim only (discouraged):* if Part B must ship before rev-2, seed a conservative
+> `2 × min(diemLeg, wstDiemLegInDiem)` and **label it interim** — it merely penalizes imbalance, still
+> divides by ~2× the traded side for balanced pools (the SPEC002 §8 understatement stands), and is
+> direction-blind (over-blocks a fat-DIEM-leg exit). Not the intended design.
 
-- **Block-pinning (TOCTOU):** read `latest` once (or `--planning-block <n>`), then pin **every** seed
-  read to that single block — same discipline as preflight/readiness. A mixed-block seed set is a bug.
-- **Fail-closed, no partial seeding:** if RPC is unavailable, `chainId ≠ 8453`, `marketId` is null, any
-  seed read reverts, or a read returns an implausible value (zero supply where nonzero is required),
-  the command **errors** and emits no sizing report. The only exception is `vaultApyBps` under §5.
-- **Reuse the existing failover/quorum client** (`src/contracts/rpc.ts`); reject a pinned block older
-  than a staleness threshold (default: > ~50 blocks / ~100s behind head).
-- The seed reads are read-only `eth_call`s; nothing is signed or broadcast.
+### 4.3 `vaultApyBps` ← 7-day DB window
 
-## 7. CLI surface
+`vaultApyBps = Math.round(computeBaseApy(rollingCreditDiem_7d, averageVaultAssets_7d) × 10_000)` —
+`computeBaseApy` returns a **fraction** (`src/metrics/math.ts:41`), so the `× 10_000` is mandatory to
+reach bps; omitting it seeds a value 10,000× too small (every scenario blocks). Sourced from the SQLite
+window (`listVaultAssetSamplesForWindow` + `listCreditSamplesSince` + the `status.ts` current-sample
+append) aggregated by `applyYieldWindowMetrics` — a thin `loadVaultApyWindow` adapter, not a direct
+reader.
 
-`loop sizing --from-chain [--planning-block <n>] [--allow-stale-vault-apy]`.
+- **Insufficient history → do NOT hard-error, and do NOT seed 0.** `applyYieldWindowMetrics` returns
+  *"insufficient 7-day vault asset history for base APY evidence"* with no computed APY when the DB is
+  short. In that case leave `vaultApyBps` to its normal SPEC002 path (explicit `--vault-apy-bps`, or
+  the default/grid), set `vaultApySource: "not-seeded"` + `authoritative: false`, and **continue**
+  sizing the other seeds. This keeps `--from-chain` usable on a fresh checkout (its first-run moment)
+  and never silently seeds a leverage-amplified garbage APY.
+- **No `--allow-stale-vault-apy`** — it is redundant with the existing `--vault-apy-bps` (the safe
+  explicit override) and the cited reader cannot produce a short-window value anyway.
+- **Sample-density floor.** Require ≥ N samples across the window (not merely a 7-day span) before
+  stamping `vaultApySource: "measured-7d"` / authoritative (Open Question 2).
 
-- **Precedence: explicit flag > chain seed > default.** An operator may pin any seeded dimension with
-  its normal flag (e.g. `--morpho-supply-diem`), and `--from-chain` fills only the rest. The seeded
-  values are **single points**, not swept; leverage and other non-seeded dims sweep as usual (SPEC002
-  §2.2), so `loop sizing --from-chain --target-leverage 2,3,4` sizes today's real pool across leverage.
-- `--planning-block <n>` pins a specific block (default: latest at invocation).
-- All other SPEC002 flags behave unchanged.
+## 5. CLI surface
 
-## 8. Output & provenance (extends SPEC002 §7)
+`loop sizing --from-chain [--planning-block <n>]`.
 
-`--from-chain` adds a `seedProvenance` object to the report; the `LoopSizingResult`/`LoopSizingReport`
-contract is otherwise unchanged (seeded values simply populate the scenario inputs):
+- **Precedence: explicit flag > chain seed > default.** A flag on a seeded dim wins and still sweeps
+  (`--from-chain --morpho-supply-diem 100,1000` → grid on that dim, `seededFields.morphoSupplyDiem =
+  "flag"`); seeded values are otherwise single points while non-seeded dims sweep as usual.
+- **`--from-chain` + `--preset current-zero` → error** (the preset forces depth/supply to 0 while
+  `--from-chain` seeds them — conflicting sources for the same dims).
+
+## 6. Verdict integrity & provenance (extends SPEC002 §7)
+
+**The central product-safety rule: any degraded seed demotes the verdict.** When `authoritative:
+false` is tripped by *any* of — `rateAtTargetSource ≠ "direct"`; (Part B) `vaultApySource ≠
+"measured-7d"`, or `curveImbalanceRatio > threshold`, or `get_dy` unavailable — the **status token
+itself degrades on the verdict line** (e.g. `candidate — unverified seed`, not a plain `viable`), plus
+a top banner. A warning read at the same glance as the verdict recalibrates trust; a `warnings[]` entry
+does not.
 
 ```ts
 interface SeedProvenance {
-  blockNumber: bigint;             // the single pinned block
+  blockNumber: bigint;                 // the pinned block for the on-chain reads (NOT vaultApy)
   chainId: number;
-  rateAtTargetSource: "direct" | "inverted" | "inverted-ill-conditioned";
-  vaultApySource: "measured-7d" | "insufficient-history";
-  curveDiemLegDiem: bigint;        // balances(0)
-  curveWstDiemLegDiem: bigint;     // convertToAssets(balances(1))
-  curveImbalanceRatio: number;     // §4
-  seededFields: Record<"rateAtTargetApyBps"|"morphoSupplyDiem"|"morphoExistingBorrowDiem"|"curveDepthDiem"|"vaultApyBps",
-                       "chain" | "flag" | "default">;
+  rateAtTargetSource: "direct" | "inverted" | "inverted-ill-conditioned" | "uninitialized-default";
+  vaultApySource: "measured-7d" | "not-seeded";           // Part B
+  curveDiemLegDiem?: bigint; curveWstDiemLegDiem?: bigint; // Part B
+  curveImbalanceRatio?: number;                            // Part B
+  seededFields: Record<string, "chain" | "flag" | "default">;  // incl. borrowApyBps note under flat
+  authoritative: boolean;
   warnings: string[];
 }
 ```
 
-- **JSON** (`--json`) nests `seedProvenance` alongside `assumptions`/`results`. bigint legs serialize as
-  wei strings (SPEC002 §7.3 rules).
-- **Table** prints a header line — `seeded from block N (chainId 8453)` — and a per-field source
-  annotation, plus any warnings (imbalance, ill-conditioned rate, stale vault APY).
+JSON nests `seedProvenance` (bigint legs as wei strings, SPEC002 §7.3). Table prints `seeded from
+block N (chainId 8453)`, per-field source, the (possibly degraded) verdict, and warnings.
 
-## 9. What it explicitly does NOT do
+## 7. What it explicitly does NOT do
 
-- Does not change the model — every SPEC002 §8 limit stands (single-scalar depth, gas/MEV excluded,
-  HF ≠ liquidation distance, no price path).
-- Does not sweep the seeded dimensions (each is one live point).
-- Does not enable execution — broadcast remains fail-closed (SPEC001 §5/§9).
-- Does not, by itself, make a `viable` verdict safe on a thin/off-peg pool (fork `get_dy` proof still
-  required).
+Change the model beyond the §4.1 rev-2 prerequisite; sweep seeded dims; enable execution (broadcast
+fail-closed, SPEC001); or make a `viable` safe on a thin pool without the fork `get_dy` proof.
 
-## 10. Acceptance criteria (tests to write when built)
+## 8. Acceptance criteria (tests to write)
 
-1. **Direct rate read** reproduces ≈ 216–217 bps at a pinned 2026-07-11 Base block (fork test), and
-   `perSecWadToAprBps(686605546) ≈ 2165` (…/10 bps precision).
-2. **Fallback inversion** matches the direct read within tolerance in a well-conditioned (near-target
-   util) fixture, and is flagged `inverted-ill-conditioned` in a low-util fixture.
-3. **Rate clamp** to `[10, 20000]` bps on both paths.
-4. **Fail-closed:** RPC down / `chainId ≠ 8453` / market revert / stale pinned block → command errors,
-   **no partial report emitted**.
-5. **Vault APY §5:** insufficient history → error by default; under `--allow-stale-vault-apy` →
-   `vaultApySource: "insufficient-history"` + warning + non-authoritative marking.
-6. **Precedence:** an explicit `--morpho-supply-diem` overrides the chain seed for that dim
-   (`seededFields.morphoSupplyDiem === "flag"`).
-7. **Imbalance:** a lopsided-pool fixture yields `curveDepthDiem = 2 × min-leg` and a
-   `curveImbalanceRatio > 0.20` warning; a balanced fixture yields ≈ the naive total with no warning.
-8. **Block-pinning:** all seed reads use the identical block (assert one `blockNumber` across reads).
-9. **Contract conformance:** a seeded report still satisfies SPEC002 §7 (all gates evaluated, all
-   economic fields populated, JSON envelope shape unchanged) — reuse SPEC002's acceptance fixtures with
-   seeded inputs.
+**Part A:**
+1. `perSecWadToAprBps(686605546) === 217` (durable); the live-block value is a time-sensitive smoke test.
+2. `rateAtTarget == 0` → fail-closed / `uninitialized-default` + `authoritative:false` — **not** clamp-to-10.
+3. Non-zero rate clamps to `[10, 20000]`; fallback inversion flagged `inverted-ill-conditioned` at low util.
+4. Fail-closed matrix: RPC down / `chainId≠8453` / market revert / stale pin / `totalSupplyAssets==0` → error, **no report**.
+5. `--from-chain --borrow-rate-model flat` → error (or seeds `borrowApyBps` + records it in provenance).
+6. Precedence: an explicit `--morpho-supply-diem` overrides the seed (`seededFields.morphoSupplyDiem === "flag"`).
+7. Block-pinning: the on-chain reads share one `blockNumber`; vaultApy exempt.
+8. **A degraded seed demotes the verdict token** (not just a warning) and sets `authoritative:false` — the central product-safety test.
+9. SPEC002 §7 conformance with seeded inputs (all gates evaluated, all economic fields populated, envelope shape unchanged).
+
+**Part B (when SPEC002 rev-2 lands):**
+10. Vault-APY **magnitude**: a measured 5% window → `vaultApyBps === 500` (guards the 10,000× unit bug).
+11. Insufficient / low-density history → `not-seeded` + `authoritative:false` + sizing continues (no 0 seed, no hard error).
+12. `get_dy`-seeded slippage is direction-correct (a fat-DIEM-leg exit is **not** over-blocked); both-legs-zero → fail-closed.
+13. `--from-chain --preset current-zero` → error.
 
 ## Open questions
 
-1. Conservative curve-depth seeding (§4b) as the default vs opt-in — **recommend default conservative**
-   (the tool's whole premise is safety on a drained pool).
-2. Vault-APY insufficient-history — hard error vs annotated-warn default — **recommend hard error**.
-3. Exact staleness threshold for the pinned block (blocks vs seconds).
-4. Should `--from-chain` also seed the flat-model `borrowApyBps` for flat-model users, or only the
-   adaptive `rateAtTargetApyBps`? — adaptive is the default model; flat users can still pass
-   `--borrow-apy-bps`.
-5. Should the imbalance threshold (0.20) and staleness threshold be configurable (`config` / flags) or
-   fixed heuristics like SPEC002 §6's marginal band?
+1. Concrete staleness threshold (blocks vs seconds) and the exact pinned tag (`latest` vs `safe`) — resolve before build.
+2. Sample-density floor N for stamping vault APY authoritative.
+3. SPEC002 rev-2 as its own roadmap item (it is the hard prerequisite for Part B) — Phase 3.5.
+4. Should the imbalance / staleness thresholds be config-tunable or fixed heuristics (as SPEC002 §6's marginal band)?
