@@ -171,7 +171,7 @@ live-seed — and any future model change — must conform to.
     review gate (run before code) + approval pass caught the design and every carried-over bug; the
     inversion fallback was consciously cut (direct-read revert fails closed).
 
-### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B) — REVIEWED + LOCKED (2026-07-11)
+### Phase 3.5 — SPEC002 rev-2 (prerequisite for SPEC003 Part B) — IMPLEMENTED + SHIPPED (2026-07-11, ee169d6)
 
 Drafted as the `## rev-2` section in `SPEC002.md`. The design resolves the "get_dy is a chain read but
 SPEC002 is offline" tension **two-layered**:
@@ -200,6 +200,23 @@ the unwind backstop, the marginal band), not just gate 1; (3) total depth recons
 (5) gas default 0 kept but honest — a `gas unmodeled` warning rides the verdict, no over-claim of
 "included"; (6) new field specs + `curveDepthModel` label bump + leg-flag mutual exclusion. SPEC003 §4.2
 aligned to the corrected denomination + rail reuse.
+
+**IMPLEMENTED + SHIPPED (ee169d6).** Engine + CLI carry the two legs, the `externalExitSlippageBps`
+seam (replacing exit slippage at all four sites), and `gasCostDiem`; offline JSON/table output otherwise
+unchanged and `fromChainSeed` (Part A) flows legs+gas through as ordinary grid dims with no `get_dy`
+wiring. A focused approval pass on the plumbing I had not personally exercised (field-rename completeness,
+CLI flag↔camelCase field mapping through commander, output rendering, Part A compatibility, no Part B
+leakage) returned **APPROVE / 0 blocking**; its three LOW test-hardening items were all closed
+before commit: a compiled-CLI case now drives the leg/gas flags end-to-end through commander, a
+`--preset current-zero → legs 0/0` mapping test was added, and the leg-flag mutual exclusion was
+tightened to also reject a **preset-supplied** curve total (previously it would silently drop the
+preset's curve intent). Gates: typecheck + lint clean; new `test/sizing-rev2.test.ts` (rev-2 acceptance
+1–9); full suite 174 pass / 1 pre-existing `cli-live` fail (stash-confirmed unrelated on clean tree
+7c309d0).
+
+**Next code step: SPEC003 Part B** — now unblocked. Seed both curve legs from Curve `balances` + the
+exit quote from `get_dy(1→0)` via the existing `quoteCurveExitRoute` + `priceImpactBps` rail (filling
+`externalExitSlippageBps`), plus `vaultApyBps` (×10000-corrected), into the now-implemented rev-2 model.
 
 ## Traceability & verification
 
