@@ -1,10 +1,25 @@
 import type { AppConfig } from "../types/domain.js";
 import { WAD } from "../metrics/math.js";
+import {
+  adaptiveBorrowAprBps,
+  MORPHO_INITIAL_RATE_AT_TARGET_APR_BPS,
+  TARGET_UTILIZATION_WAD,
+} from "./morphoRate.js";
 
 const BPS_DENOMINATOR = 10_000;
 const DAYS_PER_YEAR = 365;
 
 export type LoopSizingStatus = "viable" | "marginal" | "blocked";
+
+/**
+ * How the simulator prices Morpho borrow cost.
+ * - "flat": use `borrowApyBps` verbatim (legacy; treats borrow cost as constant).
+ * - "adaptive-curve": derive borrow APR from the loop's POST-DRAW utilization via
+ *   the AdaptiveCurveIrm curve and a `rateAtTargetApyBps` anchor. This is the
+ *   default because a real loop's own borrow moves the rate — a shallow pool that
+ *   reads ~1% idle can cost ~4x rateAtTarget once the loop consumes it.
+ */
+export type LoopBorrowRateModel = "flat" | "adaptive-curve";
 
 export type LoopSizingBlocker =
   | "scenario_invalid"
@@ -23,6 +38,8 @@ export interface LoopSizingScenario {
   morphoExistingBorrowDiem: bigint;
   vaultApyBps: number;
   borrowApyBps: number;
+  borrowRateModel: LoopBorrowRateModel;
+  rateAtTargetApyBps: number;
   curveFeeBps: number;
   maxSlippageBps: number;
   flashFeeBps: number;
@@ -39,6 +56,7 @@ export interface LoopSizingAssumptions {
   curveDepthModel: "linear-depth-share";
   morphoLiquidityModel: "supply-minus-existing-borrow";
   apyModel: "simple-annualized";
+  borrowRateModel: "flat" | "adaptive-curve-instantaneous";
   readOnly: true;
   broadcastAvailable: false;
   auditRequired: true;
@@ -63,6 +81,11 @@ export interface LoopSizingResult {
   oneTimeCostDiem: bigint;
   annualizedOneTimeCostBps: number;
   grossVaultApyBps: number;
+  borrowRateModel: LoopBorrowRateModel;
+  postDrawUtilizationBps: number;
+  effectiveBorrowApyBps: number;
+  borrowAprAtTargetBps: number;
+  borrowAprAtFullUtilizationBps: number;
   borrowCostApyBps: number;
   netApyBps: number;
   healthFactorBps: number | null;
@@ -217,7 +240,30 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
   );
   const leverage = leverageMultiplier(scenario);
   const grossVaultApyBps = Math.round(leverage * scenario.vaultApyBps);
-  const borrowCostApyBps = Math.round((leverage - 1) * scenario.borrowApyBps);
+  // Post-draw utilization = (existing borrow + this loop's borrow) / supply. This
+  // is what the loop's OWN draw pushes utilization to, and what the Adaptive Curve
+  // IRM prices against — the whole reason a flat borrow-APY assumption understates cost.
+  const postDrawBorrowDiem = scenario.morphoExistingBorrowDiem + borrowAmountDiem;
+  const postDrawUtilizationWad =
+    scenario.morphoSupplyDiem > 0n
+      ? (postDrawBorrowDiem * WAD) / scenario.morphoSupplyDiem
+      : postDrawBorrowDiem > 0n
+        ? WAD
+        : 0n;
+  // Reported utilization is uncapped (can exceed 100% to signal an over-draw);
+  // the rate curve itself clamps to 100%.
+  const postDrawUtilizationBps = Number((postDrawUtilizationWad * BigInt(BPS_DENOMINATOR)) / WAD);
+  const utilizationForRateWad = postDrawUtilizationWad > WAD ? WAD : postDrawUtilizationWad;
+  const borrowAprAtTargetBps = adaptiveBorrowAprBps(
+    TARGET_UTILIZATION_WAD,
+    scenario.rateAtTargetApyBps,
+  );
+  const borrowAprAtFullUtilizationBps = adaptiveBorrowAprBps(WAD, scenario.rateAtTargetApyBps);
+  const effectiveBorrowApyBps =
+    scenario.borrowRateModel === "flat"
+      ? scenario.borrowApyBps
+      : adaptiveBorrowAprBps(utilizationForRateWad, scenario.rateAtTargetApyBps);
+  const borrowCostApyBps = Math.round((leverage - 1) * effectiveBorrowApyBps);
   const netApyBps = grossVaultApyBps - borrowCostApyBps - annualizedOneTimeCostBps;
   const healthFactorBps =
     borrowAmountDiem === 0n
@@ -275,6 +321,11 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
     oneTimeCostDiem,
     annualizedOneTimeCostBps,
     grossVaultApyBps,
+    borrowRateModel: scenario.borrowRateModel,
+    postDrawUtilizationBps,
+    effectiveBorrowApyBps,
+    borrowAprAtTargetBps,
+    borrowAprAtFullUtilizationBps,
     borrowCostApyBps,
     netApyBps,
     healthFactorBps,
@@ -318,11 +369,14 @@ function firstViableByLeverage(
 
 export function buildLoopSizingReport(scenarios: LoopSizingScenario[]): LoopSizingReport {
   const results = scenarios.map(sizeLoopScenario);
+  const usesFlat = results.every((result) => result.borrowRateModel === "flat");
   return {
     assumptions: {
       curveDepthModel: "linear-depth-share",
       morphoLiquidityModel: "supply-minus-existing-borrow",
       apyModel: "simple-annualized",
+      borrowRateModel:
+        results.length > 0 && usesFlat ? "flat" : "adaptive-curve-instantaneous",
       readOnly: true,
       broadcastAvailable: false,
       auditRequired: true,
@@ -365,5 +419,7 @@ export function defaultSizingValues(
     minNetApyBps: 0,
     exitRepayBufferBps: config.execution.exitRepayBufferBps,
     holdingPeriodDays: DAYS_PER_YEAR,
+    borrowRateModel: "adaptive-curve",
+    rateAtTargetApyBps: MORPHO_INITIAL_RATE_AT_TARGET_APR_BPS,
   };
 }

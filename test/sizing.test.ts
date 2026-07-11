@@ -50,12 +50,13 @@ describe("loop sizing simulator", () => {
     expect(result.requiredMorphoSupplyDiem).toBe(parseDecimalToUnits("62.5"));
   });
 
-  it("blocks on net APY when borrow cost overwhelms vault yield", () => {
+  it("blocks on net APY when borrow cost overwhelms vault yield (flat model)", () => {
     const result = sizeLoopScenario(
       scenario({
         curveDepthDiem: parseDecimalToUnits("20000"),
         morphoSupplyDiem: parseDecimalToUnits("10000"),
         targetLeverageBps: 20_000,
+        borrowRateModel: "flat",
         borrowApyBps: 5000,
       }),
     );
@@ -63,6 +64,55 @@ describe("loop sizing simulator", () => {
     expect(result.status).toBe("blocked");
     expect(result.firstBlocker).toBe("net_apy_below_threshold");
     expect(result.netApyBps).toBeLessThan(0);
+  });
+
+  it("prices borrow cost from post-draw utilization under the adaptive-curve model", () => {
+    const shallow = sizeLoopScenario(
+      scenario({ morphoSupplyDiem: parseDecimalToUnits("60"), rateAtTargetApyBps: 400 }),
+    );
+    const deep = sizeLoopScenario(
+      scenario({ morphoSupplyDiem: parseDecimalToUnits("100000"), rateAtTargetApyBps: 400 }),
+    );
+
+    // Same 50 DIEM borrow, but the shallow pool is driven to a far higher
+    // utilization, so its effective borrow APR and cost are strictly higher.
+    expect(shallow.borrowRateModel).toBe("adaptive-curve");
+    expect(shallow.postDrawUtilizationBps).toBeGreaterThan(deep.postDrawUtilizationBps);
+    expect(shallow.effectiveBorrowApyBps).toBeGreaterThan(deep.effectiveBorrowApyBps);
+    // Curve reference points depend only on rateAtTarget: 4x steeper at 100% vs 90%.
+    expect(deep.borrowAprAtFullUtilizationBps).toBeGreaterThan(deep.borrowAprAtTargetBps);
+  });
+
+  it("adaptive-curve blocks a loop whose own draw spikes the borrow rate that flat misses", () => {
+    const base = {
+      curveDepthDiem: parseDecimalToUnits("100000"),
+      morphoSupplyDiem: parseDecimalToUnits("250"),
+      initialCollateralDiem: parseDecimalToUnits("100"),
+      targetLeverageBps: 30_000, // 3x -> borrow 200 against 250 supply = 80% post-draw util
+      vaultApyBps: 1500,
+      rateAtTargetApyBps: 3000,
+    };
+    const flat = sizeLoopScenario(scenario({ ...base, borrowRateModel: "flat", borrowApyBps: 400 }));
+    const adaptive = sizeLoopScenario(scenario({ ...base, borrowRateModel: "adaptive-curve" }));
+
+    // A flat 4% borrow assumption pencils the loop out positive...
+    expect(flat.netApyBps).toBeGreaterThan(0);
+    // ...but pricing the borrow at the ~80% utilization it actually creates
+    // (rateAtTarget 30% -> ~27% APR near the cap) flips net APY negative and blocks it.
+    expect(adaptive.effectiveBorrowApyBps).toBeGreaterThan(flat.effectiveBorrowApyBps);
+    expect(adaptive.netApyBps).toBeLessThan(0);
+    expect(adaptive.blockers).toContain("net_apy_below_threshold");
+  });
+
+  it("labels the borrow model in report assumptions", () => {
+    const adaptive = buildLoopSizingReport(
+      buildLoopSizingScenarios(DEFAULT_CONFIG, { rateAtTargetApyBps: "217" }),
+    );
+    expect(adaptive.assumptions.borrowRateModel).toBe("adaptive-curve-instantaneous");
+    const flat = buildLoopSizingReport(
+      buildLoopSizingScenarios(DEFAULT_CONFIG, { borrowRateModel: "flat" }),
+    );
+    expect(flat.assumptions.borrowRateModel).toBe("flat");
   });
 
   it("marks a sufficiently liquid positive-spread scenario viable", () => {

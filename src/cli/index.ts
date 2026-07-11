@@ -237,7 +237,21 @@ loop
     "existing Morpho borrow to reserve from usable supply",
   )
   .option("--vault-apy-bps <bps>", "comma-separated vault APY assumptions in bps", "1500")
-  .option("--borrow-apy-bps <bps>", "comma-separated Morpho borrow APY assumptions in bps", "800")
+  .option(
+    "--borrow-rate-model <model>",
+    "borrow-cost model: adaptive-curve (utilization-aware, default) or flat",
+    "adaptive-curve",
+  )
+  .option(
+    "--rate-at-target-apy-bps <bps>",
+    "adaptive-curve: AdaptiveCurveIrm rate-at-target (90% util) APY in bps; on-chain ~217, Morpho genesis 400",
+    "400",
+  )
+  .option(
+    "--borrow-apy-bps <bps>",
+    "flat model only: comma-separated Morpho borrow APY assumptions in bps",
+    "800",
+  )
   .option("--curve-fee-bps <bps>", "Curve fee assumption in bps")
   .option("--slippage-bps <bps>", "maximum acceptable simulated entry/exit slippage bps")
   .option("--flash-fee-bps <bps>", "flash fee assumption in bps")

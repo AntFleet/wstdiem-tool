@@ -1,6 +1,10 @@
 import { parseDecimalToUnits, WAD } from "../metrics/math.js";
 import type { AppConfig } from "../types/domain.js";
-import { defaultSizingValues, type LoopSizingScenario } from "./sizing.js";
+import {
+  defaultSizingValues,
+  type LoopBorrowRateModel,
+  type LoopSizingScenario,
+} from "./sizing.js";
 
 const DEFAULT_INITIAL_DIEM = "100";
 const DEFAULT_TARGET_LEVERAGE = "1.5,2,3";
@@ -8,6 +12,8 @@ const DEFAULT_CURVE_DEPTH_DIEM = "0,100,1000,10000";
 const DEFAULT_MORPHO_SUPPLY_DIEM = "0,100,1000,10000";
 const DEFAULT_VAULT_APY_BPS = "1500";
 const DEFAULT_BORROW_APY_BPS = "800";
+const DEFAULT_RATE_AT_TARGET_APY_BPS = "400";
+const DEFAULT_BORROW_RATE_MODEL: LoopBorrowRateModel = "adaptive-curve";
 
 export interface LoopSizingGridOptions {
   initialDiem?: string;
@@ -19,6 +25,8 @@ export interface LoopSizingGridOptions {
   morphoExistingBorrowDiem?: string;
   vaultApyBps?: string;
   borrowApyBps?: string;
+  borrowRateModel?: string;
+  rateAtTargetApyBps?: string;
   curveFeeBps?: string;
   slippageBps?: string;
   flashFeeBps?: string;
@@ -90,6 +98,14 @@ export function parseDecimalToBps(value: string, name: string): number {
     throw new Error(`${name} exceeds safe integer range`);
   }
   return parsed;
+}
+
+function parseBorrowRateModel(value: string | undefined): LoopBorrowRateModel {
+  const model = value ?? DEFAULT_BORROW_RATE_MODEL;
+  if (model !== "flat" && model !== "adaptive-curve") {
+    throw new Error("--borrow-rate-model must be flat or adaptive-curve");
+  }
+  return model;
 }
 
 function parseLeverageGrid(value: string, name: string): number[] {
@@ -172,6 +188,24 @@ export function buildLoopSizingScenarios(
     options.borrowApyBps ?? DEFAULT_BORROW_APY_BPS,
     "--borrow-apy-bps",
   );
+  const borrowRateModel = parseBorrowRateModel(options.borrowRateModel);
+  const rateAtTargetApyBps = parseNonNegativeIntegerGrid(
+    options.rateAtTargetApyBps ?? DEFAULT_RATE_AT_TARGET_APY_BPS,
+    "--rate-at-target-apy-bps",
+  );
+  // The borrow dimension is model-dependent: "flat" sweeps borrow APY directly,
+  // while "adaptive-curve" sweeps the rate-at-target anchor and derives the borrow
+  // APR from each scenario's post-draw utilization.
+  const borrowDimension =
+    borrowRateModel === "flat"
+      ? borrowApyBps.map((value) => ({
+          borrowApyBps: value,
+          rateAtTargetApyBps: rateAtTargetApyBps[0],
+        }))
+      : rateAtTargetApyBps.map((value) => ({
+          borrowApyBps: borrowApyBps[0],
+          rateAtTargetApyBps: value,
+        }));
   const morphoExistingBorrowDiem =
     options.morphoExistingBorrowDiem === undefined
       ? defaults.morphoExistingBorrowDiem
@@ -218,7 +252,7 @@ export function buildLoopSizingScenarios(
       for (const curveDepth of curveDepthDiem) {
         for (const morphoSupply of morphoSupplyDiem) {
           for (const vaultApy of vaultApyBps) {
-            for (const borrowApy of borrowApyBps) {
+            for (const borrowDim of borrowDimension) {
               const id = `scenario-${String(scenarios.length + 1).padStart(4, "0")}`;
               scenarios.push({
                 ...defaults,
@@ -229,7 +263,9 @@ export function buildLoopSizingScenarios(
                 morphoSupplyDiem: morphoSupply,
                 morphoExistingBorrowDiem,
                 vaultApyBps: vaultApy,
-                borrowApyBps: borrowApy,
+                borrowApyBps: borrowDim.borrowApyBps,
+                borrowRateModel,
+                rateAtTargetApyBps: borrowDim.rateAtTargetApyBps,
                 curveFeeBps,
                 maxSlippageBps,
                 flashFeeBps,

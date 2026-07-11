@@ -182,6 +182,7 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
       "Morpho req/actual",
       "Slip entry/exit",
       "HF",
+      "Util→Borrow APR",
       "Net APY",
       "Status",
     ],
@@ -197,6 +198,7 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
       `${formatWad(result.requiredMorphoSupplyDiem)}/${formatWad(result.scenario.morphoSupplyDiem)} DIEM`,
       `${formatBps(result.estimatedEntrySlippageBps)}/${formatBps(result.estimatedExitSlippageBps)}`,
       formatHealthFactor(result.healthFactorBps),
+      `${formatBps(result.postDrawUtilizationBps)}→${formatBps(result.effectiveBorrowApyBps)}`,
       formatBps(result.netApyBps),
       `${result.status}${result.firstBlocker === null ? "" : `: ${result.firstBlocker}`}`,
     ]);
@@ -223,6 +225,16 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
                 )} DIEM, Morpho ${formatWad(entry.requiredMorphoSupplyDiem)} DIEM (${entry.status})`,
             )
             .join("; "),
+    ],
+    [
+      "Borrow model",
+      report.assumptions.borrowRateModel === "flat"
+        ? "flat: borrow APY used as given"
+        : report.results[0]
+          ? `adaptive-curve: rateAtTarget curve = ${formatBps(
+              report.results[0].borrowAprAtTargetBps,
+            )} @90% util, ${formatBps(report.results[0].borrowAprAtFullUtilizationBps)} @100% util`
+          : "adaptive-curve",
     ],
     [
       "Read-only",
