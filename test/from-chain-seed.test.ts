@@ -484,7 +484,7 @@ describe("loop sizing --from-chain (SPEC003 Part A)", () => {
         initialDiem: "100",
         targetLeverage: "1.5",
         // rev-2 re-baseline: total 20000 (balanced legs 10000) keeps exit slip at 154 bps < cap
-        // so this scenario stays viable and the verdict-token (de)promotion has a viable to act on.
+        // so this scenario stays candidate and the verdict-token (de)promotion has a candidate to act on.
         curveDepthDiem: "20000",
         vaultApyBps: "1500",
       },
@@ -492,10 +492,10 @@ describe("loop sizing --from-chain (SPEC003 Part A)", () => {
     });
 
     expect(report.authoritative).toBe(false);
-    // The underlying gate status is untouched — the scenario still evaluates as viable.
-    expect(report.summary.viable).toBe(1);
-    const viable = report.results.find((result) => result.status === "viable");
-    expect(viable).toBeDefined();
+    // The underlying gate status is untouched — the scenario still evaluates as candidate.
+    expect(report.summary.candidate).toBe(1);
+    const candidate = report.results.find((result) => result.status === "candidate");
+    expect(candidate).toBeDefined();
 
     const rendered = renderLoopSizingTable(report);
     expect(rendered).toContain("candidate — unverified seed");
@@ -511,7 +511,7 @@ describe("loop sizing --from-chain (SPEC003 Part A)", () => {
         initialDiem: "100",
         targetLeverage: "1.5",
         // rev-2 re-baseline: total 20000 (balanced legs 10000) keeps exit slip at 154 bps < cap
-        // so this scenario stays viable and the verdict-token (de)promotion has a viable to act on.
+        // so this scenario stays candidate and the verdict-token (de)promotion has a candidate to act on.
         curveDepthDiem: "20000",
         vaultApyBps: "1500",
       },
@@ -666,7 +666,7 @@ describe("loop sizing --from-chain (SPEC003 Part B-1: curve legs + get_dy exit s
       client: new MockSeedClient({
         marketSupply: 100_000n * WAD,
         curveDiemBalance: 30_000n * WAD,
-        curveWstDiemBalance: 10_000n * WAD, // ratio 3:1 > 2.0 threshold (deep enough to stay viable)
+        curveWstDiemBalance: 10_000n * WAD, // ratio 3:1 > 2.0 threshold (deep enough to stay candidate)
       }),
       options: { initialDiem: "100", targetLeverage: "1.5", vaultApyBps: "1500" },
       explicitFlags: NO_EXPLICIT,
@@ -932,9 +932,9 @@ describe("loop sizing --from-chain (SPEC003 Part B-2: vaultApyBps ← 7-day DB w
     expect(report.seedProvenance?.vaultApySource).toBe("not-seeded");
     expect(report.seedProvenance?.seededFields.vaultApyBps).toBe("default");
     expect(report.authoritative).toBe(false);
-    // Sizing still ran end-to-end (full report, no throw) and stayed viable.
+    // Sizing still ran end-to-end (full report, no throw) and stayed candidate.
     expect(report.results.length).toBeGreaterThan(0);
-    expect(report.summary.viable).toBe(1);
+    expect(report.summary.candidate).toBe(1);
     // vaultApyBps fell back to the SPEC002 default (1500), NEVER 0 (a 0 blocks every scenario).
     expect(report.results.every((result) => result.scenario.vaultApyBps === 1500)).toBe(true);
     expect(report.results.every((result) => result.scenario.vaultApyBps !== 0)).toBe(true);

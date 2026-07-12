@@ -15,7 +15,7 @@ function scenario(overrides: Partial<Parameters<typeof sizeLoopScenario>[0]> = {
     id: "test",
     initialCollateralDiem: parseDecimalToUnits("100"),
     targetLeverageBps: 15_000,
-    // SPEC002 rev-2: legs 10000/10000 (total 20000). The canonical viable case re-pins from a
+    // SPEC002 rev-2: legs 10000/10000 (total 20000). The canonical candidate case re-pins from a
     // total of 10000 to 20000 so the leg-aware exit slippage (4 + ratioBps(150, 10000) = 154 bps)
     // stays under the 300 bps cap.
     curveDiemLegDiem: parseDecimalToUnits("10000"),
@@ -126,16 +126,16 @@ describe("loop sizing simulator", () => {
     expect(flat.assumptions.borrowRateModel).toBe("flat");
   });
 
-  it("marks a sufficiently liquid positive-spread scenario viable", () => {
+  it("marks a sufficiently liquid positive-spread scenario candidate", () => {
     const result = sizeLoopScenario(scenario());
 
-    expect(result.status).toBe("viable");
+    expect(result.status).toBe("candidate");
     expect(result.firstBlocker).toBeNull();
     expect(result.borrowAmountDiem).toBe(parseDecimalToUnits("50"));
     expect(result.healthFactorBps).toBe(25_800);
   });
 
-  it("expands scenario grids and summarizes first viable assumptions by leverage", () => {
+  it("expands scenario grids and summarizes first candidate assumptions by leverage", () => {
     const scenarios = buildLoopSizingScenarios(DEFAULT_CONFIG, {
       initialDiem: "100",
       targetLeverage: "1.5,2",
@@ -153,12 +153,12 @@ describe("loop sizing simulator", () => {
     // scenario per leverage shifts to the total-20000 rows (scenario-0006, scenario-0012). The
     // required-depth / required-supply / status values are unchanged (required depth is a pure
     // function of position size, not actual depth).
-    expect(report.summary.firstViableByLeverage).toEqual([
+    expect(report.summary.firstCandidateByLeverage).toEqual([
       {
         targetLeverageBps: 15_000,
         requiredCurveDepthDiem: parseDecimalToUnits("1000"),
         requiredMorphoSupplyDiem: parseDecimalToUnits("62.5"),
-        status: "viable",
+        status: "candidate",
         scenarioId: "scenario-0006",
       },
       {

@@ -15,7 +15,7 @@ const DAYS_PER_YEAR = 365;
 // the demotion/warning stay silent even when stressed netAPY is negative — only the number emits.
 const STRESSED_UTIL_BAND_BPS = 7000;
 
-export type LoopSizingStatus = "viable" | "marginal" | "blocked";
+export type LoopSizingStatus = "candidate" | "marginal" | "blocked";
 
 /**
  * How the simulator prices Morpho borrow cost.
@@ -187,10 +187,10 @@ export interface LoopSizingReport {
   results: LoopSizingResult[];
   summary: {
     total: number;
-    viable: number;
+    candidate: number;
     marginal: number;
     blocked: number;
-    firstViableByLeverage: Array<{
+    firstCandidateByLeverage: Array<{
       targetLeverageBps: number;
       requiredCurveDepthDiem: bigint;
       requiredMorphoSupplyDiem: bigint;
@@ -459,7 +459,7 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
 
   // Verdict-adjacent caveats (SPEC002 rev-2 R3). Gas is unmodeled unless the operator supplies
   // a figure; a materially lopsided pool (|diemLeg - wstDiemLeg| / total > 20%) is where a
-  // `viable` reading is most optimistic, so it rides the verdict too.
+  // `candidate` reading is most optimistic, so it rides the verdict too.
   const warnings: string[] = [];
   if (scenario.gasCostDiem === 0n) {
     warnings.push("gas unmodeled");
@@ -567,13 +567,13 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
   };
   return {
     ...baseResult,
-    status: blockers.length > 0 ? "blocked" : isMarginal(baseResult) ? "marginal" : "viable",
+    status: blockers.length > 0 ? "blocked" : isMarginal(baseResult) ? "marginal" : "candidate",
   };
 }
 
-function firstViableByLeverage(
+function firstCandidateByLeverage(
   results: LoopSizingResult[],
-): LoopSizingReport["summary"]["firstViableByLeverage"] {
+): LoopSizingReport["summary"]["firstCandidateByLeverage"] {
   const selected = new Map<number, LoopSizingResult>();
   for (const result of results) {
     if (result.status === "blocked") {
@@ -617,10 +617,10 @@ export function buildLoopSizingReport(scenarios: LoopSizingScenario[]): LoopSizi
     results,
     summary: {
       total: results.length,
-      viable: results.filter((result) => result.status === "viable").length,
+      candidate: results.filter((result) => result.status === "candidate").length,
       marginal: results.filter((result) => result.status === "marginal").length,
       blocked: results.filter((result) => result.status === "blocked").length,
-      firstViableByLeverage: firstViableByLeverage(results),
+      firstCandidateByLeverage: firstCandidateByLeverage(results),
     },
   };
 }

@@ -1,6 +1,6 @@
 # Loop Sizing Simulator
 
-`loop sizing` is an offline advisory simulator for estimating whether a DIEM/wstDIEM loop size is economically viable before any live operator action.
+`loop sizing` is an offline advisory simulator for estimating whether a DIEM/wstDIEM loop size is economically sound before any live operator action.
 
 It does not use RPC, does not broadcast, does not deploy an executor, and does not clear the audit gate. Production readiness still requires live Curve liquidity, Morpho market liquidity, a funded owner position, executor deployment and authorization, evidence runs, and final audit signoff.
 
@@ -64,13 +64,13 @@ node dist/cli/index.js loop sizing --from-chain \
 
 ### Demotion: a degraded seed downgrades the verdict, it does not fail
 
-A non-fatal missing seed does **not** stop the report — it demotes it. The verdict token degrades (e.g. `viable` → `candidate — unverified seed`), an `UNVERIFIED SEED` banner prints, and `authoritative` is `false` in the JSON envelope. This fires when:
+A non-fatal missing seed does **not** stop the report — it demotes it. The verdict token degrades (e.g. `candidate` → `candidate — unverified seed`), an `UNVERIFIED SEED` banner prints, and `authoritative` is `false` in the JSON envelope. This fires when:
 
 - the **vault APY is not chain-measured** — on a fresh checkout the 7-day DB window has no history, so the vault APY falls back to `--vault-apy-bps` / the default (never 0) and the verdict is demoted (`vaultApySource: not-seeded`). It becomes authoritative once the keeper's `monitor` runs have accumulated ≥7 days of vault samples;
 - the live `get_dy` exit quote is unavailable, or the Curve pool is more than ~2:1 imbalanced;
 - an explicit `--vault-apy-bps` is supplied (an operator-typed APY is not chain-measured).
 
-A JSON consumer must AND-combine each `results[].status` with the top-level `authoritative`: a `viable` under `authoritative: false` is a candidate, not a pass.
+A JSON consumer must AND-combine each `results[].status` with the top-level `authoritative`: a `candidate` under `authoritative: false` is an unverified candidate, not a pass.
 
 ## Model Limits
 
@@ -78,4 +78,4 @@ The simulator uses a conservative linear depth-share model for Curve, a simple s
 
 The borrow model is **instantaneous**: it prices the rate at the loop's post-draw utilization for a supplied `rateAtTarget`, but does **not** model the multi-day `rateAtTarget` adaptation (it drifts up under sustained high utilization and down when idle). Pass the current on-chain `rateAtTarget`, and treat sustained-high-utilization scenarios as understated. APR is simple-annualized (not compounded), so effective APY is marginally higher.
 
-Treat blocked scenarios as hard blockers for the given assumptions. Treat viable scenarios as candidates for deeper fork/live validation, not approval to broadcast.
+Treat blocked scenarios as hard blockers for the given assumptions. Treat `candidate` scenarios as candidates for deeper fork/live validation, not approval to broadcast.

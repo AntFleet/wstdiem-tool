@@ -19,7 +19,7 @@ numbers are real." Broadcast stays disabled (SPEC001).
 - **Part B — soft (GATED):** `curveDepthDiem` and `vaultApyBps`. These feed the model's softest,
   verdict-flipping inputs — curve depth drives SPEC002 §5's *primary* exit-slippage gate; vault APY is
   the leverage-amplified `netApy` term. Seeding them into **today's** model just makes a still-unsafe
-  `viable` look authoritative. Part B is blocked until **SPEC002 rev-2** (§4.1) lets the model consume
+  `candidate` look authoritative. Part B is blocked until **SPEC002 rev-2** (§4.1) lets the model consume
   them without over-selling.
 
 ## 2. Shared mechanics (both parts)
@@ -55,7 +55,7 @@ convert with `perSecWadToAprBps` (`src/loop/morphoRate.ts`). Requires **adding `
 
 - **`rateAtTarget == 0` (uninitialized IRM: the mapping is 0 until the market's first rate accrual)
   → fail-closed, NOT clamped.** The `[MORPHO_MIN…=10, MORPHO_MAX…=20000]` clamp must never absorb a
-  zero read (that would silently seed 0.1% APR and inflate `netApy` toward `viable`). On zero: error,
+  zero read (that would silently seed 0.1% APR and inflate `netApy` toward `candidate`). On zero: error,
   or fall back to the genesis 400 bps default with `rateAtTargetSource: "uninitialized-default"` and
   `authoritative: false`.
 - **On a direct-read revert → fail-closed** (throw, no report). The inversion fallback
@@ -83,7 +83,7 @@ for the flat model."* (Provenance would otherwise misrepresent the borrow side.)
 ## 4. Part B — soft seeds (GATED behind SPEC002 rev-2)
 
 > **Do not implement Part B until SPEC002 rev-2 (§4.1) ships.** Seeding these into the current model
-> over-sells `viable` on exactly the pool/leverage the tool exists to guard.
+> over-sells `candidate` on exactly the pool/leverage the tool exists to guard.
 
 ### 4.1 Prerequisite — SPEC002 rev-2 model fixes
 
@@ -92,7 +92,7 @@ for the flat model."* (Provenance would otherwise misrepresent the borrow side.)
   not the single-scalar linear `fee + trade/depth`. The `get_dy` reader already exists (SPEC001 §1).
   This is the correct layer for the imbalance fix, replacing the seed-layer `2×min` heuristic.
 - **Gas + MEV.** `oneTimeCostDiem` gains a gas line (`--gas-cost-diem`) + MEV caveat (SPEC002 §11) —
-  otherwise gas alone can flip a small-position `viable` negative.
+  otherwise gas alone can flip a small-position `candidate` negative.
 
 ### 4.2 `curveDepthDiem` ← live `get_dy` (once rev-2 lands)
 
@@ -157,7 +157,7 @@ reader.
 **The central product-safety rule: any degraded seed demotes the verdict.** When `authoritative:
 false` is tripped by *any* of — `rateAtTargetSource ≠ "direct"`; (Part B) `vaultApySource ≠
 "measured-7d"`, or `curveImbalanceRatio > threshold`, or `get_dy` unavailable — the **status token
-itself degrades on the verdict line** (e.g. `candidate — unverified seed`, not a plain `viable`), plus
+itself degrades on the verdict line** (e.g. `candidate — unverified seed`, not a plain `candidate`), plus
 a top banner. A warning read at the same glance as the verdict recalibrates trust; a `warnings[]` entry
 does not.
 
@@ -178,14 +178,14 @@ interface SeedProvenance {
 JSON nests `seedProvenance` (bigint legs as wei strings, SPEC002 §7.3) and a top-level
 `authoritative`. Table prints `seeded from block N (chainId 8453)`, per-field source, the
 (possibly degraded) verdict, and warnings. **JSON integrator note:** the per-scenario
-`results[].status` carries the *true gate* result (`viable`/`marginal`/`blocked`) — the degradation
+`results[].status` carries the *true gate* result (`candidate`/`marginal`/`blocked`) — the degradation
 lives only in the human table token; a JSON consumer must **AND-combine** `results[].status` with the
-top-level `authoritative` (a `viable` under `authoritative:false` is a candidate, not a pass).
+top-level `authoritative` (a `candidate` under `authoritative:false` is an unverified candidate, not a pass).
 
 ## 7. What it explicitly does NOT do
 
 Change the model beyond the §4.1 rev-2 prerequisite; sweep seeded dims; enable execution (broadcast
-fail-closed, SPEC001); or make a `viable` safe on a thin pool without the fork `get_dy` proof.
+fail-closed, SPEC001); or make a `candidate` safe on a thin pool without the fork `get_dy` proof.
 
 ## 8. Acceptance criteria (tests to write)
 

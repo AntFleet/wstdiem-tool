@@ -213,11 +213,13 @@ function loopShortfallCell(result: LoopSizingResult): string {
 
 /**
  * The rendered verdict token. When `authoritative` is false (a degraded chain seed,
- * SPEC003 §6) the token itself degrades — a `viable` reads `candidate — unverified seed`
- * at the same glance as the verdict — while the underlying gate status is untouched.
+ * SPEC003 §6) the token itself degrades — a `candidate` reads `candidate — unverified seed`
+ * at the same glance as the verdict — while the underlying gate status is untouched. The
+ * demotion is now carried by the `— unverified seed` suffix + the `UNVERIFIED SEED` banner
+ * + `authoritative:false` (SPEC002 rev-3 E5: same root token, no fourth status term).
  */
 function loopStatusToken(result: LoopSizingResult, authoritative: boolean | undefined): string {
-  if (authoritative === false && result.status === "viable") {
+  if (authoritative === false && result.status === "candidate") {
     return "candidate — unverified seed";
   }
   if (authoritative === false && result.status === "marginal") {
@@ -274,13 +276,13 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
   summaryTable.push(
     [
       "Totals",
-      `${report.summary.viable} viable, ${report.summary.marginal} marginal, ${report.summary.blocked} blocked of ${report.summary.total}`,
+      `${report.summary.candidate} candidate, ${report.summary.marginal} marginal, ${report.summary.blocked} blocked of ${report.summary.total} (candidate = clears all gates)`,
     ],
     [
-      "First viable by leverage",
-      report.summary.firstViableByLeverage.length === 0
+      "First candidate by leverage",
+      report.summary.firstCandidateByLeverage.length === 0
         ? "none"
-        : report.summary.firstViableByLeverage
+        : report.summary.firstCandidateByLeverage
             .map(
               (entry) =>
                 `${formatLeverage(entry.targetLeverageBps)}: curve ${formatWad(

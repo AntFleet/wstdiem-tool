@@ -4,16 +4,16 @@
 > (`src/loop/sizing.ts`, `src/loop/sizingScenarios.ts`, `src/loop/morphoRate.ts`). It supersedes the
 > non-normative runbook `docs/deployment/loop-sizing.md`. Consistent with SPEC001's monitor-and-
 > rehearse posture: sizing uses **no RPC, no broadcast, no deploy** — it is advisory decision-support
-> for whether a DIEM/wstDIEM loop size is economically viable *before* any (out-of-band) action.
+> for whether a DIEM/wstDIEM loop size is economically sound *before* any (out-of-band) action.
 
 ## 1. Purpose & scope
 
-`loop sizing` sweeps a grid of scenarios and, for each, decides **viable / marginal / blocked**
+`loop sizing` sweeps a grid of scenarios and, for each, decides **candidate / marginal / blocked**
 against **five economic gates** (Curve depth **+ exit slippage**, Morpho supply, health factor, net
 APY, unwind coverage) plus a `scenario_invalid` validity gate — six blockers total (§5); there is no
 standalone "slippage" blocker (it is folded into the Curve-depth gate). It is pure integer/bigint
 arithmetic over caller-supplied assumptions; it reads nothing
-from chain. A `viable` verdict is a candidate for deeper fork/live validation — **never** approval to
+from chain. A `candidate` verdict flags a scenario for deeper fork/live validation — **never** approval to
 act. All token amounts are WAD (1e18) bigint; all rates are basis points (bps) unless noted.
 
 ## 2. Input model
@@ -185,7 +185,7 @@ are **API-only edge cases**: the code pushes the blocker but then throws in `cei
 ```text
 status = blockers.length > 0 ? "blocked"
        : isMarginal          ? "marginal"
-       : "viable"
+       : "candidate"
 ```
 
 `isMarginal` (a scenario that passes every gate but sits near an edge):
@@ -203,7 +203,7 @@ The band constants (`0.8`, `1.1`, `+200 bps`) are fixed heuristics — not confi
 - `assumptions`: `curveDepthModel: "linear-per-leg-depth-share"`, `morphoLiquidityModel:
   "supply-minus-existing-borrow"`, `apyModel: "simple-annualized"`, `borrowRateModel: "flat" |
   "adaptive-curve-instantaneous"`, `readOnly: true`, `broadcastAvailable: false`, `auditRequired: true`.
-- `summary`: `{ total, viable, marginal, blocked, firstViableByLeverage[] }`. `firstViableByLeverage`
+- `summary`: `{ total, candidate, marginal, blocked, firstCandidateByLeverage[] }`. `firstCandidateByLeverage`
   selects, per leverage, the non-blocked scenario with the **smallest `requiredCurveDepthDiem`** (tie
   → smallest `requiredMorphoSupplyDiem`), ascending by leverage — the cheapest liquidity that unlocks
   each leverage.
@@ -241,7 +241,7 @@ chain. **All economic fields are populated even when `status = blocked`** (e.g. 
 ### 7.4 Table (`renderLoopSizingTable`)
 Columns: `Scenario | Lev | Equity | Borrow | Curve req/actual | Morpho req/actual | Slip entry/exit |
 HF | Util→Borrow APR | Net APY | Status[: firstBlocker]`. Summary rows: **Totals**
-(viable/marginal/blocked of total), **First viable by leverage**, **Borrow model** (adaptive-curve
+(candidate/marginal/blocked of total, with a `candidate = clears all gates` gloss), **First candidate by leverage**, **Borrow model** (adaptive-curve
 prints `rateAtTarget @90% util` and `@100% util` reference APRs; flat prints "borrow APY used as
 given"), **Read-only** (`broadcast disabled; audit required true`).
 
@@ -252,10 +252,10 @@ given"), **Read-only** (`broadcast disabled; audit required true`).
   (§4). On a drained/off-peg wstDIEM/DIEM pool — the market state this tool exists to evaluate — the
   DIEM side an exit draws into is nearly empty, so real slippage is dramatically worse and convex,
   yet the model has no notion of imbalance; dividing the trade by *total* depth also understates
-  trade-vs-traded-side by ~2×. A `viable, exit slip 296 bps` reading can therefore be badly
+  trade-vs-traded-side by ~2×. A `candidate, exit slip 296 bps` reading can therefore be badly
   optimistic on exactly the pool it is meant to guard against. This matters because the exit-slippage
   sub-condition of gate 1 is the **primary** safety constraint (§5) and it consumes this softest
-  input — treat `viable` on a thin/off-peg pool as unsafe pending a fork `get_dy` proof. (Textbook
+  input — treat `candidate` on a thin/off-peg pool as unsafe pending a fork `get_dy` proof. (Textbook
   linear-vs-convex StableSwap error is second-order: the slippage cap already blocks trades > ~3% of
   depth.)
 - **`vaultApyBps` is an assumed input, not measured — and leverage amplifies it.** `grossVaultApyBps
@@ -269,19 +269,19 @@ given"), **Read-only** (`broadcast disabled; audit required true`).
   equal to Morpho's oracle; `--wstdiem-nav` is a typed-in value.
 - **Single-block snapshot — no price path.** The model prices today's liquidity at t=0;
   `holdingPeriodDays` only annualizes one-time cost. It assumes exit-time depth equals entry and that
-  nothing is liquidated in between. "Viable for 365 days" is not a year of modeled risk.
+  nothing is liquidated in between. "Candidate for 365 days" is not a year of modeled risk.
 - **Gas and MEV are excluded** from `oneTimeCostDiem` (entry slip + exit slip + flash fee only).
   Entry/exit are multi-call txns and the Curve leg is MEV-exposed on exactly the thin pool this
   targets; at default ~100-DIEM sizes gas alone can flip `netApyBps` negative while status reads
-  `viable`.
+  `candidate`.
 - **Morpho liquidity**: `supply − existing borrow`, capped at `maxMorphoUtilizationBps`.
 - **APY**: simple-annualized, not compounded; effective APY is marginally higher.
 - **Borrow rate**: **instantaneous** at post-draw utilization for the supplied `rateAtTarget`; does
   **not** model multi-day `rateAtTarget` drift (rises under sustained high utilization, falls when
   idle), so sustained-high-utilization scenarios are **understated** — pass the current on-chain
   `rateAtTarget`.
-- Not a substitute for a fork-backed `get_dy` proof or live readiness evidence. `viable` = candidate
-  for validation, not approval to broadcast (broadcast is disabled — SPEC001 §5, §9).
+- Not a substitute for a fork-backed `get_dy` proof or live readiness evidence. `candidate` = a
+  candidate for validation, not approval to broadcast (broadcast is disabled — SPEC001 §5, §9).
 
 ## 9. Acceptance criteria (test-traced)
 
@@ -289,7 +289,7 @@ given"), **Read-only** (`broadcast disabled; audit required true`).
   zero supply → `morpho_supply_insufficient` first; borrow-cost > yield → `net_apy_below_threshold`
   (netApy `< 0`).
 - **Formulas**: 100 DIEM @1.5× → `borrowAmountDiem=50`, `requiredCurveDepthDiem=1000`,
-  `requiredMorphoSupplyDiem=62.5`, `healthFactorBps=25800`, `status=viable`.
+  `requiredMorphoSupplyDiem=62.5`, `healthFactorBps=25800`, `status=candidate`.
 - **Adaptive vs flat**: a shallow pool yields strictly higher `postDrawUtilizationBps` /
   `effectiveBorrowApyBps` than a deep one for the same borrow; a loop whose own draw spikes
   utilization (~80%) blocks under adaptive-curve while flat pencils it out positive.
@@ -320,17 +320,17 @@ These are **not** in the current engine or this contract; they are the review's 
 
 - **Shortfall outputs (highest value).** Expose per-scenario `curveDepthShortfallDiem`,
   `morphoSupplyShortfallDiem`, `netApyShortfallBps`, so `firstBlocker` becomes actionable ("blocked
-  by how much / what would unblock it"). The data exists — `firstViableByLeverage` already reasons
-  about the cheapest unlock.
+  by how much / what would unblock it"). The data exists — `firstViableByLeverage` (renamed
+  `firstCandidateByLeverage` in rev-3 E5) already reasons about the cheapest unlock.
 - **Gas + MEV cost.** A `--gas-cost-diem` input folded into `oneTimeCostDiem`, with an MEV caveat
   scaling to pool thinness. At default sizes this flips verdicts (§8).
 - **Liquidation-distance output.** Margin-to-liquidation / liquidation price, since `healthFactorBps`
   is a pure leverage/LLTV identity (parallels SPEC001 Open Question #9).
 - **Stressed-rate netAPY.** A second net APY at `borrowAprAtFullUtilizationBps` (or a rateAtTarget-
   drift multiplier) to bound the sustained-high-utilization case.
-- **Naming.** `viable` is the loudest token in a tool that cannot execute; consider
+- **Naming (SHIPPED — rev-3 E5).** `viable` is the loudest token in a tool that cannot execute; consider
   `candidate`/`passes-gates`, and reconsider `firstViableByLeverage` (which answers "how big can I
-  go") as a recommendation surface.
+  go") as a recommendation surface. *Resolved: renamed to `candidate` / `firstCandidateByLeverage` in rev-3 E5.*
 - Reconcile the default `rateAtTargetApyBps = 400` ("conservative") against the runbook-recommended
   live value (~217 on 2026-07-11).
 
@@ -384,6 +384,7 @@ rev-1 exit slip `4 + ratioBps(150,10000) = 154 bps → viable`, but rev-2 (legs 
 ratioBps(150,5000) = 304 bps > 300 → blocked`. **Resolution: the canonical §9 example re-pins to
 `curveDepthDiem = 20000`** (legs 10000 → 154 bps → stays `viable`); the §4 worked reference is
 slippage-free and is unaffected. Every rev-1 fixture with a nonzero exit trade re-baselines (§AC).
+(Historical: the clean-pass token above reads `viable` — the pre-E5 name; it is `candidate` post-rev-3 E5.)
 
 **Offline is conservative by design.** A purely-offline run (no `get_dy`, R2) may now `blocked` on the
 2×-inflated *linear* estimate — intentional: offline slippage is an explicit conservative upper bound,
@@ -439,7 +440,7 @@ offline engine has no basis for; the operator supplies a real figure or is warne
 
 **MEV stays a caveat, not a number** — unbounded and venue/timing-specific. §8 documents it scales with
 pool thinness on the Curve leg, and like the imbalance caveat, on a thin/imbalanced pool the MEV caveat
-**rides the verdict token** — because `viable` is most MEV-misleading exactly there.
+**rides the verdict token** — because `candidate` is most MEV-misleading exactly there.
 
 ### §7 field additions
 - **Scenario inputs:** `curveDiemLegDiem` / `curveWstDiemLegDiem` (WAD bigint, grid dims), `gasCostDiem`
@@ -452,7 +453,7 @@ pool thinness on the Curve leg, and like the imbalance caveat, on a thin/imbalan
   `get_dy` quote is injected (R2); offline is a conservative upper bound."
 - §8 → gas is a **first-class input but defaults to 0** (a default run still excludes it, warned on the
   verdict); MEV still excluded numerically (verdict-adjacent caveat).
-- **§9 / §4** → the canonical `viable` example re-pins to `curveDepthDiem = 20000` (R1); the §4 worked
+- **§9 / §4** → the canonical `candidate` example re-pins to `curveDepthDiem = 20000` (R1); the §4 worked
   reference is slippage-free and unchanged.
 - §11 → "leg-aware/`get_dy` slippage" and "gas + MEV" are promoted to this committed rev-2; shortfall
   outputs, liquidation-distance, and a per-leg depth-sufficiency check remain §11 future.
@@ -461,15 +462,15 @@ pool thinness on the Curve leg, and like the imbalance caveat, on a thin/imbalan
 1. Exit slippage divides by the DIEM leg, entry by the wstDIEM leg (the verified direction map).
 2. Imbalanced fixture (DIEM leg ≪ wstDIEM leg) → high exit / low entry slippage; mirror pool → reverse.
 3. `--curve-depth-diem T` → balanced legs `T/2`; exit `= fee + ratioBps(trade, T/2)`. **Re-baseline every
-   rev-1 fixture with a nonzero exit trade** — the `viable` case (re-pinned to 20000), the grid
-   `firstViableByLeverage`, and the `isMarginal` band — not only depth cases.
+   rev-1 fixture with a nonzero exit trade** — the `candidate` case (re-pinned to 20000), the grid
+   `firstCandidateByLeverage`, and the `isMarginal` band — not only depth cases.
 4. `--curve-depth-diem` with either leg flag → `scenario_invalid` (mutual exclusion).
 5. `externalExitSlippageBps` replaces the exit value at **all four** sites — assert it moves gate 1,
    `netApy`, the `unwind_not_covered` backstop, AND the marginal classification; a negative/`>10000`
    value → `scenario_invalid`.
 6. Seam-vs-rail: `externalExitSlippageBps` via `quoteCurveExitRoute` + `priceImpactBps` equals what
    `routeQuote.ts` produces for the same `wstDiemIn` at the same block (guards denomination + no divergence).
-7. `gasCostDiem` folds into `oneTimeCostDiem` → `netApyBps` (large-enough gas flips a marginal `viable`
+7. `gasCostDiem` folds into `oneTimeCostDiem` → `netApyBps` (large-enough gas flips a marginal `candidate`
    to `net_apy_below_threshold`); `gasCostDiem == 0` emits the `gas unmodeled` warning.
 8. Total reconstruction: `curveDepthDiem = diemLeg + wstDiemLeg` feeds gate 1's depth-sufficiency
    sub-condition and the `requiredCurve*` outputs.
@@ -628,6 +629,11 @@ imbalanced fixtures.
   larger, balanced-pool-affecting change; rev-3 keeps the proportional 50/50 split of the position-based aggregate.
 
 ### E5 — Rename `viable` → `candidate` **[BREAKING output rename]**
+
+> **E5 SHIPPED.** The `viable` → `candidate` rename landed atomically across the enum, `summary` fields,
+> `loopStatusToken`, the table (with a `candidate = clears all gates` gloss), SPEC003 §6's integrator-note
+> prose, the runbook, and all tests — zero residual `"viable"` in code/JSON/tests (AC5). No gate, computation,
+> or verdict changed; a scenario that was `viable` is now `candidate` (`marginal`/`blocked` unchanged).
 
 `viable` is the loudest possible token in a tool that **cannot execute** and whose own §1 says a pass is only a
 candidate for deeper fork/live validation. rev-3 renames the clean-pass status so the token matches its meaning:

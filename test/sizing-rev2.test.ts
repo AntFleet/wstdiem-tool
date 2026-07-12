@@ -28,9 +28,9 @@ function scenario(overrides: Partial<Parameters<typeof sizeLoopScenario>[0]> = {
   };
 }
 
-// A comfortably-viable base: deep balanced legs (total 100000) + deep Morpho supply, so gate
+// A comfortably-candidate base: deep balanced legs (total 100000) + deep Morpho supply, so gate
 // changes come only from the field under test.
-function viableBase(overrides: Partial<Parameters<typeof sizeLoopScenario>[0]> = {}) {
+function candidateBase(overrides: Partial<Parameters<typeof sizeLoopScenario>[0]> = {}) {
   return scenario({
     curveDiemLegDiem: parseDecimalToUnits("50000"),
     curveWstDiemLegDiem: parseDecimalToUnits("50000"),
@@ -263,32 +263,32 @@ describe("SPEC002 rev-2 — leg-aware slippage (R1)", () => {
 describe("SPEC002 rev-2 — externalExitSlippageBps seam (R2)", () => {
   // Criterion 5: the injected value replaces the exit value at ALL FOUR consumption sites.
   it("replaces the exit value at gate 1", () => {
-    const base = sizeLoopScenario(viableBase());
+    const base = sizeLoopScenario(candidateBase());
     expect(base.blockers).not.toContain("curve_liquidity_insufficient");
     expect(base.exitSlippageSource).toBe("estimate");
 
     // 500 bps > the 300 bps cap trips gate 1's exit sub-condition (depth is ample).
-    const injected = sizeLoopScenario(viableBase({ externalExitSlippageBps: 500 }));
+    const injected = sizeLoopScenario(candidateBase({ externalExitSlippageBps: 500 }));
     expect(injected.exitSlippageSource).toBe("get_dy");
     expect(injected.exitSlippageBps).toBe(500);
     expect(injected.blockers).toContain("curve_liquidity_insufficient");
   });
 
   it("replaces the exit value in the exit-slippage cost feeding netApy", () => {
-    const base = sizeLoopScenario(viableBase());
+    const base = sizeLoopScenario(candidateBase());
     // 250 bps stays under the cap (no gate-1 block) but raises the exit cost, so netApy drops.
-    const injected = sizeLoopScenario(viableBase({ externalExitSlippageBps: 250 }));
+    const injected = sizeLoopScenario(candidateBase({ externalExitSlippageBps: 250 }));
     expect(injected.blockers).not.toContain("curve_liquidity_insufficient");
     expect(injected.netApyBps).toBeLessThan(base.netApyBps);
   });
 
   it("replaces the exit value in the unwind_not_covered backstop", () => {
     // Relax the slippage cap so gate 1 does not pre-empt the unwind backstop (SPEC002 §5).
-    const base = sizeLoopScenario(viableBase({ maxSlippageBps: 10_000 }));
+    const base = sizeLoopScenario(candidateBase({ maxSlippageBps: 10_000 }));
     expect(base.blockers).not.toContain("unwind_not_covered");
 
     const injected = sizeLoopScenario(
-      viableBase({ maxSlippageBps: 10_000, externalExitSlippageBps: 9000 }),
+      candidateBase({ maxSlippageBps: 10_000, externalExitSlippageBps: 9000 }),
     );
     // unwindDiemOut = floor(150 * (10000-9000)/10000) = 15 < unwindRepayRequired 51.5.
     expect(injected.unwindDiemOut).toBe(parseDecimalToUnits("15"));
@@ -296,25 +296,25 @@ describe("SPEC002 rev-2 — externalExitSlippageBps seam (R2)", () => {
   });
 
   it("replaces the exit value in the isMarginal band", () => {
-    const base = sizeLoopScenario(viableBase());
-    expect(base.status).toBe("viable");
+    const base = sizeLoopScenario(candidateBase());
+    expect(base.status).toBe("candidate");
     // 260 bps > 0.8*300 = 240 (near the cap) but <= cap -> classifies marginal, not blocked.
-    const injected = sizeLoopScenario(viableBase({ externalExitSlippageBps: 260 }));
+    const injected = sizeLoopScenario(candidateBase({ externalExitSlippageBps: 260 }));
     expect(injected.blockers).toHaveLength(0);
     expect(injected.status).toBe("marginal");
   });
 
   it("marks a negative or >10000 injected value as scenario_invalid, and keeps the bounds valid", () => {
-    const negative = sizeLoopScenario(viableBase({ externalExitSlippageBps: -1 }));
+    const negative = sizeLoopScenario(candidateBase({ externalExitSlippageBps: -1 }));
     expect(negative.firstBlocker).toBe("scenario_invalid");
-    const tooLarge = sizeLoopScenario(viableBase({ externalExitSlippageBps: 10_001 }));
+    const tooLarge = sizeLoopScenario(candidateBase({ externalExitSlippageBps: 10_001 }));
     expect(tooLarge.firstBlocker).toBe("scenario_invalid");
 
     // The [0, 10000] bounds are valid.
-    expect(sizeLoopScenario(viableBase({ externalExitSlippageBps: 0 })).blockers).not.toContain(
+    expect(sizeLoopScenario(candidateBase({ externalExitSlippageBps: 0 })).blockers).not.toContain(
       "scenario_invalid",
     );
-    expect(sizeLoopScenario(viableBase({ externalExitSlippageBps: 10_000 })).blockers).not.toContain(
+    expect(sizeLoopScenario(candidateBase({ externalExitSlippageBps: 10_000 })).blockers).not.toContain(
       "scenario_invalid",
     );
   });
@@ -322,13 +322,13 @@ describe("SPEC002 rev-2 — externalExitSlippageBps seam (R2)", () => {
 
 describe("SPEC002 rev-2 — gas in one-time cost (R3)", () => {
   // Criterion 7: gas folds into oneTimeCostDiem -> netApy; gasCostDiem == 0 emits the warning.
-  it("folds gasCostDiem into oneTimeCostDiem and flips a viable scenario on large-enough gas", () => {
-    const noGas = sizeLoopScenario(viableBase());
+  it("folds gasCostDiem into oneTimeCostDiem and flips a candidate scenario on large-enough gas", () => {
+    const noGas = sizeLoopScenario(candidateBase());
     expect(noGas.warnings).toContain("gas unmodeled");
     expect(noGas.netApyBps).toBeGreaterThan(0);
     expect(noGas.blockers).not.toContain("net_apy_below_threshold");
 
-    const withGas = sizeLoopScenario(viableBase({ gasCostDiem: parseDecimalToUnits("25") }));
+    const withGas = sizeLoopScenario(candidateBase({ gasCostDiem: parseDecimalToUnits("25") }));
     // Exact fold: the only delta is the 25 DIEM gas term.
     expect(withGas.oneTimeCostDiem).toBe(noGas.oneTimeCostDiem + parseDecimalToUnits("25"));
     expect(withGas.netApyBps).toBeLessThan(noGas.netApyBps);
@@ -354,7 +354,7 @@ describe("SPEC002 rev-3 — E1 shortfall fields", () => {
   // AC1: a passing gate → every shortfall is exactly 0 (the "0 iff sub-condition passes" invariant).
   it("reports every shortfall as 0 on a passing (candidate) scenario", () => {
     const result = sizeLoopScenario(scenario());
-    expect(result.status).toBe("viable"); // unchanged verdict (Wave 1 additive)
+    expect(result.status).toBe("candidate"); // unchanged verdict (Wave 1 additive)
     expect(result.curveDiemLegSlippageShortfallDiem).toBe(0n);
     expect(result.curveDiemLegShortfallDiem).toBe(0n);
     expect(result.curveWstDiemLegShortfallDiem).toBe(0n);
@@ -581,7 +581,7 @@ describe("SPEC002 rev-3 — E3 stressed-rate netAPY (output + proximity-gated ve
     );
     expect(lowUtil.blockers).toEqual([]);
     expect(lowUtil.postDrawUtilizationBps).toBeLessThanOrEqual(7000);
-    expect(lowUtil.status).toBe("viable"); // clean-pass (pre-E5 token); NOT marginal
+    expect(lowUtil.status).toBe("candidate"); // clean-pass (post-E5 token); NOT marginal
     expect(lowUtil.warnings).not.toContain("net apy negative under sustained max utilization");
     // The number is still emitted, and is identical to the high-util case (supply-independent).
     expect(lowUtil.netApyStressedBps).toBe(highUtil.netApyStressedBps);
@@ -681,13 +681,13 @@ describe("SPEC002 rev-3 — E4 per-leg curve depth-sufficiency (backstop gate)",
     expect(belowRequirement.blockers).toContain("curve_liquidity_insufficient");
   });
 
-  // A representative deep balanced fixture's verdict is UNCHANGED by E4 (still clean-pass "viable"
+  // A representative deep balanced fixture's verdict is UNCHANGED by E4 (still clean-pass "candidate"
   // pre-E5; no new curve block).
   it("leaves a representative balanced fixture's verdict unchanged", () => {
-    const result = sizeLoopScenario(viableBase());
+    const result = sizeLoopScenario(candidateBase());
     expect(result.scenario.curveDiemLegDiem).toBe(result.scenario.curveWstDiemLegDiem); // balanced
     expect(result.blockers).not.toContain("curve_liquidity_insufficient");
-    expect(result.status).toBe("viable");
+    expect(result.status).toBe("candidate");
   });
 
   // AC4 (exit-leg dominated — proves E4's DIEM-leg half is dormant offline). A thin-DIEM-leg pool at
