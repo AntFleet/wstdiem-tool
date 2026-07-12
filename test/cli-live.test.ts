@@ -152,21 +152,37 @@ describe("compiled CLI live simulation mode", () => {
 
   it("returns ok:false with blocked liveSimulation details when no RPC URL is configured", async () => {
     await execFileAsync("npm", ["run", "build"]);
+    // Hermetic "no RPC" setup: use an offline config (writeLiveConfig sets `primaryUrl:` empty →
+    // null, which deepMerge lets override the env-derived default) AND clear the RPC env vars.
+    // Without both, a local `.env` with a real BASE_RPC_URL builds a live client, and the request
+    // falls through to UNSUPPORTED_EXECUTOR_ACTION (exit-only executor) instead of the intended
+    // SIMULATION_CLIENT_MISSING — a false red locally while green in CI (which has no `.env`).
+    const configPath = writeLiveConfig();
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    delete env.BASE_RPC_URL;
+    delete env.BASE_RPC_URL_FALLBACK_1;
+    delete env.BASE_RPC_URL_FALLBACK_2;
     let stdout = "";
     try {
-      await execFileAsync("node", [
-        "dist/cli/index.js",
-        "--json",
-        "loop",
-        "simulate",
-        "--action",
-        "open",
-        "--target-leverage",
-        "3",
-        "--initial-diem",
-        "100",
-        "--live",
-      ]);
+      await execFileAsync(
+        "node",
+        [
+          "dist/cli/index.js",
+          "--config",
+          configPath,
+          "--json",
+          "loop",
+          "simulate",
+          "--action",
+          "exit",
+          "--target-leverage",
+          "3",
+          "--initial-diem",
+          "100",
+          "--live",
+        ],
+        { env },
+      );
     } catch (error) {
       stdout = (error as { stdout: string }).stdout;
     }
@@ -182,6 +198,46 @@ describe("compiled CLI live simulation mode", () => {
     };
     expect(parsed.ok).toBe(false);
     expect(parsed.error.code).toBe("LIVE_SIMULATION_BLOCKED");
+    expect(parsed.data.liveSimulation.status).toBe("blocked");
+    expect(parsed.data.liveSimulation.error.code).toBe("SIMULATION_CLIENT_MISSING");
+  }, 15_000);
+
+  it("treats an empty-string BASE_RPC_URL as no RPC (fail-closed, not a live client)", async () => {
+    await execFileAsync("npm", ["run", "build"]);
+    // A `BASE_RPC_URL=` with no value is a common .env misconfig. `??` would leave it as "",
+    // which is not `=== null` — it would bypass the no-RPC guard and build a client against an
+    // empty/invalid URL. defaults.ts normalizes empty/whitespace → null, so this must fail closed
+    // with SIMULATION_CLIENT_MISSING, not a live client (and not a URL-schema crash under --config).
+    const env: NodeJS.ProcessEnv = { ...process.env, BASE_RPC_URL: "" };
+    delete env.BASE_RPC_URL_FALLBACK_1;
+    delete env.BASE_RPC_URL_FALLBACK_2;
+    let stdout = "";
+    try {
+      await execFileAsync(
+        "node",
+        [
+          "dist/cli/index.js",
+          "--json",
+          "loop",
+          "simulate",
+          "--action",
+          "exit",
+          "--target-leverage",
+          "3",
+          "--initial-diem",
+          "100",
+          "--live",
+        ],
+        { env },
+      );
+    } catch (error) {
+      stdout = (error as { stdout: string }).stdout;
+    }
+    const parsed = JSON.parse(stdout) as {
+      ok: boolean;
+      data: { liveSimulation: { status: string; error: { code: string } } };
+    };
+    expect(parsed.ok).toBe(false);
     expect(parsed.data.liveSimulation.status).toBe("blocked");
     expect(parsed.data.liveSimulation.error.code).toBe("SIMULATION_CLIENT_MISSING");
   }, 15_000);

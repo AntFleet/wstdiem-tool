@@ -4,11 +4,17 @@ import type { AppConfig } from "../types/domain.js";
 export const DEFAULT_CONFIG: AppConfig = {
   chainId: 8453,
   rpc: {
-    primaryUrl: process.env.BASE_RPC_URL ?? null,
+    // Normalize empty/whitespace env values to null: `??` only catches null/undefined, so a
+    // `BASE_RPC_URL=` with no value (a common .env misconfig) would otherwise become "" — which
+    // is NOT `=== null`, bypassing the no-RPC fail-closed guard and silently building a client
+    // against viem's default public endpoint for safety-critical reads. Empty = no RPC configured.
+    primaryUrl: process.env.BASE_RPC_URL?.trim() || null,
     fallbackUrls: [
       process.env.BASE_RPC_URL_FALLBACK_1,
       process.env.BASE_RPC_URL_FALLBACK_2,
-    ].filter((url): url is string => Boolean(url)),
+    ]
+      .map((url) => url?.trim())
+      .filter((url): url is string => Boolean(url)),
     timeoutMs: 10_000,
   },
   contracts: {
