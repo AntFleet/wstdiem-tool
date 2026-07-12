@@ -288,7 +288,7 @@ approval pass → fixes → merge behind green gates:
 Full suite 213 pass / 1 pre-existing `cli-live` fail throughout. **The spec-first pipeline has now shipped SPEC003
 (A + B-1 + B-2), SPEC002 rev-2, and SPEC002 rev-3 (4 waves) — every unit spec → review → executor → approval → merge.**
 
-## Phase 5 — SPEC004 (scheduler exit-code contract, resolves SPEC001 OQ#7) — REVIEWED + LOCKED (2026-07-12)
+## Phase 5 — SPEC004 (scheduler exit-code contract, resolves SPEC001 OQ#7) — SHIPPED (2026-07-12, 0de89ed)
 
 `SPEC004.md` gives the live-monitoring commands (`status`, `watch --once`, `monitor`) a severity-ordered process
 exit code so a cron/systemd keeper can gate on `$?` — today a CRITICAL alert exits `0`. Ladder:
@@ -309,9 +309,18 @@ assertion" note; plus a runbook gating recipe (`node dist/…`, not `npm run`), 
 dead-man's-switch hazards, and the breaking-change consumer list (CI, Fly healthcheck). Open questions recorded
 (setup-blocker distinct code; canonical scheduled command; missing-config vs runtime-unreachable).
 
-**Next: implement SPEC004** (spec → executor → approval gate → merge), incl. the `liveAssessed` flag, the
-`classifyMonitoringOutcome` helper wired inside each action, the JSON `outcome`/`exitCode` fields, the runbook
-recipe, and `test/cli-exit-code.test.ts` (compiled-CLI exit codes, incl. the C1 partial-read regression).
+**IMPLEMENTED + SHIPPED (0de89ed).** `src/cli/exitCode.ts` (`classifyMonitoringOutcome` read-completed gate +
+`isMonitorAssessed`), the `liveAssessed` C1 fix in `status.ts`, the classifier wired inside each of
+status/watch/monitor (human-string path also sets the code; `tool-error(1)` never overwritten), JSON
+`outcome`/`exitCode`, the runbook recipe in `monitoring.md`, and `test/cli-exit-code.test.ts` (19 tests).
+**Approval gate found two more real defects, both fixed + re-approved:** a **HIGH** — `status`/`watch --once`
+read only block+vault (never position/curve/morpho/oracle), so `evaluateAlerts` cannot raise a danger CRITICAL on
+their snapshot; they reach only `{0,10,20}` and my locked §9 overclaimed `{0,10,20,30}`. Reconciled: they are
+**vault-liveness snapshots**, danger-gate `-ge 30` on **`monitor`** only (resolves OQ-b; §1/§9 + `monitoring.md`
+callout). And a **MEDIUM** — `liveAssessed` was set on any non-throwing `collectVaultMetrics` return, including the
+`asset()!=DIEM` early-return that doesn't complete the read → false `nominal(0)`; fixed by keying `liveAssessed`
+off `validity.vault` (read-completed). typecheck/lint/build clean; **232/233** (1 pre-existing unrelated
+`cli-live` fail). SPEC001 OQ#7 CLOSED.
 
 ## Traceability & verification
 
