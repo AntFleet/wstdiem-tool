@@ -183,6 +183,12 @@ export class Storage {
   }
 
   listVaultAssetSamplesForWindow(windowStart: number): StoredVaultAssetSample[] {
+    // The window is assembled from two non-overlapping partitions: the `initial` anchor is the last
+    // sample AT OR BEFORE `windowStart` (the vault state entering the window), and `rows` are the
+    // samples STRICTLY AFTER it. The range must use `>` (not `>=`): a sample whose timestamp is
+    // exactly `windowStart` already qualifies as the anchor, so `>=` would return it in both queries
+    // and duplicate it in the merged array — inflating any length-based consumer (e.g. the
+    // MIN_VAULT_APY_WINDOW_SAMPLES density floor in loop/fromChainSeed.ts).
     const initial = this.db
       .prepare(
         `SELECT timestamp, vault_total_assets_diem
@@ -196,7 +202,7 @@ export class Storage {
       .prepare(
         `SELECT timestamp, vault_total_assets_diem
          FROM metric_snapshots
-         WHERE timestamp >= ?
+         WHERE timestamp > ?
          ORDER BY timestamp ASC`,
       )
       .all(windowStart) as Array<{ timestamp: number; vault_total_assets_diem: string }>;

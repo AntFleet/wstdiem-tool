@@ -91,4 +91,22 @@ describe("SQLite persistence", () => {
     expect(storage.listTxHistory(10)).toHaveLength(1);
     storage.close();
   });
+
+  it("returns a sample exactly at windowStart once (anchor only, not duplicated by the range)", () => {
+    const file = path.join(os.tmpdir(), `wstdiem-storage-boundary-${Date.now()}.sqlite`);
+    created.push(file);
+    const storage = new Storage(file);
+    // A sample whose timestamp is EXACTLY windowStart satisfies both the `<= windowStart` anchor
+    // query and (before the fix) the `>= windowStart` range query, so it appeared twice in the
+    // merged array. With a strict `> windowStart` range it is only the anchor — exactly once.
+    storage.insertMetricSnapshot({ ...makeEmptySnapshot(100), vaultTotalAssetsDiem: 100n * WAD });
+    storage.insertMetricSnapshot({ ...makeEmptySnapshot(200), vaultTotalAssetsDiem: 110n * WAD });
+    const samples = storage.listVaultAssetSamplesForWindow(100);
+    expect(samples).toEqual([
+      { timestamp: 100, totalAssetsDiem: 100n * WAD },
+      { timestamp: 200, totalAssetsDiem: 110n * WAD },
+    ]);
+    expect(samples.filter((sample) => sample.timestamp === 100)).toHaveLength(1);
+    storage.close();
+  });
 });
