@@ -249,7 +249,7 @@ preset's curve intent). Gates: typecheck + lint clean; new `test/sizing-rev2.tes
 exit quote from `get_dy(1→0)` via the existing `quoteCurveExitRoute` + `priceImpactBps` rail (filling
 `externalExitSlippageBps`), plus `vaultApyBps` (×10000-corrected), into the now-implemented rev-2 model.
 
-## Phase 4 — SPEC002 rev-3 (§11 actionability & honesty refinements) — REVIEWED + LOCKED (2026-07-12)
+## Phase 4 — SPEC002 rev-3 (§11 actionability & honesty refinements) — SHIPPED (2026-07-12); §11 RETIRED
 
 Promotes the **remaining §11 backlog** (rev-2 took slippage/gas/MEV) into the contract as the `## rev-3` section
 of `SPEC002.md`. Six items: **E1** shortfall outputs (distance-to-clear, incl. a slippage-clearing depth lever for
@@ -271,6 +271,22 @@ atomic set extended to SPEC003 §6's integrator-note prose + a table gloss; plus
 **Staging — four waves (not one unit):** W1 additive (E1/E2/E6 + §7 reconcile) → W2 E3 (proximity-gated) → W3 E4
 (backstop) → W4 E5 (breaking rename, atomic). Each wave = executor → adversarial approval gate → merge behind green
 gates, per the standing rule.
+
+**ALL FOUR WAVES SHIPPED 2026-07-12 — §11 fully retired.** Each ran spec-contract → executor (opus) → adversarial
+approval pass → fixes → merge behind green gates:
+- **W1 (fc9dc66)** — E1 shortfalls (incl. the primary-gate `curveDiemLegSlippageShortfallDiem` unlock), E2
+  `structuralMarginToLiquidationBps`, E6 docs, §7.1-7.3 reconcile. Additive, zero verdict change. Approval APPROVE;
+  the one Medium (untested depth-share positive case) closed pre-commit.
+- **W2 (326afe6)** — E3 stressed-rate netAPY, proximity-gated (`STRESSED_UTIL_BAND_BPS = 7000`) so the 4×-of-400
+  stress doesn't blanket the grid with warnings. No fixture flipped (all low-util). Approval APPROVE; a flat-mode
+  direction caveat folded into the spec.
+- **W3 (ba9d1db)** — E4 per-leg curve backstop. Provably tighten-only + balanced-preserving (floor/ceil algebra);
+  reframed honestly as a dormant-offline backstop whose only value is the entry leg. Zero fixtures flipped. Approval APPROVE.
+- **W4 (88a22f1)** — E5 `viable`→`candidate` breaking rename, atomic across enum/summary/`loopStatusToken`/SPEC003 §6
+  prose/docs/tests; SPEC003 demotion preserved (test-locked both branches); zero machine-contract residual. Approval APPROVE.
+
+Full suite 213 pass / 1 pre-existing `cli-live` fail throughout. **The spec-first pipeline has now shipped SPEC003
+(A + B-1 + B-2), SPEC002 rev-2, and SPEC002 rev-3 (4 waves) — every unit spec → review → executor → approval → merge.**
 
 ## Traceability & verification
 
