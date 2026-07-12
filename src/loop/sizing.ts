@@ -109,6 +109,31 @@ export interface LoopSizingResult {
   healthFactorBps: number | null;
   unwindDiemOut: bigint;
   unwindRepayRequiredDiem: bigint;
+  // SPEC002 rev-3 E1 — shortfall (distance-to-clear) fields. Always populated, each ≥ 0 and exactly
+  // `0` when its sub-condition passes, so a consumer reads "blocked by how much / what unblocks it"
+  // uniformly. Pure derived arithmetic from values already computed above.
+  //
+  // `curveDiemLegSlippageShortfallDiem` is the DIEM leg depth that brings the EXIT-slippage
+  // sub-condition (the PRIMARY curve gate) under the cap. Its type is `bigint | number`: normally a
+  // bigint wei amount, but `Number.POSITIVE_INFINITY` when `maxSlippageBps ≤ curveFeeBps` (the exit
+  // can never clear the cap by adding depth). The number-Infinity representation is chosen so the
+  // EXISTING output.ts JSON replacer (non-finite number → `"Infinity"`) serializes it without any new
+  // sentinel — a bigint has no Infinity value, so the unclearable case is carried as a number.
+  curveDiemLegSlippageShortfallDiem: bigint | number;
+  // Per-leg depth-SHARE gaps (E4 backstop's sub-condition; surfaced here in Wave 1, gate unchanged).
+  curveDiemLegShortfallDiem: bigint;
+  curveWstDiemLegShortfallDiem: bigint;
+  // bps over the slippage cap. Mirrors `exitSlippageBps`'s finiteness: `+Infinity` on a zero drawn leg
+  // (offline), which the replacer emits as `"Infinity"` — NOT clamped to 0 (a clamp would read as
+  // "slippage is fine" on the most-drained pool).
+  exitSlippageExcessBps: number;
+  morphoSupplyShortfallDiem: bigint;
+  netApyShortfallBps: number;
+  // SPEC002 rev-3 E2 — entry-time STRUCTURAL liquidation-distance identity (the fractional decline in
+  // collateral value, bps, absorbed before HF reaches 1.0). NOT a live margin: it inherits
+  // `healthFactorBps`'s limits verbatim (assumes static NAV/oracle). `null` mirrors
+  // `healthFactorBps === null` (debt-free; the engine yields null, never +Infinity); `0` when HF ≤ 10000.
+  structuralMarginToLiquidationBps: number | null;
 }
 
 /**
@@ -406,6 +431,52 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
     }
   }
 
+  // SPEC002 rev-3 E1 — shortfall (distance-to-clear) fields. All ≥ 0 and exactly 0 when the
+  // corresponding sub-condition passes; derived purely from values already computed above.
+  // Depth that brings the linear EXIT slippage under the cap: fee + ratioBps(position, diemLeg) ≤
+  // maxSlippageBps ⇔ diemLeg ≥ ceil(position·BPS/(maxSlippageBps − curveFeeBps)). When
+  // maxSlippageBps ≤ curveFeeBps the cap is unreachable by depth → +Infinity (see interface note).
+  const requiredDiemLegForSlippage =
+    scenario.maxSlippageBps > scenario.curveFeeBps
+      ? mulDivCeil(
+          positionCollateralDiem,
+          BPS_DENOMINATOR,
+          scenario.maxSlippageBps - scenario.curveFeeBps,
+        )
+      : null;
+  const curveDiemLegSlippageShortfallDiem: bigint | number =
+    requiredDiemLegForSlippage === null
+      ? Number.POSITIVE_INFINITY
+      : requiredDiemLegForSlippage > scenario.curveDiemLegDiem
+        ? requiredDiemLegForSlippage - scenario.curveDiemLegDiem
+        : 0n;
+  const curveDiemLegShortfallDiem =
+    requiredCurveDiemDepth > scenario.curveDiemLegDiem
+      ? requiredCurveDiemDepth - scenario.curveDiemLegDiem
+      : 0n;
+  const curveWstDiemLegShortfallDiem =
+    requiredCurveWstDiemDepth > scenario.curveWstDiemLegDiem
+      ? requiredCurveWstDiemDepth - scenario.curveWstDiemLegDiem
+      : 0n;
+  // +Infinity when exitSlippageBps is +Infinity (zero drawn leg, offline); never clamped to 0.
+  const exitSlippageExcessBps =
+    exitSlippageBps > scenario.maxSlippageBps ? exitSlippageBps - scenario.maxSlippageBps : 0;
+  const morphoSupplyShortfallDiem =
+    requiredMorphoSupplyDiem > scenario.morphoSupplyDiem
+      ? requiredMorphoSupplyDiem - scenario.morphoSupplyDiem
+      : 0n;
+  const netApyShortfallBps = Math.max(0, scenario.minNetApyBps - netApyBps);
+  // SPEC002 rev-3 E2 — entry-time structural liquidation-distance (see interface note).
+  const structuralMarginToLiquidationBps =
+    healthFactorBps === null
+      ? null
+      : Math.max(
+          0,
+          Math.round(
+            (BPS_DENOMINATOR * (healthFactorBps - BPS_DENOMINATOR)) / healthFactorBps,
+          ),
+        );
+
   const baseResult = {
     scenario,
     blockers,
@@ -436,6 +507,13 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
     healthFactorBps,
     unwindDiemOut,
     unwindRepayRequiredDiem,
+    curveDiemLegSlippageShortfallDiem,
+    curveDiemLegShortfallDiem,
+    curveWstDiemLegShortfallDiem,
+    exitSlippageExcessBps,
+    morphoSupplyShortfallDiem,
+    netApyShortfallBps,
+    structuralMarginToLiquidationBps,
   };
   return {
     ...baseResult,

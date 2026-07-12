@@ -200,7 +200,7 @@ The band constants (`0.8`, `1.1`, `+200 bps`) are fixed heuristics — not confi
 ### 7.1 Report (`LoopSizingReport`)
 `{ assumptions, results[], summary }`.
 
-- `assumptions`: `curveDepthModel: "linear-depth-share"`, `morphoLiquidityModel:
+- `assumptions`: `curveDepthModel: "linear-per-leg-depth-share"`, `morphoLiquidityModel:
   "supply-minus-existing-borrow"`, `apyModel: "simple-annualized"`, `borrowRateModel: "flat" |
   "adaptive-curve-instantaneous"`, `readOnly: true`, `broadcastAvailable: false`, `auditRequired: true`.
 - `summary`: `{ total, viable, marginal, blocked, firstViableByLeverage[] }`. `firstViableByLeverage`
@@ -212,18 +212,28 @@ The band constants (`0.8`, `1.1`, `+200 bps`) are fixed heuristics — not confi
 Per scenario: `scenario, status, blockers[], firstBlocker, positionCollateralDiem, borrowAmountDiem,
 equityDiem, requiredCurveDepthDiem, requiredCurveDiemDepth, requiredCurveWstDiemDepth,
 requiredMorphoSupplyDiem, availableMorphoBorrowDiem, estimatedEntrySlippageBps,
-estimatedExitSlippageBps, flashFeeCostDiem, oneTimeCostDiem, annualizedOneTimeCostBps,
-grossVaultApyBps, borrowRateModel, postDrawUtilizationBps, effectiveBorrowApyBps,
-borrowAprAtTargetBps, borrowAprAtFullUtilizationBps, borrowCostApyBps, netApyBps, healthFactorBps,
-unwindDiemOut, unwindRepayRequiredDiem`.
+exitSlippageBps, exitSlippageSource, warnings, flashFeeCostDiem, oneTimeCostDiem,
+annualizedOneTimeCostBps, grossVaultApyBps, borrowRateModel, postDrawUtilizationBps,
+effectiveBorrowApyBps, borrowAprAtTargetBps, borrowAprAtFullUtilizationBps, borrowCostApyBps,
+netApyBps, healthFactorBps, unwindDiemOut, unwindRepayRequiredDiem`.
+
+- **rev-2 additions:** `exitSlippageBps` (renamed from `estimatedExitSlippageBps`; holds the leg-aware
+  estimate or a live `get_dy` quote), `exitSlippageSource` (`"get_dy" | "estimate"`), `warnings[]`.
+- **rev-3 additions (E1/E2, always populated per §7.3):** `curveDiemLegSlippageShortfallDiem`
+  (`bigint | number` — a wei amount, or the number `Infinity` when `maxSlippageBps ≤ curveFeeBps`),
+  `curveDiemLegShortfallDiem`, `curveWstDiemLegShortfallDiem`, `morphoSupplyShortfallDiem` (bigint wei),
+  `exitSlippageExcessBps`, `netApyShortfallBps` (number bps; `exitSlippageExcessBps` may be `"Infinity"`),
+  `structuralMarginToLiquidationBps` (`number | null`).
 
 ### 7.3 JSON envelope & serialization
 `--json` wraps the report in the standard `CliJsonOutput` (`ok`, `command: "loop sizing"`, `chainId`,
 `data`). **All bigint token amounts serialize as integer wei strings** (e.g. `100 DIEM →
 "100000000000000000000"`). bps/ratios are numbers, **except non-finite bps serialize as the strings
-`"Infinity"` / `"-Infinity"`** — `estimatedEntrySlippageBps`/`estimatedExitSlippageBps` when
-`curveDepthDiem = 0` (which is the **first default grid value** and the whole `current-zero` preset,
-so a default `--json` run emits them), and `annualizedOneTimeCostBps` when `initialCollateralDiem = 0`.
+`"Infinity"` / `"-Infinity"`** — `estimatedEntrySlippageBps`/`exitSlippageBps` (and, mirroring the
+latter, `exitSlippageExcessBps`) when `curveDepthDiem = 0` (which is the **first default grid value**
+and the whole `current-zero` preset, so a default `--json` run emits them), and
+`annualizedOneTimeCostBps` when `initialCollateralDiem = 0`. The rev-3 `curveDiemLegSlippageShortfallDiem`
+also serializes `"Infinity"` (its number-Infinity sentinel) when `maxSlippageBps ≤ curveFeeBps`.
 `healthFactorBps` may be `null`. `chainId` is the configured static value — nothing is read from
 chain. **All economic fields are populated even when `status = blocked`** (e.g. `postDrawUtilization
 → WAD` when supply is 0), so a consumer must not treat blocked ⇒ null.

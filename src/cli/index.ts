@@ -259,7 +259,7 @@ loop
   )
   .option(
     "--rate-at-target-apy-bps <bps>",
-    "adaptive-curve: AdaptiveCurveIrm rate-at-target (90% util) APY in bps; on-chain ~217, Morpho genesis 400",
+    "adaptive-curve: AdaptiveCurveIrm rate-at-target (90% util) APY in bps. Default 400 is the conservative Morpho-genesis value (deliberately pessimistic — a higher assumed borrow rate blocks more, never less); pass the live value (--rate-at-target-apy-bps 217) or --from-chain for realistic sizing",
     "400",
   )
   .option(

@@ -171,6 +171,46 @@ function formatHealthFactor(healthFactorBps: number | null): string {
   return healthFactorBps === null ? "Infinity" : (healthFactorBps / 10_000).toFixed(2);
 }
 
+// A DIEM shortfall that may be the number sentinel `Infinity` (the unclearable-slippage-depth case,
+// SPEC002 rev-3 E1) rather than a bigint wei amount.
+function formatShortfallDiem(value: bigint | number): string {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? `${formatWad(BigInt(Math.trunc(value)))} DIEM` : "Infinity";
+  }
+  return `${formatWad(value)} DIEM`;
+}
+
+/**
+ * The `firstBlocker`'s distance-to-clear plus the structural liquidation margin (SPEC002 rev-3 E1/E2).
+ * For a slippage block it surfaces the DIEM leg depth that clears the exit-slippage cap; for a Morpho
+ * block the supply gap; for a net-APY block the yield gap. `structuralMarginToLiquidationBps` is always
+ * shown so blocked/near-edge rows read "how far to liquidation" at a glance.
+ */
+function loopShortfallCell(result: LoopSizingResult): string {
+  const parts: string[] = [];
+  switch (result.firstBlocker) {
+    case "curve_liquidity_insufficient":
+      parts.push(`+${formatShortfallDiem(result.curveDiemLegSlippageShortfallDiem)} leg (exit slip)`);
+      break;
+    case "morpho_supply_insufficient":
+      parts.push(`+${formatWad(result.morphoSupplyShortfallDiem)} DIEM supply`);
+      break;
+    case "net_apy_below_threshold":
+      parts.push(`+${formatBps(result.netApyShortfallBps)} net APY`);
+      break;
+    default:
+      break;
+  }
+  parts.push(
+    `margin-to-liq ${
+      result.structuralMarginToLiquidationBps === null
+        ? "n/a"
+        : formatBps(result.structuralMarginToLiquidationBps)
+    }`,
+  );
+  return parts.join("; ");
+}
+
 /**
  * The rendered verdict token. When `authoritative` is false (a degraded chain seed,
  * SPEC003 §6) the token itself degrades — a `viable` reads `candidate — unverified seed`
@@ -199,6 +239,7 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
       "HF",
       "Util→Borrow APR",
       "Net APY",
+      "Shortfall/Margin-to-liq",
       "Status",
     ],
     wordWrap: true,
@@ -221,6 +262,7 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
       formatHealthFactor(result.healthFactorBps),
       `${formatBps(result.postDrawUtilizationBps)}→${formatBps(result.effectiveBorrowApyBps)}`,
       formatBps(result.netApyBps),
+      loopShortfallCell(result),
       statusCell,
     ]);
   }

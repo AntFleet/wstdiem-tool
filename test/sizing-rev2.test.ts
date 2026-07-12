@@ -347,3 +347,168 @@ describe("SPEC002 rev-2 — gas in one-time cost (R3)", () => {
     expect(scenarios.every((s) => s.gasCostDiem === parseDecimalToUnits("3"))).toBe(true);
   });
 });
+
+// SPEC002 rev-3 Wave 1 — additive shortfall/legibility fields (E1/E2). Purely additive: these tests
+// assert new fields only and never re-assert a status/blocker (Wave 1 changes zero verdicts).
+describe("SPEC002 rev-3 — E1 shortfall fields", () => {
+  // AC1: a passing gate → every shortfall is exactly 0 (the "0 iff sub-condition passes" invariant).
+  it("reports every shortfall as 0 on a passing (candidate) scenario", () => {
+    const result = sizeLoopScenario(scenario());
+    expect(result.status).toBe("viable"); // unchanged verdict (Wave 1 additive)
+    expect(result.curveDiemLegSlippageShortfallDiem).toBe(0n);
+    expect(result.curveDiemLegShortfallDiem).toBe(0n);
+    expect(result.curveWstDiemLegShortfallDiem).toBe(0n);
+    expect(result.exitSlippageExcessBps).toBe(0);
+    expect(result.morphoSupplyShortfallDiem).toBe(0n);
+    expect(result.netApyShortfallBps).toBe(0);
+  });
+
+  // AC1: on a slippage-blocked scenario the DIEM-leg slippage shortfall is exact AND directional —
+  // adding it to the DIEM leg brings the (offline/linear) exit slippage to ≤ the cap.
+  it("computes an exact, directional curveDiemLegSlippageShortfallDiem for a slippage block", () => {
+    const thinDiemLeg = sizeLoopScenario(
+      scenario({
+        curveFeeBps: 4,
+        maxSlippageBps: 300,
+        curveDiemLegDiem: parseDecimalToUnits("5000"),
+        curveWstDiemLegDiem: parseDecimalToUnits("50000"),
+        morphoSupplyDiem: parseDecimalToUnits("100000"),
+      }),
+    );
+    // Blocks on the curve gate via the exit-slippage sub-condition (154bps cap exceeded).
+    expect(thinDiemLeg.firstBlocker).toBe("curve_liquidity_insufficient");
+    // position = ceil(100 × 1.5) = 150 DIEM; required leg = ceil(150·BPS/(300−4)).
+    const position = parseDecimalToUnits("150");
+    const requiredDiemLeg =
+      (position * 10_000n + (296n - 1n)) / 296n; // ceilDiv(position*BPS, maxSlip−fee)
+    const expectedShortfall = requiredDiemLeg - parseDecimalToUnits("5000");
+    expect(thinDiemLeg.curveDiemLegSlippageShortfallDiem).toBe(expectedShortfall);
+    expect(typeof thinDiemLeg.curveDiemLegSlippageShortfallDiem).toBe("bigint");
+    // exitSlippageExcessBps > 0 iff exitSlippageBps > cap: 4 + 300 = 304 → excess 4.
+    expect(thinDiemLeg.exitSlippageExcessBps).toBe(thinDiemLeg.exitSlippageBps - 300);
+    expect(thinDiemLeg.exitSlippageExcessBps).toBeGreaterThan(0);
+    // Directional: leg + shortfall clears the cap (offline/linear).
+    const cured = sizeLoopScenario(
+      scenario({
+        curveFeeBps: 4,
+        maxSlippageBps: 300,
+        curveDiemLegDiem: parseDecimalToUnits("5000") + expectedShortfall,
+        curveWstDiemLegDiem: parseDecimalToUnits("50000"),
+        morphoSupplyDiem: parseDecimalToUnits("100000"),
+      }),
+    );
+    expect(cured.exitSlippageBps).toBeLessThanOrEqual(300);
+    expect(cured.exitSlippageExcessBps).toBe(0);
+    expect(cured.curveDiemLegSlippageShortfallDiem).toBe(0n);
+  });
+
+  // AC1 (E4-backstop depth-SHARE gap): a thin-TOTAL-depth pool reports exact per-leg shortfalls,
+  // and on a BALANCED pool each is HALF the TOTAL shortfall (not half the pool) — SPEC002 §E1.
+  it("computes exact per-leg curve depth-share shortfalls, split evenly on a balanced pool", () => {
+    const thinDepth = sizeLoopScenario(
+      scenario({
+        curveDiemLegDiem: parseDecimalToUnits("10"),
+        curveWstDiemLegDiem: parseDecimalToUnits("10"),
+        morphoSupplyDiem: parseDecimalToUnits("100000"),
+      }),
+    );
+    // position = ceil(100 × 1.5) = 150; requiredCurveDepthDiem = ceil(150·BPS/1500) = 1000; per-leg = 500.
+    const requiredPerLeg = parseDecimalToUnits("500");
+    const leg = parseDecimalToUnits("10");
+    expect(thinDepth.curveDiemLegShortfallDiem).toBe(requiredPerLeg - leg); // 490
+    expect(thinDepth.curveWstDiemLegShortfallDiem).toBe(requiredPerLeg - leg); // 490
+    // Balanced → each leg shortfall is HALF the TOTAL shortfall (requiredTotal 1000 − actualTotal 20).
+    const totalShortfall = parseDecimalToUnits("1000") - parseDecimalToUnits("20"); // 980
+    expect(thinDepth.curveDiemLegShortfallDiem + thinDepth.curveWstDiemLegShortfallDiem).toBe(
+      totalShortfall,
+    );
+    // Directional: raising each leg to its per-leg requirement clears both shortfalls.
+    const cured = sizeLoopScenario(
+      scenario({
+        curveDiemLegDiem: requiredPerLeg,
+        curveWstDiemLegDiem: requiredPerLeg,
+        morphoSupplyDiem: parseDecimalToUnits("100000"),
+      }),
+    );
+    expect(cured.curveDiemLegShortfallDiem).toBe(0n);
+    expect(cured.curveWstDiemLegShortfallDiem).toBe(0n);
+  });
+
+  // AC1: curveDiemLegSlippageShortfallDiem is the number sentinel Infinity when maxSlippage ≤ fee
+  // (the cap can never be cleared by depth), and the existing JSON replacer emits "Infinity".
+  it("emits Infinity for curveDiemLegSlippageShortfallDiem when maxSlippageBps ≤ curveFeeBps", () => {
+    const unclearable = sizeLoopScenario(
+      scenario({ curveFeeBps: 4, maxSlippageBps: 4 }),
+    );
+    expect(unclearable.curveDiemLegSlippageShortfallDiem).toBe(Number.POSITIVE_INFINITY);
+    const json = JSON.parse(stringifyJson(unclearable));
+    expect(json.curveDiemLegSlippageShortfallDiem).toBe("Infinity");
+  });
+
+  // AC1: a zero drawn (DIEM) leg → exitSlippageBps is +Infinity offline, so exitSlippageExcessBps is
+  // +Infinity too (NOT clamped to 0), serialized "Infinity". The slippage-depth shortfall stays a
+  // finite bigint (maxSlippage 300 > fee 4).
+  it("keeps exitSlippageExcessBps Infinity on a zero drawn leg (never clamped to 0)", () => {
+    const drained = sizeLoopScenario(
+      scenario({ curveDiemLegDiem: 0n, curveWstDiemLegDiem: 0n }),
+    );
+    expect(drained.exitSlippageBps).toBe(Number.POSITIVE_INFINITY);
+    expect(drained.exitSlippageExcessBps).toBe(Number.POSITIVE_INFINITY);
+    expect(typeof drained.curveDiemLegSlippageShortfallDiem).toBe("bigint");
+    const json = JSON.parse(stringifyJson(drained));
+    expect(json.exitSlippageExcessBps).toBe("Infinity");
+  });
+
+  // AC1: morpho + net-apy shortfalls are max(0, req − actual) and directional.
+  it("reports morphoSupplyShortfallDiem and netApyShortfallBps as max(0, req − actual)", () => {
+    const morphoShort = sizeLoopScenario(
+      scenario({
+        curveDiemLegDiem: parseDecimalToUnits("50000"),
+        curveWstDiemLegDiem: parseDecimalToUnits("50000"),
+        morphoSupplyDiem: parseDecimalToUnits("10"),
+      }),
+    );
+    expect(morphoShort.firstBlocker).toBe("morpho_supply_insufficient");
+    expect(morphoShort.morphoSupplyShortfallDiem).toBe(
+      morphoShort.requiredMorphoSupplyDiem - parseDecimalToUnits("10"),
+    );
+    expect(morphoShort.morphoSupplyShortfallDiem).toBeGreaterThan(0n);
+
+    const apyShort = sizeLoopScenario(
+      scenario({
+        curveDiemLegDiem: parseDecimalToUnits("50000"),
+        curveWstDiemLegDiem: parseDecimalToUnits("50000"),
+        morphoSupplyDiem: parseDecimalToUnits("100000"),
+        minNetApyBps: 100_000, // unreachable → guaranteed net-apy block
+      }),
+    );
+    expect(apyShort.firstBlocker).toBe("net_apy_below_threshold");
+    expect(apyShort.netApyShortfallBps).toBe(100_000 - apyShort.netApyBps);
+    expect(apyShort.netApyShortfallBps).toBeGreaterThan(0);
+  });
+});
+
+describe("SPEC002 rev-3 — E2 structuralMarginToLiquidationBps", () => {
+  // AC2: 10000×(HF−10000)/HF rounded; HF 25800 → 6124.
+  it("re-expresses a finite HF as structural liquidation distance (25800 → 6124)", () => {
+    const result = sizeLoopScenario(scenario());
+    expect(result.healthFactorBps).toBe(25_800);
+    expect(result.structuralMarginToLiquidationBps).toBe(6124);
+  });
+
+  // AC2: null mirrors a debt-free (HF null) position — never +Infinity.
+  it("is null when healthFactorBps is null (debt-free position)", () => {
+    const debtFree = sizeLoopScenario(scenario({ targetLeverageBps: 10_000 }));
+    expect(debtFree.healthFactorBps).toBeNull();
+    expect(debtFree.structuralMarginToLiquidationBps).toBeNull();
+  });
+
+  // AC2: 0 when HF ≤ 10000 (leverage/LLTV puts the position at or past liquidation at entry).
+  it("is 0 when HF ≤ 10000", () => {
+    const lowHf = sizeLoopScenario(
+      scenario({ lltvBps: 5000, targetLeverageBps: 30_000 }),
+    );
+    expect(lowHf.healthFactorBps).toBe(7500);
+    expect(lowHf.structuralMarginToLiquidationBps).toBe(0);
+  });
+});
