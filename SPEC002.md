@@ -466,3 +466,257 @@ pool thinness on the Curve leg, and like the imbalance caveat, on a thin/imbalan
 9. Zero drawn leg → `+Infinity` slippage (fail-safe, as rev-1; JSON serializes `"Infinity"` per §7.3).
 10. Integration: SPEC003 Part B seeds both legs from `balances` + the exit quote from `get_dy`, and its
     soft-seed verdict-demotion (SPEC003 §6) fires on an imbalanced pool or a non-`get_dy` exit source.
+
+## rev-3 — actionability & honesty refinements (FORWARD — not yet implemented)
+
+> **Committed forward changes** promoting the remaining §11 backlog into the contract, now that rev-2
+> (slippage + gas) has shipped. Scope: make blocked verdicts *actionable* (shortfalls), make the health
+> signal *legible* (liquidation distance), *bound* the sustained-high-utilization case (stressed netAPY),
+> add a per-leg curve **backstop** gate, and *stop over-claiming* (rename `viable` → `candidate`; reconcile
+> the default rate). §1–§10 + rev-2 describe shipped behavior. Per-item blast radius (set by the two-agent
+> review gate, both ACCEPT-WITH-RESERVATIONS): **E1/E2** additive · **E6** docs · **E3** verdict-affecting-lite
+> (feeds `isMarginal`, so it re-baselines marginal-band fixtures) · **E4** a dormant backstop under defaults
+> (dominated by the slippage sub-condition; verdict-affecting only under relaxed slippage / a tight share cap)
+> · **E5** BREAKING rename. Ship in four **waves** (see "Staging"), not one unit. Same spec-first gate applies
+> (review → lock → executor → approval gate → merge).
+
+### E1 — Shortfall outputs (highest value; additive, no verdict change)
+
+Every gate today answers only pass/fail. rev-3 adds per-scenario *distance-to-clear* fields, so
+`firstBlocker` becomes "blocked by how much / what unblocks it." All are **always populated** (§7.3),
+**≥ 0**, and **0 exactly when their sub-condition passes** (so a consumer reads them uniformly). They
+are pure derived arithmetic from values the engine already computes:
+
+Notation: `position = positionCollateralDiem`, `BPS = 10000`.
+
+```text
+curveDiemLegSlippageShortfallDiem = max(0, position·BPS/(maxSlippageBps − curveFeeBps) − curveDiemLegDiem)  // DIEM depth to bring EXIT slippage under the cap — the PRIMARY curve gate's unlock
+curveDiemLegShortfallDiem         = max(0, requiredCurveDiemDepth    − curveDiemLegDiem)      // exit-leg depth-SHARE gap (E4 backstop gate)
+curveWstDiemLegShortfallDiem      = max(0, requiredCurveWstDiemDepth − curveWstDiemLegDiem)   // entry-leg depth-SHARE gap (E4 backstop gate)
+exitSlippageExcessBps             = max(0, exitSlippageBps − maxSlippageBps)                  // bps over the cap (slippage sub-condition)
+morphoSupplyShortfallDiem         = max(0, requiredMorphoSupplyDiem − morphoSupplyDiem)       // supply gap
+netApyShortfallBps                = max(0, minNetApyBps − netApyBps)                          // yield gap, bps
+```
+
+- **The exit-slippage sub-condition is the *primary* Curve constraint under defaults (§5)** — depth-share (E4)
+  is a dormant backstop. So `curveDiemLegSlippageShortfallDiem` is the actionable "how much DIEM depth unblocks
+  the exit" number; `exitSlippageExcessBps` reports the bps overage; and the per-leg depth-share shortfalls map
+  to E4's backstop gate (meaningful only when it binds). Together they explain both curve sub-conditions —
+  earlier this field-set omitted the slippage-side depth lever, leaving the primary gate without a concrete unlock.
+- `curveDiemLegSlippageShortfallDiem` is derived from the **linear** exit-slippage model (the same model as the
+  offline estimate). When `exitSlippageSource == "get_dy"` the gate uses the live convex quote, so this field is
+  an **indicative** linear figure, not the exact unlock — the report must not present it as precise under a live quote.
+- **`+Infinity` handling.** If `maxSlippageBps ≤ curveFeeBps` the exit can never clear the cap by adding depth →
+  `curveDiemLegSlippageShortfallDiem = +Infinity`. If a drawn leg is 0 (offline), `exitSlippageBps` is `+Infinity`
+  so `exitSlippageExcessBps` is `+Infinity` too — both serialize `"Infinity"` (§7.3); do **not** clamp to 0, which
+  would read as "slippage is fine" on the most-drained pool. (Under an injected `get_dy` quote `exitSlippageBps`
+  is the finite quote regardless of leg size, so `exitSlippageExcessBps` is then finite.)
+- On a **balanced** pool each depth-share leg shortfall is `max(0, requiredTotal/2 − total/2)` — i.e. **half the
+  *total* shortfall**, not "half the pool."
+- **No Morpho borrow-availability shortfall field** — the borrow-availability sub-condition
+  (`availableMorphoBorrowDiem < borrowAmountDiem`) is already fully described by the existing
+  `availableMorphoBorrowDiem` / `borrowAmountDiem` outputs; adding a third derived field is redundant.
+
+### E2 — Liquidation-distance output (additive; a legibility re-expression, **not** new information)
+
+`healthFactorBps` is a pure entry-time leverage/LLTV identity (§8). rev-3 re-expresses it in the terms
+an operator reasons in — *how far can the collateral value fall before liquidation* — without pretending
+to add a live price path:
+
+```text
+structuralMarginToLiquidationBps = healthFactorBps === null ? null
+                                 : max(0, round(10000 × (healthFactorBps − 10000) / healthFactorBps))
+```
+
+the fractional decline in collateral value (bps) the position absorbs before `HF` reaches `1.0` (liquidation).
+`null` mirrors `healthFactorBps === null` (a debt-free position — the engine yields `null`, **never** `+Infinity`,
+so no `+Infinity` branch is needed); `0` when `HF ≤ 1.0`.
+
+- **The name encodes the nature, because names travel into JSON and operator mental models without their caveats.**
+  This is an **entry-time structural identity** derived purely from leverage/LLTV — *not* a live liquidation
+  distance: it assumes the wstDIEM/DIEM collateral valuation does not move (no oracle/depeg path), and the tool
+  has **no automated liquidation protection** (SPEC001 §5), so a misread as a live margin invites exactly the
+  false complacency the tool exists to prevent. Hence `structuralMarginToLiquidationBps`, not `marginToLiquidationBps`.
+- **Coordinate with SPEC001 Open Question #9** (which proposes a margin-to-liquidation on the *live* `monitor`
+  dashboard): the live-dashboard value and this offline-structural value must **not** share an ambiguous token.
+- **§8 gains a caveat** that this inherits `healthFactorBps`'s limits verbatim. A concrete `liquidationPriceRatio`
+  is deferred (wstDIEM NAV ratchets ≥ 1, so a single "price" is ambiguous).
+
+### E3 — Stressed-rate netAPY (output + **proximity-gated** verdict-ride) **[VERDICT-AFFECTING-lite]**
+
+Bound the sustained-high-utilization case with a second netAPY priced at the 100%-utilization borrow rate:
+
+```text
+borrowCostStressedApyBps = round((leverage − 1) × borrowAprAtFullUtilizationBps)   // 4× rateAtTarget cap
+netApyStressedBps        = grossVaultApyBps − borrowCostStressedApyBps − annualizedOneTimeCostBps
+```
+
+`borrowAprAtFullUtilizationBps` is already computed for both models (`sizing.ts:350`), so this is well-defined
+in `flat` mode too (it is not the flat `borrowApyBps`, and rev-3 states so). It is **never a blocker** (that would
+over-block on a rate the loop may never sustain).
+
+**`netApyStressedBps` is always emitted as a number** (informational, unconditional). But the verdict-ride is
+**proximity-gated** to avoid alarm fatigue: because the stress prices at `4×rateAtTarget` and the default
+`rateAtTarget` is a deliberately-pessimistic 400 (→ 1600 bps stressed borrow, E6), an ungated warning would fire
+across most of the grid even in today's ~42%-util regime where full utilization is remote. So the
+`net apy negative under sustained max utilization` **warning + `isMarginal` demotion fire only when the loop is
+actually near the stress regime**:
+
+```text
+stressedNearFail = postDrawUtilizationBps > STRESSED_UTIL_BAND_BPS   // = 7000 (70%), a fixed heuristic (§6), tunable
+                   && netApyStressedBps < minNetApyBps
+```
+
+- **`isMarginal` predicate (pinned):** add `stressedNearFail` as a fourth `isMarginal` condition (alongside
+  slippage-near-cap / HF-near-floor / APY-near-floor, §6). A scenario that passes all gates but is
+  `stressedNearFail` classifies `marginal`, not `candidate`. The predicate is evaluated on the same `baseResult`
+  (`netApyStressedBps` is a §7 result field, populated before `isMarginal`).
+- **The warning rides `blocked` verdicts too** — like rev-2's `gas unmodeled`, `warnings[]` is independent of
+  `status`; a scenario blocked on another gate still surfaces the sustained-utilization warning when
+  `stressedNearFail` holds. (`status` is decided by `blockers`; the warning is advisory.)
+
+### E4 — Per-leg curve depth-sufficiency **[BACKSTOP gate — dormant under defaults]**
+
+rev-2's gate 1 depth sub-condition keys off the *reconstructed total* (`curveDepthDiem < requiredCurveDepthDiem`).
+rev-3 splits it **per-leg**:
+
+```text
+// gate 1 depth sub-condition (replaces the total check; the slippage sub-condition is unchanged)
+curveDiemLegDiem < requiredCurveDiemDepth  ||  curveWstDiemLegDiem < requiredCurveWstDiemDepth
+```
+
+**What it actually enforces (corrected from the review — do not over-claim).** This is **not** a "position ≤ share
+of the drawn leg" cap. `requiredCurveDiemDepth = requiredCurveDepthDiem / 2` (`sizing.ts:278`) — it splits the
+*existing aggregate* `requiredCurveDepthDiem` **proportionally** (each leg must hold ≥ its half). That proportional
+split — not a per-leg trade cap — is precisely what preserves balanced-pool equivalence. It is a **looser** per-leg
+concentration bound than "the exit ≤ maxShare of the DIEM leg."
+
+**Safety & scope (verified by the review).** The change is **tighten-only and balanced-preserving**: `total <
+requiredTotal ⇒ at least one leg short` (so every old block still blocks), and `total ≥ requiredTotal ⇒ both legs
+pass` under the floor/remainder split — so **balanced fixtures (incl. the canonical §9 case, legs 10000/10000) are
+provably unchanged**. Only imbalanced pools with a leg below its half-requirement newly block. Re-baseline only
+imbalanced fixtures.
+
+**Where it actually bites (this is a backstop, not a headline tightening):**
+- **Exit / DIEM leg — dormant offline.** E4 blocks the DIEM leg at `position/diemLeg > 2·maxCurvePositionShareBps/BPS`
+  (≥ 30% at the default share cap 1500). The exit-**slippage** sub-condition (§5) already blocks at
+  `position/diemLeg > (maxSlippageBps − curveFeeBps)/BPS` (≤ 2.96% given the zod cap `maxSlippageBps ≤ 300`). Slippage
+  therefore fires **~10× earlier for every valid offline config** — the DIEM-leg depth check can only bind when a live
+  `get_dy` quote has replaced `exitSlippageBps` (from-chain), or the operator sets `maxCurvePositionShareBps < ~148 bps`
+  / `--slippage-bps > ~3000`. Under defaults it changes **zero** verdicts (a dormant backstop, like `unwind_not_covered`, §5).
+- **Entry / wstDIEM leg — this is E4's real value.** There is **no entry-slippage blocker** (rev-2 R2; gate 1 checks
+  only `exitSlippageBps`). So the entry-leg depth check is the **only** constraint guarding a thin *entry* leg — the
+  one place E4 earns a verdict change offline.
+- `requiredCurveDepthDiem` (total) stays an output and the `firstCandidateByLeverage` ranking key (E5) — the aggregate
+  is still the right *ranking* heuristic even though the *gate* is per-leg.
+- **Deferred (out of rev-3 scope, noted):** keying each leg's requirement to its *actual* trade (`positionCollateralDiem`
+  for the DIEM leg, `borrowAmountDiem` for the wstDIEM leg) would be a truer "cap for the trade it faces," but it is a
+  larger, balanced-pool-affecting change; rev-3 keeps the proportional 50/50 split of the position-based aggregate.
+
+### E5 — Rename `viable` → `candidate` **[BREAKING output rename]**
+
+`viable` is the loudest possible token in a tool that **cannot execute** and whose own §1 says a pass is only a
+candidate for deeper fork/live validation. rev-3 renames the clean-pass status so the token matches its meaning:
+
+- `LoopSizingStatus`: `"viable" | "marginal" | "blocked"` → **`"candidate" | "marginal" | "blocked"`**.
+- `summary.viable` (count) → `summary.candidate`; `summary.firstViableByLeverage` → `summary.firstCandidateByLeverage`.
+- Table token `viable` → `candidate`; the "Totals" / "First … by leverage" summary rows and all prose follow.
+- **Decision (both reviewers): full enum rename, not display-only.** The JSON status enum changes too — display-only
+  would leave the machine contract saying `viable` for no benefit (pre-production, broadcast-disabled, no external
+  consumers). `candidate` also *aligns* with SPEC003's existing `candidate — unverified seed`, which is a reason to
+  prefer it over alternatives like `passes-gates`.
+- **Land atomically — E5 is one change touching ALL of:** (a) the `LoopSizingStatus` enum + status classification
+  (`sizing.ts`), (b) `LoopSizingReport.summary` (`viable`→`candidate`, `firstViableByLeverage`→`firstCandidateByLeverage`)
+  + `buildLoopSizingReport`, (c) `loopStatusToken` + the two summary render sites (`output.ts`), (d) **SPEC003 §6's
+  JSON-integrator-note prose, which literally enumerates `viable`/`marginal`/`blocked`** and instructs AND-combining
+  with `authoritative` — update that prose, not just the code, and (e) the three test files
+  (`test/sizing.test.ts`, `test/sizing-rev2.test.ts`, `test/from-chain-seed.test.ts`). Splitting E5 across units leaves
+  the enum and the demotion signal disagreeing in the interim.
+- **Demotion contrast (SPEC003 §6).** Post-rename an authoritative pass reads `candidate`; a degraded seed reads
+  `candidate — unverified seed` — **same root token**, so the at-a-glance downgrade is now carried by the
+  `— unverified seed` suffix + the `UNVERIFIED SEED` banner + `authoritative:false` (the banner is **load-bearing** —
+  keep it). `loopStatusToken` (`output.ts:180`) updates its `result.status === "viable"` check to `"candidate"`.
+- **`candidate` vs `marginal` legibility.** Both read as "maybe"; the ladder is `blocked < marginal < candidate`.
+  Mitigate in the **table** with a one-word gloss (e.g. `candidate = clears all gates`) or ordering/emphasis — do
+  **not** invent a fourth term.
+
+### E6 — Default `rateAtTargetApyBps` reconciliation (documentation; **keep the conservative default**)
+
+The default `rateAtTargetApyBps = 400` (Morpho genesis) is ~2× the live ~217 bps (2026-07-11). rev-3 **keeps 400**
+as the default because a *higher* assumed borrow rate is the safe error direction for a sizing tool (it understates
+netAPY and blocks more, never less). It is a documentation reconciliation, not a value change:
+
+- The `--rate-at-target-apy-bps` help text and §3.2 state plainly: `400` is the conservative genesis default; pass
+  the live value (`--rate-at-target-apy-bps 217`) or `--from-chain` (SPEC003, seeds it directly) for realistic sizing.
+- **Decision (both reviewers): keep 400.** A false-negative (block a fine scenario) is far cheaper than a
+  false-positive for a tool that must not green-light a bad loop, and the assumed rate is always visible (§7.4 prints
+  `rateAtTarget @90% util`; `borrowAprAtTargetBps` is an output). The pessimism compounds through E3's `4×` multiplier
+  (→ 1600 bps stressed borrow) — but that is handled by **E3's proximity gate**, not by weakening this default.
+
+### §7 field additions (rev-3)
+
+- **Result (`LoopSizingResult`):** `curveDiemLegSlippageShortfallDiem`, `curveDiemLegShortfallDiem`,
+  `curveWstDiemLegShortfallDiem`, `morphoSupplyShortfallDiem` (WAD bigint, wei-string per §7.3 — the two
+  slippage/depth DIEM fields may be `"Infinity"`); `exitSlippageExcessBps`, `netApyShortfallBps`, `netApyStressedBps`
+  (number bps; `exitSlippageExcessBps` may be `"Infinity"`); `structuralMarginToLiquidationBps` (number | null). All
+  always populated (§7.3).
+- **Status/summary:** `status` enum value `viable` → `candidate`; `summary.candidate`; `summary.firstCandidateByLeverage`.
+- **Table:** add a `Shortfall` / `Margin-to-liq` surfacing for blocked/near-edge rows (exact column layout at the
+  executor's discretion, but the `firstBlocker`'s shortfall — the slippage-clearing depth for a slippage block — and
+  `structuralMarginToLiquidationBps` must be visible); the status token renders `candidate` with the legibility gloss.
+
+### §7.1–7.3 reconciliation (rev-3 lock retires the pre-rev-2 stale names)
+
+rev-3 is the lock point that retires §11 and adds `"Infinity"` fields keyed to §7.3, so fold in the outstanding
+rev-2 doc-drift so the referenced clauses are correct: §7.2 must list `exitSlippageBps` (rev-2 renamed
+`estimatedExitSlippageBps`) and add the rev-2 legs + rev-3 fields; §7.3's non-finite-serialization example uses
+`exitSlippageBps` (and now also `exitSlippageExcessBps` / `curveDiemLegSlippageShortfallDiem`); §7.1
+`assumptions.curveDepthModel` reads `"linear-per-leg-depth-share"` (rev-2), not `"linear-depth-share"`.
+
+### §8 / §11 reconciliation (rev-3)
+
+- §8 HF caveat → gains the `structuralMarginToLiquidationBps` re-expression note (same entry-time-identity limits;
+  an entry-time structural identity, not a live liquidation distance — coordinate the name with SPEC001 OQ#9).
+- §8 → add the stressed-netAPY bound and the `net apy negative under sustained max utilization` warning.
+- §11 → shortfall outputs, liquidation-distance, stressed-rate netAPY, per-leg depth-sufficiency, and the
+  `viable`→`candidate` rename are **promoted to this committed rev-3**; the §11 list is now fully retired
+  (rev-2 took slippage + gas + MEV-caveat; rev-3 takes the rest).
+
+### Staging (four waves — do not ship as one unit)
+
+1. **Wave 1 — additive, zero verdict change, zero re-baseline:** E1 (shortfalls incl. `curveDiemLegSlippageShortfallDiem`),
+   E2 (`structuralMarginToLiquidationBps`), E6 (docs) + the §7.1–7.3 reconciliation. Highest value / lowest risk — ship first.
+2. **Wave 2 — verdict-affecting-lite:** E3 (stressed netAPY output + proximity-gated verdict-ride); re-baseline only
+   fixtures that cross the marginal band under `stressedNearFail`.
+3. **Wave 3 — backstop gate:** E4; re-baseline only imbalanced fixtures (entry-leg cases). Ship knowing it's dormant
+   under defaults (documented as a backstop).
+4. **Wave 4 — breaking rename:** E5, landed **atomically** with its full SPEC003 §6 coordination (enum + token +
+   integrator-note prose + tests).
+
+### Acceptance criteria (tests when built)
+
+1. **Shortfalls are exact and directional.** For a **slippage-blocked** scenario, `curveDiemLegSlippageShortfallDiem`
+   added to the DIEM leg brings `exitSlippageBps` to ≤ `maxSlippageBps` (offline/linear); a passing gate → `0`; and it
+   is `"Infinity"` when `maxSlippageBps ≤ curveFeeBps`. The per-leg *depth-share* `curve*LegShortfallDiem` clear E4's
+   backstop sub-condition; `morphoSupplyShortfallDiem` / `netApyShortfallBps` are `max(0, req − actual)` → `0` when
+   passing. `exitSlippageExcessBps` is `> 0` iff `exitSlippageBps > maxSlippageBps`, and `"Infinity"` on a zero drawn
+   leg **(offline / no injected quote — finite under a live `get_dy` quote)**.
+2. **`structuralMarginToLiquidationBps`** equals `10000 × (HF − 10000)/HF` (rounded) for a finite HF, `null` when HF is
+   `null` (debt-free; never `+Infinity`), `0` when `HF ≤ 10000`; a fixture at HF 25800 → 6124 bps (± rounding).
+3. **`netApyStressedBps`** uses `borrowAprAtFullUtilizationBps` (4× rateAtTarget), always emitted, ≤ `netApyBps`
+   whenever the stressed rate ≥ the effective rate; well-defined in `flat` mode (full-util APR, not `borrowApyBps`).
+   The **verdict-ride is proximity-gated**: a scenario with `postDrawUtilizationBps > STRESSED_UTIL_BAND_BPS (7000)`
+   whose base passes but `netApyStressedBps < minNetApyBps` → `marginal` + warning; the *same* scenario at low util
+   (≤ 7000) stays `candidate` and only carries `netApyStressedBps` as a number (no warning, no demotion).
+4. **[E4] Backstop gate.** A **thin-wstDIEM-leg** (entry-leg) imbalanced pool whose total clears the old check blocks
+   on `curveDiemLegDiem`/`curveWstDiemLegDiem` per-leg → `curve_liquidity_insufficient` (this is the case E4 uniquely
+   catches — no entry-slippage gate exists). A **thin-DIEM-leg** pool at default slippage is attributable to the
+   **slippage** sub-condition (assert it blocks there, proving E4's exit-leg half is dominated offline). A balanced
+   pool (legs 10000/10000) is provably unchanged vs rev-2.
+5. **[E5] Rename (atomic).** `status`/`summary`/table all read `candidate`; **no residual `"viable"` string in code,
+   JSON, docs, or SPEC003 §6's integrator-note prose**; SPEC003's chain-seed demotion still degrades the token
+   (`candidate — unverified seed` + banner) and its test passes.
+6. **[E6]** The default remains `400`; `--rate-at-target-apy-bps 217` and `--from-chain` are documented as the
+   realistic path; help text + §3.2 updated.
+7. **No-regression:** every rev-1/rev-2 **balanced** fixture keeps its verdict; the only fixture changes are the
+   marginal-band `stressedNearFail` cases (E3), imbalanced entry-leg pools (E4), and the `viable`→`candidate` token (E5).

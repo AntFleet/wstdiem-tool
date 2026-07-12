@@ -249,6 +249,29 @@ preset's curve intent). Gates: typecheck + lint clean; new `test/sizing-rev2.tes
 exit quote from `get_dy(1→0)` via the existing `quoteCurveExitRoute` + `priceImpactBps` rail (filling
 `externalExitSlippageBps`), plus `vaultApyBps` (×10000-corrected), into the now-implemented rev-2 model.
 
+## Phase 4 — SPEC002 rev-3 (§11 actionability & honesty refinements) — REVIEWED + LOCKED (2026-07-12)
+
+Promotes the **remaining §11 backlog** (rev-2 took slippage/gas/MEV) into the contract as the `## rev-3` section
+of `SPEC002.md`. Six items: **E1** shortfall outputs (distance-to-clear, incl. a slippage-clearing depth lever for
+the *primary* curve gate), **E2** `structuralMarginToLiquidationBps`, **E3** stressed-rate netAPY, **E4** per-leg
+curve depth backstop, **E5** `viable`→`candidate` rename, **E6** default-rate reconciliation (keep conservative 400).
+
+**Two-agent review gate — run before code (both ACCEPT-WITH-RESERVATIONS; fixes folded in, spec LOCKED).** The
+reviewers **converged** on the load-bearing correction: **E4 is dominated by the exit-slippage sub-condition under
+all valid offline configs** (slippage blocks at ≤2.96% position/leg vs E4's ≥30% share-cap; ~10× earlier), so E4 is
+a **dormant backstop** (like `unwind_not_covered`), *not* the "safety win" the draft claimed — and its rationale
+mis-stated the formula (it splits the aggregate requirement 50/50, not a per-leg trade cap). Reframed: E4 keeps the
+gate (provably tighten-only + balanced-preserving) but only the **entry leg** earns a verdict change (there is no
+entry-slippage gate). Other folded fixes: E1 gained the missing **slippage-clearing depth** field (the primary gate
+had no unlock number); E2 renamed to encode its **entry-time-structural** nature (+ SPEC001 OQ#9 coordination) so it
+isn't misread as a live signal; E3 re-tagged **verdict-affecting** and its warning **proximity-gated** to
+`postDrawUtilizationBps > 7000` (the 4×-of-400 stress would otherwise fire across the grid → alarm fatigue); E5's
+atomic set extended to SPEC003 §6's integrator-note prose + a table gloss; plus a §7.1–7.3 stale-name reconciliation.
+
+**Staging — four waves (not one unit):** W1 additive (E1/E2/E6 + §7 reconcile) → W2 E3 (proximity-gated) → W3 E4
+(backstop) → W4 E5 (breaking rename, atomic). Each wave = executor → adversarial approval gate → merge behind green
+gates, per the standing rule.
+
 ## Traceability & verification
 
 - Maintain a lightweight **spec-clause ↔ test** map (a table appended to each spec).
