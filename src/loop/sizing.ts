@@ -8,6 +8,12 @@ import {
 
 const BPS_DENOMINATOR = 10_000;
 const DAYS_PER_YEAR = 365;
+// SPEC002 rev-3 E3 — the post-draw utilization above which the stressed-netAPY verdict-ride
+// (warning + `isMarginal` demotion) is allowed to fire. A fixed heuristic like the §6 band
+// constants (0.8 / 1.1 / +200); not configurable, but tunable here. Gates alarm fatigue: the
+// stress prices borrow at 4×rateAtTarget, so below this band (e.g. today's ~42%-util regime)
+// the demotion/warning stay silent even when stressed netAPY is negative — only the number emits.
+const STRESSED_UTIL_BAND_BPS = 7000;
 
 export type LoopSizingStatus = "viable" | "marginal" | "blocked";
 
@@ -106,6 +112,13 @@ export interface LoopSizingResult {
   borrowAprAtFullUtilizationBps: number;
   borrowCostApyBps: number;
   netApyBps: number;
+  // SPEC002 rev-3 E3 — a SECOND netAPY priced at the 100%-utilization borrow rate
+  // (`borrowAprAtFullUtilizationBps` = 4×rateAtTarget), bounding the sustained-high-utilization case.
+  // Always emitted (informational, unconditional); differs from `netApyBps` ONLY by the borrow term
+  // (stressed full-util rate vs `effectiveBorrowApyBps`). Well-defined in `flat` mode too — it uses
+  // the full-util APR, never the flat `borrowApyBps`. NEVER a blocker (would over-block a rate the
+  // loop may never sustain). The verdict-ride it feeds is proximity-gated (see `STRESSED_UTIL_BAND_BPS`).
+  netApyStressedBps: number;
   healthFactorBps: number | null;
   unwindDiemOut: bigint;
   unwindRepayRequiredDiem: bigint;
@@ -285,7 +298,14 @@ function isMarginal(result: Omit<LoopSizingResult, "status">): boolean {
     result.healthFactorBps !== null &&
     result.healthFactorBps < Math.ceil(result.scenario.minHealthFactorBps * 1.1);
   const apyNearFloor = result.netApyBps < result.scenario.minNetApyBps + 200;
-  return slippageNearCap || healthNearFloor || apyNearFloor;
+  // SPEC002 rev-3 E3 — proximity-gated stressed-netAPY demotion (FOURTH condition). A scenario that
+  // passes every gate but is near the stress regime (util > 70%) with a stressed netAPY below the floor
+  // classifies `marginal`. Below the band this stays false even when stressed netAPY misses the floor
+  // (alarm-fatigue guard). Recomputed from `baseResult` — matches the warning's `stressedNearFail`.
+  const stressedNearFail =
+    result.postDrawUtilizationBps > STRESSED_UTIL_BAND_BPS &&
+    result.netApyStressedBps < result.scenario.minNetApyBps;
+  return slippageNearCap || healthNearFloor || apyNearFloor || stressedNearFail;
 }
 
 export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult {
@@ -379,6 +399,18 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
       : adaptiveBorrowAprBps(utilizationForRateWad, scenario.rateAtTargetApyBps);
   const borrowCostApyBps = Math.round((leverage - 1) * effectiveBorrowApyBps);
   const netApyBps = grossVaultApyBps - borrowCostApyBps - annualizedOneTimeCostBps;
+  // SPEC002 rev-3 E3 — stressed netAPY at the 100%-utilization borrow rate (4×rateAtTarget). Same
+  // `leverage` / `grossVaultApyBps` / `annualizedOneTimeCostBps` as `netApyBps`, so it differs from it
+  // ONLY by the borrow term (full-util rate vs `effectiveBorrowApyBps`). Uses `borrowAprAtFullUtilizationBps`,
+  // never the flat `borrowApyBps`, so it is well-defined in `flat` mode too.
+  const borrowCostStressedApyBps = Math.round((leverage - 1) * borrowAprAtFullUtilizationBps);
+  const netApyStressedBps = grossVaultApyBps - borrowCostStressedApyBps - annualizedOneTimeCostBps;
+  // Proximity gate (SPEC002 rev-3 E3): the warning + `isMarginal` demotion fire ONLY when the loop is
+  // actually near the stress regime (util > 70%) AND the stressed netAPY misses the floor. Below the band
+  // the alarm-fatigue guard keeps them silent (only the number emits). `isMarginal` recomputes this from
+  // `baseResult`; the warning below reuses this local — both share `STRESSED_UTIL_BAND_BPS`.
+  const stressedNearFail =
+    postDrawUtilizationBps > STRESSED_UTIL_BAND_BPS && netApyStressedBps < scenario.minNetApyBps;
   const healthFactorBps =
     borrowAmountDiem === 0n
       ? null
@@ -429,6 +461,12 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
     if (legImbalance * 5n > curveDepthDiem) {
       warnings.push("curve legs imbalanced");
     }
+  }
+  // SPEC002 rev-3 E3 — sustained-max-utilization caveat. Like `gas unmodeled`, `warnings[]` is
+  // independent of `status`, so this rides a `blocked` verdict too (a scenario blocked on another gate
+  // still surfaces it when `stressedNearFail`). It is NEVER a blocker — advisory only.
+  if (stressedNearFail) {
+    warnings.push("net apy negative under sustained max utilization");
   }
 
   // SPEC002 rev-3 E1 — shortfall (distance-to-clear) fields. All ≥ 0 and exactly 0 when the
@@ -504,6 +542,7 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
     borrowAprAtFullUtilizationBps,
     borrowCostApyBps,
     netApyBps,
+    netApyStressedBps,
     healthFactorBps,
     unwindDiemOut,
     unwindRepayRequiredDiem,

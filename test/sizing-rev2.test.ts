@@ -512,3 +512,93 @@ describe("SPEC002 rev-3 — E2 structuralMarginToLiquidationBps", () => {
     expect(lowHf.structuralMarginToLiquidationBps).toBe(0);
   });
 });
+
+describe("SPEC002 rev-3 — E3 stressed-rate netAPY (output + proximity-gated verdict-ride)", () => {
+  // A high-utilization loop (util > 70%) whose base netAPY passes but whose stressed netAPY (borrow at
+  // 4×rateAtTarget) misses the floor. supply 63 → borrow 50 → util ~79%. flat borrow 200 (base) vs the
+  // full-util APR ~1600 (stressed); gross = round(1.5·340) = 510, so base netApy > 0 but stressed < 0.
+  function highUtilStressedFail(
+    overrides: Partial<Parameters<typeof sizeLoopScenario>[0]> = {},
+  ) {
+    return scenario({
+      curveDiemLegDiem: parseDecimalToUnits("50000"),
+      curveWstDiemLegDiem: parseDecimalToUnits("50000"),
+      morphoSupplyDiem: parseDecimalToUnits("63"),
+      borrowRateModel: "flat",
+      borrowApyBps: 200,
+      vaultApyBps: 340,
+      ...overrides,
+    });
+  }
+
+  // AC3: netApyStressedBps uses borrowAprAtFullUtilizationBps (4× rateAtTarget), differs from netApyBps
+  // ONLY by the borrow term, and is well-defined in flat mode (full-util APR, not the flat borrowApyBps).
+  it("emits netApyStressedBps = gross − round((lev−1)·fullUtilApr) − annualizedOneTime (flat mode)", () => {
+    const result = sizeLoopScenario(highUtilStressedFail());
+    const lev = result.scenario.targetLeverageBps / 10_000;
+    const expected =
+      result.grossVaultApyBps -
+      Math.round((lev - 1) * result.borrowAprAtFullUtilizationBps) -
+      result.annualizedOneTimeCostBps;
+    expect(result.netApyStressedBps).toBe(expected);
+    // Well-defined in flat mode: it prices at the full-util APR (~1600), NOT the flat borrowApyBps (200).
+    expect(result.borrowAprAtFullUtilizationBps).not.toBe(result.scenario.borrowApyBps);
+    expect(result.effectiveBorrowApyBps).toBe(result.scenario.borrowApyBps);
+    // The two netAPYs differ ONLY by the borrow term (same gross / annualizedOneTime).
+    expect(result.netApyBps - result.netApyStressedBps).toBe(
+      Math.round((lev - 1) * result.borrowAprAtFullUtilizationBps) - result.borrowCostApyBps,
+    );
+  });
+
+  // AC3: netApyStressedBps ≤ netApyBps whenever the stressed (full-util) rate ≥ the effective rate.
+  it("is ≤ netApyBps when the stressed rate ≥ the effective rate", () => {
+    const result = sizeLoopScenario(highUtilStressedFail());
+    expect(result.borrowAprAtFullUtilizationBps).toBeGreaterThanOrEqual(
+      result.effectiveBorrowApyBps,
+    );
+    expect(result.netApyStressedBps).toBeLessThanOrEqual(result.netApyBps);
+  });
+
+  // AC3: proximity gate, HIGH-util direction — passes all gates but stressedNearFail → marginal + warning.
+  it("demotes a clean-pass high-util scenario to marginal and rides the warning (util > 7000)", () => {
+    const result = sizeLoopScenario(highUtilStressedFail());
+    expect(result.blockers).toEqual([]); // passes every gate
+    expect(result.postDrawUtilizationBps).toBeGreaterThan(7000);
+    expect(result.netApyBps).toBeGreaterThanOrEqual(result.scenario.minNetApyBps); // base passes
+    expect(result.netApyStressedBps).toBeLessThan(result.scenario.minNetApyBps); // stressed fails
+    expect(result.status).toBe("marginal");
+    expect(result.warnings).toContain("net apy negative under sustained max utilization");
+  });
+
+  // AC3: proximity gate, LOW-util direction — the SAME scenario at ≤7000 util (deeper Morpho supply)
+  // stays the clean-pass status with NO warning/demotion, yet still emits the SAME netApyStressedBps.
+  it("keeps the clean-pass status with no warning below the band, still emitting netApyStressedBps", () => {
+    const highUtil = sizeLoopScenario(highUtilStressedFail());
+    // Deeper supply → util collapses below the band; borrow-cost/gross/oneTime are supply-independent,
+    // so grossVaultApyBps / annualizedOneTimeCostBps / netApyStressedBps are unchanged.
+    const lowUtil = sizeLoopScenario(
+      highUtilStressedFail({ morphoSupplyDiem: parseDecimalToUnits("100000") }),
+    );
+    expect(lowUtil.blockers).toEqual([]);
+    expect(lowUtil.postDrawUtilizationBps).toBeLessThanOrEqual(7000);
+    expect(lowUtil.status).toBe("viable"); // clean-pass (pre-E5 token); NOT marginal
+    expect(lowUtil.warnings).not.toContain("net apy negative under sustained max utilization");
+    // The number is still emitted, and is identical to the high-util case (supply-independent).
+    expect(lowUtil.netApyStressedBps).toBe(highUtil.netApyStressedBps);
+    expect(lowUtil.netApyStressedBps).toBeLessThan(lowUtil.scenario.minNetApyBps);
+  });
+
+  // AC3: the warning is independent of status (like `gas unmodeled`), so it rides a BLOCKED verdict too.
+  // supply 62 blocks the Morpho gate while base netApy still passes; util ~81% + stressed < min → warning.
+  it("rides a blocked verdict when stressedNearFail (warning is status-independent)", () => {
+    const result = sizeLoopScenario(
+      highUtilStressedFail({ morphoSupplyDiem: parseDecimalToUnits("62") }),
+    );
+    expect(result.status).toBe("blocked");
+    expect(result.blockers).toContain("morpho_supply_insufficient");
+    expect(result.postDrawUtilizationBps).toBeGreaterThan(7000);
+    expect(result.netApyBps).toBeGreaterThanOrEqual(result.scenario.minNetApyBps); // not a netApy block
+    expect(result.netApyStressedBps).toBeLessThan(result.scenario.minNetApyBps);
+    expect(result.warnings).toContain("net apy negative under sustained max utilization");
+  });
+});

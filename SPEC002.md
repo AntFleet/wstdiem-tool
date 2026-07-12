@@ -563,7 +563,11 @@ netApyStressedBps        = grossVaultApyBps − borrowCostStressedApyBps − ann
 
 `borrowAprAtFullUtilizationBps` is already computed for both models (`sizing.ts:350`), so this is well-defined
 in `flat` mode too (it is not the flat `borrowApyBps`, and rev-3 states so). It is **never a blocker** (that would
-over-block on a rate the loop may never sustain).
+over-block on a rate the loop may never sustain). **Flat-mode caveat:** the stress prices at the adaptive
+`4×rateAtTarget`, which can be *lower* than a deliberately-high user-supplied `--borrow-apy-bps` — in that case
+`netApyStressedBps > netApyBps` (the "stressed" figure is less stressed than the base). This is correct-as-defined
+(the stress is the full-util adaptive rate, not a `max()` against the flat assumption); it is only a meaningful
+downside bound when the full-util adaptive rate exceeds the operator's flat rate.
 
 **`netApyStressedBps` is always emitted as a number** (informational, unconditional). But the verdict-ride is
 **proximity-gated** to avoid alarm fatigue: because the stress prices at `4×rateAtTarget` and the default
