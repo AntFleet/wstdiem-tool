@@ -46,3 +46,5 @@ The vault row tracks the configured wstDIEM vault:
 - `convertToAssets(1 wstDIEM)` NAV
 
 Monitor alerts intentionally ignore the closed production audit gate. They alert on actionable live-state blockers only: unavailable RPC, missing or unhealthy wstDIEM vault, empty Curve liquidity, empty Morpho supply, missing/no-code/mismatched executor, missing owner position, and missing Morpho executor authorization.
+
+When the monitor flags **empty Curve liquidity**, `loop sizing --from-chain` will fail closed (`FROM_CHAIN_SEED_BLOCKED: Curve pool has zero DIEM and wstDIEM depth`) rather than seed a verdict against an empty pool — this is expected. See [loop-sizing.md](loop-sizing.md#live-seeding---from-chain) for the fail-closed triggers and how to rehearse against a drained pool with explicit Curve legs.
