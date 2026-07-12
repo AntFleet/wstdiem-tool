@@ -288,6 +288,31 @@ approval pass → fixes → merge behind green gates:
 Full suite 213 pass / 1 pre-existing `cli-live` fail throughout. **The spec-first pipeline has now shipped SPEC003
 (A + B-1 + B-2), SPEC002 rev-2, and SPEC002 rev-3 (4 waves) — every unit spec → review → executor → approval → merge.**
 
+## Phase 5 — SPEC004 (scheduler exit-code contract, resolves SPEC001 OQ#7) — REVIEWED + LOCKED (2026-07-12)
+
+`SPEC004.md` gives the live-monitoring commands (`status`, `watch --once`, `monitor`) a severity-ordered process
+exit code so a cron/systemd keeper can gate on `$?` — today a CRITICAL alert exits `0`. Ladder:
+`0` nominal · `10` warn · `20` indeterminate · `30` critical · `1` tool-error.
+
+**Two-agent review gate — run before code (both REVISE → fixes folded in, spec LOCKED).** The **technical**
+critic found a **Critical (C1):** `rpcFreshness` is a block-header flag set *before* the vault/position reads, so a
+partial degradation (block served, `eth_call`s failing) would render a **false `nominal (0)`** on the exact
+deployment command — fixed by classifying `indeterminate` on a real **position-assessed** signal (`liveAssessed`,
+set only after the position reads complete), not block freshness. It also caught that the draft's "readiness
+blockers already surface as CRITICAL alerts" note was false (three bring-up states are WARN) and that the
+non-`--json` path returns a *string* so the classifier must live *inside each action*. The **product** analyst
+argued the ladder should not let transient RPC blips out-page confirmed danger. Both dissolved cleanly: **critical
+is the top rung (30), indeterminate below it (20)**; classification is a **read-completed gate then `max(alert
+level)`** with **no separate blocker→critical rule** (so `executor_missing` stays WARN, not a critical over-alarm
+— resolving M1/M3 and the setup-blocker over-alarm at once); `all-clear`→`nominal` with an explicit "not a safety
+assertion" note; plus a runbook gating recipe (`node dist/…`, not `npm run`), the `tool-error`-is-un-gateable +
+dead-man's-switch hazards, and the breaking-change consumer list (CI, Fly healthcheck). Open questions recorded
+(setup-blocker distinct code; canonical scheduled command; missing-config vs runtime-unreachable).
+
+**Next: implement SPEC004** (spec → executor → approval gate → merge), incl. the `liveAssessed` flag, the
+`classifyMonitoringOutcome` helper wired inside each action, the JSON `outcome`/`exitCode` fields, the runbook
+recipe, and `test/cli-exit-code.test.ts` (compiled-CLI exit codes, incl. the C1 partial-read regression).
+
 ## Traceability & verification
 
 - Maintain a lightweight **spec-clause ↔ test** map (a table appended to each spec).

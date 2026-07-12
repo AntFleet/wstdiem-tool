@@ -627,10 +627,11 @@ Ledger (`@ledgerhq/*`) and/or Safe transaction-building support is deferred; not
    unsupported until the executor audit gate clears (Appendix A2). Consequences applied: the §5
    execution-status note and the §3 advisory note. (Accepted trade-off: the monitoring/readiness
    surface is decision-support and rehearsal, not an actionable kill-switch.)
-7. **Scheduler exit-code contract.** Under `watch --once` + cron (D2), what exit code should the CLI
-   return by outcome class (all-clear / WARN / CRITICAL / RPC-unavailable / readiness-blocked)?
-   Today it sets only a generic `1` on internal error, so a CRITICAL alert still exits `0` and a
-   scheduler cannot gate on severity via exit status.
+7. **Scheduler exit-code contract — SPEC'D in [`SPEC004.md`](SPEC004.md) (2026-07-12).** Under
+   `watch --once` + cron (D2), the CLI returned only a generic `1` on internal error, so a CRITICAL
+   alert still exited `0` and a scheduler could not gate on severity. Resolved by a severity ladder
+   (`0` nominal / `10` warn / `20` indeterminate / `30` critical / `1` tool-error) on the
+   live-monitoring commands, gated on a real position-assessed signal (not block freshness) — see SPEC004.
 8. **Threshold source of truth.** When the §3 alert table values differ from `config.thresholds`
    (§7), which is authoritative? (Presumably config — state it.)
 9. **Liquidation readout.** Should the dashboard surface margin-to-liquidation / liquidation price
