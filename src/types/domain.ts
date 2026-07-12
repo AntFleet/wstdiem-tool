@@ -120,6 +120,7 @@ export interface MetricSnapshot {
     oracle: boolean;
     harvestHistory: boolean;
     rpcFreshness: boolean;
+    liveAssessed: boolean;
   };
   nav: bigint;
   navDisplay: string;

@@ -49,7 +49,21 @@ export async function buildStatus(config: AppConfig, deps: StatusDeps = {}): Pro
         const client = await createLoopClient(config);
         if (client !== null) {
           const vaultMetrics = await collectVaultMetrics(config, client, snapshot);
-          snapshot = vaultMetrics.snapshot;
+          // liveAssessed flips true ONLY when the vault read actually COMPLETED — keyed off
+          // validity.vault, which collectVaultMetrics sets solely on its full-success path
+          // (SPEC004 §3, the C1 fix). Two ways it stays false: (a) a partial read where an
+          // eth_call throws propagates to the catch below with the pre-collect snapshot intact;
+          // (b) collectVaultMetrics EARLY-RETURNS without throwing when asset()!=DIEM (wrong/
+          // migrated vault) — validity.vault stays false, so liveAssessed does too → the tick
+          // is indeterminate, never a false nominal on a vault we could not read. Distinct from
+          // rpcFreshness, which is only a block-header flag.
+          snapshot = {
+            ...vaultMetrics.snapshot,
+            validity: {
+              ...vaultMetrics.snapshot.validity,
+              liveAssessed: vaultMetrics.snapshot.validity.vault,
+            },
+          };
           readiness.push(...vaultMetrics.readiness);
         }
       }

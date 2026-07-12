@@ -37,6 +37,7 @@ import {
 } from "./output.js";
 import { parseAddress, parseStrictFloat, parseStrictInteger } from "./parse.js";
 import { buildStatus, runWatchOnce } from "./status.js";
+import { classifyMonitoringOutcome, isMonitorAssessed } from "./exitCode.js";
 
 interface GlobalOptions {
   config?: string;
@@ -147,8 +148,18 @@ program
         config = { ...config, position: { owner: parseAddress(owner, "--owner") } };
       }
       const result = await buildStatus(config);
+      // SPEC004 §3/§4: classify on the fully-built result, then set process.exitCode as
+      // the last step (it cannot throw, so runAction's catch→1 can never be overridden and
+      // nominal(0) can never overwrite a tool-error). assessed = liveAssessed, so a partial
+      // read leaves it false → indeterminate(20), never a false nominal(0).
+      const classification = classifyMonitoringOutcome({
+        assessed: result.snapshot.validity.liveAssessed,
+        alerts: result.alerts,
+      });
+      process.exitCode = classification.exitCode;
+      const structured = { ...result, ...classification };
       if (this.optsWithGlobals<GlobalOptions>().json) {
-        return result;
+        return structured;
       }
       return renderStatusTable(result.snapshot, result.readiness);
     });
@@ -169,8 +180,16 @@ program
         );
       }
       const result = await runWatchOnce(config);
+      // SPEC004 §3/§4: same read-completed gate + severity ladder as `status` (watch --once
+      // returns the identical StatusResult). liveAssessed is inherited via buildStatus.
+      const classification = classifyMonitoringOutcome({
+        assessed: result.snapshot.validity.liveAssessed,
+        alerts: result.alerts,
+      });
+      process.exitCode = classification.exitCode;
+      const structured = { ...result, ...classification };
       if (this.optsWithGlobals<GlobalOptions>().json) {
-        return result;
+        return structured;
       }
       return renderStatusTable(result.snapshot, result.readiness);
     });
@@ -213,7 +232,17 @@ program
             Math.floor(Date.now() / 1000),
           )
         : [];
-      const result = { readiness, alerts, delivered };
+      // SPEC004 §3/§4: monitor's read completed ⇔ a block was read AND no rpc-* check
+      // failed. A failed rpc-* (or undefined blockNumber) → indeterminate(20), gating
+      // before alert severity (so blockNumber===undefined + live_rpc_unavailable CRITICAL
+      // is 20, not 30). Alert levels alone drive warn/critical — executor_missing/
+      // owner_missing are WARN(10), the closed audit gate is never an alert.
+      const classification = classifyMonitoringOutcome({
+        assessed: isMonitorAssessed(readiness),
+        alerts,
+      });
+      process.exitCode = classification.exitCode;
+      const result = { readiness, alerts, delivered, ...classification };
       if (this.optsWithGlobals<GlobalOptions>().json) {
         return result;
       }

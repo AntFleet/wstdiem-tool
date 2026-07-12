@@ -139,6 +139,7 @@ export function makeEmptySnapshot(timestamp = Math.floor(Date.now() / 1000)): Me
       oracle: false,
       harvestHistory: false,
       rpcFreshness: false,
+      liveAssessed: false,
     },
     nav: nav.nav,
     navDisplay: formatWad(nav.nav),

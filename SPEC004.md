@@ -15,6 +15,19 @@ exits `0` on success regardless of what it found: `runAction` (`src/cli/index.ts
 gate on severity** (OQ#7). This spec assigns a severity-ordered exit code to the three **live-monitoring
 commands**: `status`, `watch --once`, `monitor`.
 
+**Danger-detection asymmetry — which command a keeper gates on.** The three commands do NOT read the same live
+state, so they do NOT reach the same codes:
+- **`monitor`** is the live danger dashboard: it reads Curve, Morpho, the executor, and owner/position readiness,
+  and its `evaluateReadinessAlerts` emits the CRITICAL-level alerts. **This is the command a keeper gating
+  `[ $? -ge 30 ]` on confirmed danger MUST schedule.** Reachable: `{0, 10, 20, 30}`.
+- **`status` / `watch --once`** are lightweight **vault-liveness snapshots**: they read only the block header and
+  the vault NAV (`collectVaultMetrics` sets only `validity.vault`). They do **not** read the leveraged position,
+  Curve depth, Morpho market, or the oracle, so `evaluateAlerts` — which gates every CRITICAL behind
+  `validity.position`/`curve`/`morphoMarket`/`oracle` — cannot fire a danger CRITICAL on their snapshot. Their
+  only reachable alert is `rpc_stale` (WARN). Reachable: **`{0, 10, 20}` — never `30`**. Here `liveAssessed`
+  means "the vault NAV read completed"; a `0` from them attests vault-liveness, **not** position safety. Do NOT
+  gate liquidation danger on `status`/`watch --once`; use `monitor`.
+
 **Out of scope.** `loop sizing` / `loop simulate` (offline/advisory) keep `0` on success / `1` on error — they
 assess no live position state. `loop readiness --strict-evidence` already exits non-zero on an evidence-check
 failure; this spec does not change it (a later revision may align it — noted, not specified).
@@ -157,18 +170,26 @@ Two non-obvious hazards the runbook MUST name:
 
 ## 9. Per-command reachability & open questions
 
-Reachable codes: **`status` / `watch --once`: {0, 10, 20, 30}** (position alerts + the `liveAssessed` gate);
-**`monitor`: {0, 10, 20, 30}** (readiness-alert levels + the `blockNumber`/`rpc-*` gate — `warn` reachable via
-`executor_missing` etc.). All three carry `1` on a thrown error.
+Reachable codes (see the §1 danger-detection asymmetry):
+- **`status` / `watch --once`: {0, 10, 20}** — vault-liveness snapshots. `10` is reachable **only** via the
+  `rpc_stale` WARN (a stale-but-readable block); `20` via the `liveAssessed` gate (no/failed/incomplete vault
+  read). **`30` is NOT reachable** — these commands do not read the position/curve/morpho/oracle state that
+  `evaluateAlerts` requires to raise a danger CRITICAL. A keeper MUST NOT gate `-ge 30` on them.
+- **`monitor`: {0, 10, 20, 30}** — the danger dashboard (readiness-alert levels + the `blockNumber`/`rpc-*`
+  gate; `warn` reachable via `executor_missing` etc., `critical` via the live-state alerts). Gate danger here.
+
+All three carry `1` on a thrown error.
 
 Recorded open questions (do not block this spec; revisit if the deployment matures):
 - **[OQ-a] Setup-blockers vs live danger.** Bring-up conditions (`executor_missing`, `owner_missing`,
   `owner_position_missing`) currently classify `warn (10)` via their alert level. If a keeper needs to distinguish
   "not yet operational" from "position in danger," add a distinct code or require `monitor` to be scheduled only
   after readiness passes. (v1: they are `warn`, honest and non-masking.)
-- **[OQ-b] Canonical scheduled command.** D2 says `watch --once`; the runbook shows `monitor`; `status` and
-  `watch --once` return the identical `StatusResult` and classify identically. Name the one the gating recipe
-  attaches to and reconcile D2 ↔ the runbook.
+- **[OQ-b — RESOLVED] Canonical scheduled command.** `monitor` is the danger-gating command (it is the only one
+  that reads the position/curve/morpho/oracle state a danger CRITICAL requires; `status`/`watch --once` are
+  vault-liveness snapshots reaching only `{0, 10, 20}` — see §1). The runbook (§7) schedules `monitor` and gates
+  `-ge 30` on it. `status`/`watch --once` remain useful for a liveness/`indeterminate` signal but MUST NOT carry a
+  `-ge 30` danger gate. (D2's `watch --once` framing referred to the polling *cadence*, not the danger source.)
 - **[OQ-c] Missing-config vs runtime-unreachable.** Both currently → `indeterminate (20)` (the position is
   un-assessed either way; a persistent `20` after deploy signals "fix me"). Revisit if operators want
   missing-config to be `1`.
@@ -176,9 +197,14 @@ Recorded open questions (do not block this spec; revisit if the deployment matur
 ## 10. Acceptance criteria (tests when built)
 
 1. **nominal:** `liveAssessed` true, no WARN/CRITICAL alert → exit `0` / `outcome: "nominal"`.
-2. **warn:** a WARN alert, no CRITICAL, read completed → exit `10` / `"warn"` (assert on status/watch **and**
-   monitor's `executor_missing` WARN — proving the no-blocker-rule fix).
-3. **critical:** a CRITICAL alert, read completed → exit `30` / `"critical"`; WARN+CRITICAL mix → `30`.
+2. **warn:** a WARN alert, no CRITICAL, read completed → exit `10` / `"warn"`. Assert at the classifier unit
+   (hand-built WARN array) **and** end-to-end on monitor's `executor_missing` WARN (proving the no-blocker-rule
+   fix). Note status/watch's only end-to-end WARN is `rpc_stale` (§1 asymmetry).
+3. **critical:** a CRITICAL alert, read completed → exit `30` / `"critical"`; WARN+CRITICAL mix → `30`. Reachable
+   end-to-end only via `monitor` (status/watch cannot raise a danger CRITICAL — §1); assert the classifier logic
+   at the unit and the `30` exit end-to-end on `monitor`.
+   **incomplete read (no throw):** a `status`/`watch` tick where `collectVaultMetrics` early-returns without
+   completing (`asset()!=DIEM`) → `validity.vault` false → `liveAssessed` false → exit `20`, not a false `0`.
 4. **C1 regression — partial read is NOT a false `nominal`:** block-header read succeeds but the position/market
    reads fail (mock `collectVaultMetrics` throwing) → `liveAssessed` false → exit `20` / `"indeterminate"`,
    **not** `0`. Plus: no-RPC / wrong-chain / `blockNumber===undefined` (monitor) → `20`.
