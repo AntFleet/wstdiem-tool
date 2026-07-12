@@ -602,3 +602,110 @@ describe("SPEC002 rev-3 — E3 stressed-rate netAPY (output + proximity-gated ve
     expect(result.warnings).toContain("net apy negative under sustained max utilization");
   });
 });
+
+// SPEC002 rev-3 — E4 per-leg curve depth-sufficiency (BACKSTOP gate, dormant offline).
+// gate 1 depth sub-condition is now PER-LEG:
+//   curveDiemLegDiem < requiredCurveDiemDepth || curveWstDiemLegDiem < requiredCurveWstDiemDepth
+// (slippage sub-condition unchanged). For the base scenario() (initial 100, lev 1.5×, share cap
+// 1500): position 150 → requiredCurveDepthDiem 1000 → requiredCurveDiemDepth 500 /
+// requiredCurveWstDiemDepth 500. Exit slippage draws the DIEM leg; there is NO entry-slippage gate,
+// so the wstDIEM (entry) leg depth check is E4's only offline value.
+describe("SPEC002 rev-3 — E4 per-leg curve depth-sufficiency (backstop gate)", () => {
+  // AC4 (entry-leg — the case E4 UNIQUELY catches offline). A thin wstDIEM (entry) leg below its
+  // per-leg requirement, but with sufficient TOTAL depth (so the old total check passed) and a
+  // relaxed slippage cap (so the exit-slippage sub-condition does not pre-empt). The old
+  // `curveDepthDiem < requiredCurveDepthDiem` total check would PASS (1300 ≥ 1000); the per-leg
+  // check newly blocks on the 400 < 500 entry leg. Raising the entry leg to exactly 500 clears it.
+  it("blocks on a thin wstDIEM (entry) leg despite sufficient total depth; clears when raised", () => {
+    const thinEntry = sizeLoopScenario(
+      scenario({
+        curveDiemLegDiem: parseDecimalToUnits("900"), // DIEM leg 900 ≥ 500 requirement (passes)
+        curveWstDiemLegDiem: parseDecimalToUnits("400"), // entry leg 400 < 500 requirement (blocks)
+        maxSlippageBps: 100_000, // relaxed so slippage never pre-empts the depth sub-condition
+      }),
+    );
+    // total 1300 ≥ requiredCurveDepthDiem 1000 → the pre-E4 total check would NOT have blocked.
+    expect(
+      thinEntry.scenario.curveDiemLegDiem + thinEntry.scenario.curveWstDiemLegDiem,
+    ).toBeGreaterThanOrEqual(thinEntry.requiredCurveDepthDiem);
+    expect(thinEntry.scenario.curveWstDiemLegDiem).toBeLessThan(thinEntry.requiredCurveWstDiemDepth);
+    expect(thinEntry.exitSlippageBps).toBeLessThanOrEqual(thinEntry.scenario.maxSlippageBps);
+    expect(thinEntry.blockers).toContain("curve_liquidity_insufficient");
+    // E1 entry-leg shortfall = max(0, required − leg) and is > 0 exactly because this sub-condition fails.
+    expect(thinEntry.curveWstDiemLegShortfallDiem).toBe(
+      thinEntry.requiredCurveWstDiemDepth - thinEntry.scenario.curveWstDiemLegDiem,
+    );
+    // The passing DIEM (exit) leg's shortfall is exactly 0 — the block is solely the entry leg.
+    expect(thinEntry.curveDiemLegShortfallDiem).toBe(0n);
+
+    const raised = sizeLoopScenario(
+      scenario({
+        curveDiemLegDiem: parseDecimalToUnits("900"),
+        curveWstDiemLegDiem: parseDecimalToUnits("500"), // entry leg == requiredCurveWstDiemDepth
+        maxSlippageBps: 100_000,
+      }),
+    );
+    expect(raised.scenario.curveWstDiemLegDiem).toBe(raised.requiredCurveWstDiemDepth);
+    expect(raised.blockers).not.toContain("curve_liquidity_insufficient");
+    // Shortfall collapses to exactly 0 when the per-leg depth sub-condition passes.
+    expect(raised.curveWstDiemLegShortfallDiem).toBe(0n);
+  });
+
+  // AC4 (balanced-preserving). On a balanced pool the per-leg check is EXACTLY the old total check:
+  // total == requiredTotal (legs 500/500) is NOT blocked on curve depth; total == requiredTotal − 2
+  // (legs 499/499) IS — identical to rev-2's total behavior. Slippage cap relaxed to isolate depth.
+  it("is byte-identical to rev-2's total check on balanced pools (500/500 pass, 499/499 block)", () => {
+    const atRequirement = sizeLoopScenario(
+      scenario({
+        curveDiemLegDiem: parseDecimalToUnits("500"),
+        curveWstDiemLegDiem: parseDecimalToUnits("500"),
+        maxSlippageBps: 100_000,
+      }),
+    );
+    expect(
+      atRequirement.scenario.curveDiemLegDiem + atRequirement.scenario.curveWstDiemLegDiem,
+    ).toBe(atRequirement.requiredCurveDepthDiem);
+    expect(atRequirement.blockers).not.toContain("curve_liquidity_insufficient");
+
+    const belowRequirement = sizeLoopScenario(
+      scenario({
+        curveDiemLegDiem: parseDecimalToUnits("499"),
+        curveWstDiemLegDiem: parseDecimalToUnits("499"),
+        maxSlippageBps: 100_000,
+      }),
+    );
+    // total 998 < requiredCurveDepthDiem 1000 → at least one leg short → blocks (rev-2 total semantics).
+    expect(
+      belowRequirement.scenario.curveDiemLegDiem + belowRequirement.scenario.curveWstDiemLegDiem,
+    ).toBeLessThan(belowRequirement.requiredCurveDepthDiem);
+    expect(belowRequirement.blockers).toContain("curve_liquidity_insufficient");
+  });
+
+  // A representative deep balanced fixture's verdict is UNCHANGED by E4 (still clean-pass "viable"
+  // pre-E5; no new curve block).
+  it("leaves a representative balanced fixture's verdict unchanged", () => {
+    const result = sizeLoopScenario(viableBase());
+    expect(result.scenario.curveDiemLegDiem).toBe(result.scenario.curveWstDiemLegDiem); // balanced
+    expect(result.blockers).not.toContain("curve_liquidity_insufficient");
+    expect(result.status).toBe("viable");
+  });
+
+  // AC4 (exit-leg dominated — proves E4's DIEM-leg half is dormant offline). A thin-DIEM-leg pool at
+  // the DEFAULT slippage cap (300) blocks on the SLIPPAGE sub-condition, NOT the DIEM depth check:
+  // diemLeg 2000 ≥ requiredCurveDiemDepth 500 (depth passes, shortfall 0), yet exitSlippageBps
+  // (fee 4 + 150/2000 = 754 bps) > 300 → the block is slippage. Slippage fires ~10× before depth.
+  it("blocks a thin-DIEM-leg pool on the slippage sub-condition, not the DIEM depth check", () => {
+    const result = sizeLoopScenario(
+      scenario({
+        curveDiemLegDiem: parseDecimalToUnits("2000"), // ≥ 500 depth requirement → depth passes
+        curveWstDiemLegDiem: parseDecimalToUnits("50000"), // deep entry leg → entry depth passes
+        // default maxSlippageBps 300
+      }),
+    );
+    expect(result.scenario.curveDiemLegDiem).toBeGreaterThanOrEqual(result.requiredCurveDiemDepth);
+    expect(result.curveDiemLegShortfallDiem).toBe(0n); // DIEM depth sub-condition passes
+    expect(result.curveWstDiemLegShortfallDiem).toBe(0n); // entry depth sub-condition passes
+    expect(result.exitSlippageBps).toBeGreaterThan(result.scenario.maxSlippageBps); // slippage bites
+    expect(result.blockers).toContain("curve_liquidity_insufficient");
+  });
+});

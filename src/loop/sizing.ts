@@ -427,7 +427,18 @@ export function sizeLoopScenario(scenario: LoopSizingScenario): LoopSizingResult
     BPS_DENOMINATOR + scenario.exitRepayBufferBps + scenario.flashFeeBps,
   );
 
-  if (curveDepthDiem < requiredCurveDepthDiem || exitSlippageBps > scenario.maxSlippageBps) {
+  // SPEC002 rev-3 E4 — the depth sub-condition is now PER-LEG (each leg must hold its proportional
+  // half of `requiredCurveDepthDiem`): tighten-only and balanced-preserving (on a balanced pool the
+  // two-leg check is exactly the old total check, so balanced fixtures are unchanged). This is a
+  // BACKSTOP, not a general tightening — the DIEM (exit) leg is dominated by the exit-slippage
+  // sub-condition for every valid offline config (dormant absent an injected get_dy quote or a
+  // hand-tightened share cap); the wstDIEM (entry) leg is the genuine value, since gate 1 has no
+  // entry-slippage sub-condition. The slippage sub-condition below is unchanged.
+  if (
+    scenario.curveDiemLegDiem < requiredCurveDiemDepth ||
+    scenario.curveWstDiemLegDiem < requiredCurveWstDiemDepth ||
+    exitSlippageBps > scenario.maxSlippageBps
+  ) {
     blockers.push("curve_liquidity_insufficient");
   }
   if (
