@@ -9,6 +9,7 @@ function baseResult(): LoopReadinessResult {
   return {
     status: "blocked",
     blockNumber: 123n,
+    liquidation: null,
     checks: [
       {
         key: "audit-gate",

@@ -2,10 +2,11 @@ import { curvePoolAbi } from "../abi/curvePool.js";
 import { inferenceVaultAbi } from "../abi/inferenceVault.js";
 import { loopExecutorAbi } from "../abi/loopExecutor.js";
 import { morphoAbi } from "../abi/morpho.js";
+import { morphoOracleAbi } from "../abi/morphoOracle.js";
 import { missingDeploymentKeys } from "../config/load.js";
-import { computeBorrowedDiem, computeCurvePoolTvlDiem, WAD } from "../metrics/math.js";
-import type { Address, AppConfig } from "../types/domain.js";
-import { parseMorphoMarket, parseMorphoPosition } from "./preflight.js";
+import { computeBorrowedDiem, computeCurvePoolTvlDiem, computeHealthFactor, WAD } from "../metrics/math.js";
+import type { Address, AppConfig, Hex } from "../types/domain.js";
+import { parseMorphoMarket, parseMorphoMarketParams, parseMorphoPosition } from "./preflight.js";
 import type { LoopSimulationClient } from "./simulator.js";
 import { expectedUniswapV3FlashFee } from "./uniswapV3FlashFee.js";
 
@@ -29,9 +30,18 @@ interface ExecutorProtocolConfig {
   wstDiem: Address;
 }
 
+export interface LiquidationReadout {
+  healthFactor: number;
+  debtGrowthHeadroomBps: number;
+  liquidationPriceDiemPerWstDiem: bigint | null;
+  oraclePriceDiemPerWstDiem: bigint | null;
+  lltvBps: number;
+}
+
 export interface LoopReadinessResult {
   status: "ready" | "blocked";
   blockNumber?: bigint;
+  liquidation: LiquidationReadout | null;
   checks: ReadinessCheck[];
   blockers: string[];
   vault?: {
@@ -149,10 +159,95 @@ function pushMismatch(mismatches: string[], name: string, ok: boolean): void {
   }
 }
 
+function lltvWadToBps(lltvWad: bigint): number {
+  return Number((lltvWad * 10_000n) / WAD);
+}
+
+/**
+ * SPEC005 §2 — live liquidation readout. Fault detection runs BEFORE the price
+ * formula so `lltvWad`/`collateral` (both denominators of
+ * `liquidationPriceDiemPerWstDiem`) can never divide-by-zero and throw into the
+ * `rpc-read` catch (which would mask a CRITICAL as a 20). Branch order is
+ * load-bearing: (1) no borrow → null; (2) fault → sentinel readout, no price
+ * formula; (3) normal → full readout. The underwater fault (collateral === 0) is
+ * sourced from the already-read owner position, independent of the gated reads.
+ */
+async function buildLiquidationReadout(input: {
+  client: LoopSimulationClient;
+  config: AppConfig;
+  blockNumber: bigint;
+  marketId: Hex;
+  collateral: bigint;
+  borrowShares: bigint;
+  borrowedDiem: bigint;
+}): Promise<LiquidationReadout | null> {
+  const { collateral, borrowShares, borrowedDiem } = input;
+  // §2 case 1 — nothing to liquidate.
+  if (borrowShares === 0n) {
+    return null;
+  }
+  // §2 case 2 — underwater/bad-debt fault, sourced from owner reads only. No gated
+  // read, no price formula (collateral === 0 is the price denominator).
+  if (collateral === 0n) {
+    return {
+      healthFactor: 0,
+      debtGrowthHeadroomBps: -10_000,
+      liquidationPriceDiemPerWstDiem: null,
+      oraclePriceDiemPerWstDiem: null,
+      lltvBps: 0,
+    };
+  }
+  const params = parseMorphoMarketParams(
+    await input.client.readContract({
+      address: input.config.contracts.morphoBlue,
+      abi: morphoAbi,
+      functionName: "idToMarketParams",
+      args: [input.marketId],
+      blockNumber: input.blockNumber,
+    }),
+  );
+  if (params === null) {
+    // Unreadable market params are genuinely un-assessable → fail-closed via the
+    // outer rpc-read catch → indeterminate(20), not a false readout.
+    throw new Error("Morpho idToMarketParams returned an unsupported shape");
+  }
+  const lltvWad = params.lltv;
+  const oraclePrice1e36 = BigInt(
+    (await input.client.readContract({
+      address: params.oracle,
+      abi: morphoOracleAbi,
+      functionName: "price",
+      blockNumber: input.blockNumber,
+    })) as bigint | number | string,
+  );
+  // §2 case 2 — deterministic protocol fault (Morpho values collateral at ~0).
+  // MUST precede the price formula: bigint / 0n throws.
+  if (lltvWad === 0n || oraclePrice1e36 === 0n) {
+    return {
+      healthFactor: 0,
+      debtGrowthHeadroomBps: -10_000,
+      liquidationPriceDiemPerWstDiem: null,
+      oraclePriceDiemPerWstDiem: oraclePrice1e36 === 0n ? null : oraclePrice1e36 / WAD,
+      lltvBps: lltvWad === 0n ? 0 : lltvWadToBps(lltvWad),
+    };
+  }
+  // §2 case 3 — normal branch (collateral > 0 && lltvWad > 0 && oraclePrice1e36 > 0).
+  const collateralValueDiem = (collateral * oraclePrice1e36) / (WAD * WAD);
+  const healthFactor = computeHealthFactor(collateralValueDiem, borrowedDiem, lltvWad);
+  return {
+    healthFactor,
+    debtGrowthHeadroomBps: Math.round((healthFactor - 1) * 10_000),
+    liquidationPriceDiemPerWstDiem: (borrowedDiem * WAD * WAD) / (lltvWad * collateral),
+    oraclePriceDiemPerWstDiem: oraclePrice1e36 / WAD,
+    lltvBps: lltvWadToBps(lltvWad),
+  };
+}
+
 export async function buildLoopReadiness(input: {
   config: AppConfig;
   owner?: Address | null;
   client?: LoopSimulationClient;
+  includeLiquidation?: boolean;
 }): Promise<LoopReadinessResult> {
   const checks: ReadinessCheck[] = [];
   const blockers: string[] = [];
@@ -186,6 +281,7 @@ export async function buildLoopReadiness(input: {
     blockers.push("broadcast disabled pending production executor audit/review");
     return {
       status: "blocked",
+      liquidation: null,
       checks,
       blockers,
       broadcastAvailable: false,
@@ -199,6 +295,7 @@ export async function buildLoopReadiness(input: {
   let morpho: LoopReadinessResult["morpho"];
   let executor: LoopReadinessResult["executor"];
   let ownerReadiness: LoopReadinessResult["owner"];
+  let liquidation: LiquidationReadout | null = null;
   try {
     const chainId = await input.client.getChainId();
     checks.push(
@@ -588,6 +685,23 @@ export async function buildLoopReadiness(input: {
             position.collateral > 0n && position.borrowShares > 0n && borrowedDiem > 0n,
           executorAuthorized,
         };
+        // SPEC005 §7 — flag-gated live liquidation readout, block-pinned to the same
+        // blockNumber as the position/market reads. Off for `loop readiness`.
+        if (
+          input.includeLiquidation === true &&
+          blockNumber !== undefined &&
+          config.morpho.marketId !== null
+        ) {
+          liquidation = await buildLiquidationReadout({
+            client: input.client,
+            config,
+            blockNumber,
+            marketId: config.morpho.marketId,
+            collateral: position.collateral,
+            borrowShares: position.borrowShares,
+            borrowedDiem,
+          });
+        }
         checks.push(
           check(
             "owner-position",
@@ -642,6 +756,7 @@ export async function buildLoopReadiness(input: {
   return {
     status: blockers.length === 0 ? "ready" : "blocked",
     blockNumber,
+    liquidation,
     checks,
     blockers,
     vault,

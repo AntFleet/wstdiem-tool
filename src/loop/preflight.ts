@@ -21,7 +21,7 @@ import type {
   RouteSlippageEvidence,
 } from "./types.js";
 
-interface ReadMorphoMarketParams {
+export interface ReadMorphoMarketParams {
   loanToken: Address;
   collateralToken: Address;
   oracle: Address;
@@ -94,7 +94,7 @@ function isForcedExit(context: LoopPreflightContext): boolean {
   return context.action === "exit" && context.params !== null && (context.params as LoopExitParams).force === true;
 }
 
-function parseMorphoMarketParams(value: unknown): ReadMorphoMarketParams | null {
+export function parseMorphoMarketParams(value: unknown): ReadMorphoMarketParams | null {
   if (Array.isArray(value) && value.length >= 5) {
     return {
       loanToken: value[0] as Address,

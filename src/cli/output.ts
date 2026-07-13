@@ -60,7 +60,14 @@ export function renderStatusTable(snapshot: MetricSnapshot, readiness: string[])
       `utilization ${(snapshot.utilization * 100).toFixed(2)}%, borrowRate ${(
         snapshot.borrowRate * 100
       ).toFixed(2)}%, HF ${
-        Number.isFinite(snapshot.healthFactor) ? snapshot.healthFactor.toFixed(2) : "Infinity"
+        // SPEC005 §5 — status/watch never read the position (validity.position is
+        // always false here), so the unpopulated Infinity default is a false safety
+        // signal. Display-only honesty fix; no position/oracle read added.
+        !snapshot.validity.position
+          ? "n/a (run monitor)"
+          : Number.isFinite(snapshot.healthFactor)
+            ? snapshot.healthFactor.toFixed(2)
+            : "Infinity"
       }`,
     ],
     [
@@ -125,6 +132,18 @@ export function renderLoopReadinessTable(result: LoopReadinessResult): string {
             result.owner.borrowedDiem,
           )} DIEM, authorized ${result.owner.executorAuthorized === true ? "yes" : "no"}`,
     ],
+    [
+      // SPEC005 §7 — headline liquidation row: HF + debt-growth headroom only.
+      // Liquidation price + NAV caveat live in the detailed/--json view (OQ-B).
+      "Liquidation",
+      result.liquidation === null
+        ? "n/a (no borrow)"
+        : `HF ${
+            Number.isFinite(result.liquidation.healthFactor)
+              ? result.liquidation.healthFactor.toFixed(2)
+              : "Infinity"
+          }; debt-growth headroom ${(result.liquidation.debtGrowthHeadroomBps / 100).toFixed(2)}%`,
+    ],
     ["Checks", result.checks.map((entry) => `${entry.key}:${entry.status}`).join("; ")],
     ["Blockers", result.blockers.length === 0 ? "none" : result.blockers.join("; ")],
   );
@@ -152,6 +171,29 @@ export function renderMonitorDashboard(
   }
   if (delivered.length > 0) {
     alertTable.push(["Delivery", delivered.join("; ")]);
+  }
+  // SPEC005 §6/§7/OQ-B — liquidation price + NAV-appreciating caveat surface in the
+  // detailed monitor view only (not the headline row), on the normal (priced) branch.
+  const liquidation = result.liquidation;
+  if (liquidation !== null && liquidation.liquidationPriceDiemPerWstDiem !== null) {
+    const oracleNow =
+      liquidation.oraclePriceDiemPerWstDiem === null
+        ? "n/a"
+        : `${formatWad(liquidation.oraclePriceDiemPerWstDiem)} DIEM/wstDIEM`;
+    const detailTable = new Table({ head: ["Liquidation detail", "Value"], wordWrap: true });
+    detailTable.push(
+      [
+        "Liquidation price",
+        `${formatWad(liquidation.liquidationPriceDiemPerWstDiem)} DIEM/wstDIEM (oracle now ${oracleNow}; LLTV ${(
+          liquidation.lltvBps / 100
+        ).toFixed(2)}%)`,
+      ],
+      [
+        "Caveat",
+        "wstDIEM is NAV-appreciating: an oracle decline to the liquidation price implies a vault/oracle fault, not ordinary volatility. The primary live liquidation path is debt accrual — see debt-growth headroom, not this price.",
+      ],
+    );
+    return `${renderLoopReadinessTable(result)}\n${alertTable.toString()}\n${detailTable.toString()}`;
   }
   return `${renderLoopReadinessTable(result)}\n${alertTable.toString()}`;
 }

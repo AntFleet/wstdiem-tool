@@ -96,6 +96,7 @@ function readiness(overrides: Partial<LoopReadinessResult>): LoopReadinessResult
   return {
     status: "blocked",
     blockNumber: 123n,
+    liquidation: null,
     checks: [{ key: "audit-gate", status: "fail", message: "audit gate closed" }],
     blockers: ["broadcast disabled pending production executor audit/review"],
     broadcastAvailable: false,

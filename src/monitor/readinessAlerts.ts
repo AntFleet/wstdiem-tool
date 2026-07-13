@@ -1,5 +1,12 @@
-import type { AlertEvaluation } from "../types/domain.js";
+import type { AlertEvaluation, ThresholdConfig } from "../types/domain.js";
 import type { LoopReadinessResult, ReadinessCheck } from "../loop/readiness.js";
+
+type HealthFactorThresholds = Pick<ThresholdConfig, "healthFactorWarn" | "healthFactorCritical">;
+
+const DEFAULT_HEALTH_FACTOR_THRESHOLDS: HealthFactorThresholds = {
+  healthFactorWarn: 1.6,
+  healthFactorCritical: 1.4,
+};
 
 function alert(
   alertKey: string,
@@ -25,7 +32,10 @@ function checkStatus(
   return result.checks.find((check) => check.key === key)?.status;
 }
 
-export function evaluateReadinessAlerts(result: LoopReadinessResult): AlertEvaluation[] {
+export function evaluateReadinessAlerts(
+  result: LoopReadinessResult,
+  thresholds: HealthFactorThresholds = DEFAULT_HEALTH_FACTOR_THRESHOLDS,
+): AlertEvaluation[] {
   const alerts: AlertEvaluation[] = [];
 
   if (checkStatus(result, "rpc-client") === "fail" || checkStatus(result, "rpc-read") === "fail") {
@@ -161,6 +171,71 @@ export function evaluateReadinessAlerts(result: LoopReadinessResult): AlertEvalu
           },
         ),
       );
+    }
+  }
+
+  // SPEC005 §3 — live liquidation alerts, emitted only when `includeLiquidation`
+  // populated `result.liquidation` (null on the `loop readiness` path → no alert).
+  // A null `liquidationPriceDiemPerWstDiem` discriminates the §2 fault branch (the
+  // price formula was never computed) from the §2 normal branch.
+  const liquidation = result.liquidation;
+  if (liquidation !== null) {
+    const headroomPercent = (liquidation.debtGrowthHeadroomBps / 100).toFixed(2);
+    if (liquidation.liquidationPriceDiemPerWstDiem === null) {
+      // §3b — deterministic protocol fault; Morpho values collateral at ~0.
+      alerts.push(
+        alert(
+          "position_liquidation_fault",
+          "CRITICAL",
+          `Position liquidation fault: Morpho values the collateral at ~0 (HF ${liquidation.healthFactor.toFixed(
+            2,
+          )}, debt-growth headroom ${headroomPercent}%). There is no automated protection — act out-of-band now.`,
+          "Investigate the market oracle/LLTV or an underwater (bad-debt) position immediately; the tool cannot deleverage.",
+          {
+            healthFactor: liquidation.healthFactor,
+            debtGrowthHeadroomBps: liquidation.debtGrowthHeadroomBps,
+            oraclePriceDiemPerWstDiem:
+              liquidation.oraclePriceDiemPerWstDiem === null
+                ? null
+                : liquidation.oraclePriceDiemPerWstDiem.toString(),
+            lltvBps: liquidation.lltvBps,
+          },
+        ),
+      );
+    } else if (Number.isFinite(liquidation.healthFactor)) {
+      // §3a — live position health factor (finite HF on the normal branch).
+      const level =
+        liquidation.healthFactor < thresholds.healthFactorCritical
+          ? "CRITICAL"
+          : liquidation.healthFactor < thresholds.healthFactorWarn
+            ? "WARN"
+            : null;
+      if (level !== null) {
+        alerts.push(
+          alert(
+            "position_health_factor",
+            level,
+            `Owner position health factor ${liquidation.healthFactor.toFixed(
+              2,
+            )} (debt-growth headroom ${headroomPercent}%) is below the ${
+              level === "CRITICAL"
+                ? thresholds.healthFactorCritical
+                : thresholds.healthFactorWarn
+            } ${level.toLowerCase()} line. There is no automated protection — act out-of-band now.`,
+            "Reduce leverage out-of-band (repay DIEM debt or add wstDIEM collateral); the tool cannot deleverage.",
+            {
+              healthFactor: liquidation.healthFactor,
+              debtGrowthHeadroomBps: liquidation.debtGrowthHeadroomBps,
+              liquidationPriceDiemPerWstDiem: liquidation.liquidationPriceDiemPerWstDiem.toString(),
+              oraclePriceDiemPerWstDiem:
+                liquidation.oraclePriceDiemPerWstDiem === null
+                  ? null
+                  : liquidation.oraclePriceDiemPerWstDiem.toString(),
+              lltvBps: liquidation.lltvBps,
+            },
+          ),
+        );
+      }
     }
   }
 

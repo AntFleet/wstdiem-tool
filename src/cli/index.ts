@@ -222,8 +222,16 @@ program
       } catch {
         client = undefined;
       }
-      const readiness = await buildLoopReadiness({ config, owner, client });
-      const alerts = evaluateReadinessAlerts(readiness);
+      // SPEC005 §7 — `monitor` is the danger command: it (and only it) reads live
+      // LLTV + oracle for the liquidation readout. `loop readiness` leaves the flag
+      // off, so --strict-evidence is untouched.
+      const readiness = await buildLoopReadiness({
+        config,
+        owner,
+        client,
+        includeLiquidation: true,
+      });
+      const alerts = evaluateReadinessAlerts(readiness, config.thresholds);
       const delivered = opts.alert
         ? await deliverConfiguredAlerts(
             config,
