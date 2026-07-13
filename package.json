@@ -19,6 +19,8 @@
     "readiness:owner": "node scripts/validate-live-evidence-env.mjs && npm run build && node dist/cli/index.js --json loop readiness --owner \"$WSTDIEM_FORK_OWNER\" --loop-executor \"$WSTDIEM_FORK_LOOP_EXECUTOR\" --strict-evidence",
     "proof:full-unwind": "node scripts/validate-live-evidence-env.mjs && forge test --match-path 'test/foundry/BaseFullUnwindReadinessFork.t.sol' --match-test testLatestBlockFullUnwindReadinessWhenEnvProvided",
     "monitor:live": "node dist/cli/index.js monitor",
+    "sample:tick": "bash scripts/sample-tick.sh",
+    "sample:install-launchd": "bash scripts/install-sample-tick-launchd.sh",
     "sizing": "node dist/cli/index.js loop sizing",
     "smoke": "node dist/cli/index.js alerts test --json --message smoke"
   },
