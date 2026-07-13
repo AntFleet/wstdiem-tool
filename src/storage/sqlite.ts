@@ -6,6 +6,8 @@ import type {
   StoredCreditEvent,
   StoredCurveSwap,
   StoredHarvestEvent,
+  StoredInferenceCredit,
+  StoredInferenceSettlement,
   StoredPositionSnapshot,
 } from "../types/domain.js";
 
@@ -136,8 +138,35 @@ export class Storage {
         payload_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS brief_runs_ts ON brief_runs(timestamp DESC, id DESC);
+
+      CREATE TABLE IF NOT EXISTS inference_credit (
+        tx_hash TEXT NOT NULL,
+        log_index INTEGER NOT NULL,
+        block_number INTEGER NOT NULL,
+        ts INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        adapter TEXT NOT NULL,
+        amount_diem TEXT NOT NULL,
+        shares TEXT,
+        PRIMARY KEY (tx_hash, log_index)
+      );
+
+      CREATE TABLE IF NOT EXISTS inference_settlement (
+        tx_hash TEXT NOT NULL,
+        log_index INTEGER NOT NULL,
+        block_number INTEGER NOT NULL,
+        ts INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        adapter TEXT NOT NULL,
+        usdc_amount TEXT,
+        diem_out TEXT,
+        operator_shares TEXT,
+        PRIMARY KEY (tx_hash, log_index)
+      );
     `);
     this.ensureColumn("metric_snapshots", "vault_total_assets_diem", "TEXT NOT NULL DEFAULT '0'");
+    // SPEC009: start-of-window totalSupply for inference-share S_start.
+    this.ensureColumn("metric_snapshots", "total_supply_diem", "TEXT NOT NULL DEFAULT '0'");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -162,15 +191,16 @@ export class Storage {
     this.db
       .prepare(
         `INSERT INTO metric_snapshots (
-          timestamp, block_number, nav, vault_total_assets_diem, base_apy, borrow_rate, net_apy_35,
+          timestamp, block_number, nav, vault_total_assets_diem, total_supply_diem, base_apy, borrow_rate, net_apy_35,
           spread_score, health_factor, curve_tvl_diem, oracle_deviation
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         snapshot.timestamp,
         Number(snapshot.blockNumber),
         snapshot.nav.toString(),
         snapshot.vaultTotalAssetsDiem.toString(),
+        snapshot.totalSupply.toString(),
         snapshot.baseApy,
         snapshot.borrowRate,
         snapshot.netApy35,
@@ -237,10 +267,11 @@ export class Storage {
     timestamp: number;
     nav: bigint;
     totalAssetsDiem: bigint;
+    totalSupply: bigint;
   }> {
     const initial = this.db
       .prepare(
-        `SELECT id, timestamp, nav, vault_total_assets_diem
+        `SELECT id, timestamp, nav, vault_total_assets_diem, total_supply_diem
          FROM metric_snapshots
          WHERE timestamp <= ?
            AND nav != '0'
@@ -249,11 +280,17 @@ export class Storage {
          LIMIT 1`,
       )
       .get(windowStart) as
-      | { id: number; timestamp: number; nav: string; vault_total_assets_diem: string }
+      | {
+          id: number;
+          timestamp: number;
+          nav: string;
+          vault_total_assets_diem: string;
+          total_supply_diem: string;
+        }
       | undefined;
     const rows = this.db
       .prepare(
-        `SELECT id, timestamp, nav, vault_total_assets_diem
+        `SELECT id, timestamp, nav, vault_total_assets_diem, total_supply_diem
          FROM metric_snapshots
          WHERE timestamp > ?
            AND nav != '0'
@@ -265,6 +302,7 @@ export class Storage {
       timestamp: number;
       nav: string;
       vault_total_assets_diem: string;
+      total_supply_diem: string;
     }>;
     // App-layer bigint filter: SQL text '0' is the empty-tick sentinel; re-check as bigint.
     return [initial, ...rows]
@@ -276,14 +314,134 @@ export class Storage {
           timestamp: number;
           nav: string;
           vault_total_assets_diem: string;
+          total_supply_diem: string;
         } => row !== undefined,
       )
       .map((row) => ({
         timestamp: row.timestamp,
         nav: BigInt(row.nav),
         totalAssetsDiem: BigInt(row.vault_total_assets_diem),
+        totalSupply: BigInt(row.total_supply_diem ?? "0"),
       }))
       .filter((row) => row.nav > 0n && row.totalAssetsDiem > 0n);
+  }
+
+  insertInferenceCredit(event: StoredInferenceCredit): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO inference_credit (
+          tx_hash, log_index, block_number, ts, kind, adapter, amount_diem, shares
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        event.txHash,
+        event.logIndex,
+        Number(event.blockNumber),
+        event.timestamp,
+        event.kind,
+        event.adapter,
+        event.amountDiem.toString(),
+        event.shares?.toString() ?? null,
+      );
+  }
+
+  insertInferenceSettlement(event: StoredInferenceSettlement): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO inference_settlement (
+          tx_hash, log_index, block_number, ts, kind, adapter, usdc_amount, diem_out, operator_shares
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        event.txHash,
+        event.logIndex,
+        Number(event.blockNumber),
+        event.timestamp,
+        event.kind,
+        event.adapter,
+        event.usdcAmount?.toString() ?? null,
+        event.diemOut?.toString() ?? null,
+        event.operatorShares?.toString() ?? null,
+      );
+  }
+
+  listInferenceCreditsSince(timestamp: number): StoredInferenceCredit[] {
+    const rows = this.db
+      .prepare(
+        `SELECT tx_hash, log_index, block_number, ts, kind, adapter, amount_diem, shares
+         FROM inference_credit
+         WHERE ts >= ?
+         ORDER BY ts ASC, log_index ASC`,
+      )
+      .all(timestamp) as Array<{
+      tx_hash: string;
+      log_index: number;
+      block_number: number;
+      ts: number;
+      kind: string;
+      adapter: string;
+      amount_diem: string;
+      shares: string | null;
+    }>;
+    return rows.map((row) => ({
+      txHash: row.tx_hash as StoredInferenceCredit["txHash"],
+      logIndex: row.log_index,
+      blockNumber: BigInt(row.block_number),
+      timestamp: row.ts,
+      kind: row.kind as StoredInferenceCredit["kind"],
+      adapter: row.adapter as StoredInferenceCredit["adapter"],
+      amountDiem: BigInt(row.amount_diem),
+      shares: row.shares === null ? undefined : BigInt(row.shares),
+    }));
+  }
+
+  listInferenceSettlementsSince(timestamp: number): StoredInferenceSettlement[] {
+    const rows = this.db
+      .prepare(
+        `SELECT tx_hash, log_index, block_number, ts, kind, adapter, usdc_amount, diem_out, operator_shares
+         FROM inference_settlement
+         WHERE ts >= ?
+         ORDER BY ts ASC, log_index ASC`,
+      )
+      .all(timestamp) as Array<{
+      tx_hash: string;
+      log_index: number;
+      block_number: number;
+      ts: number;
+      kind: string;
+      adapter: string;
+      usdc_amount: string | null;
+      diem_out: string | null;
+      operator_shares: string | null;
+    }>;
+    return rows.map((row) => ({
+      txHash: row.tx_hash as StoredInferenceSettlement["txHash"],
+      logIndex: row.log_index,
+      blockNumber: BigInt(row.block_number),
+      timestamp: row.ts,
+      kind: row.kind as StoredInferenceSettlement["kind"],
+      adapter: row.adapter as StoredInferenceSettlement["adapter"],
+      usdcAmount: row.usdc_amount === null ? undefined : BigInt(row.usdc_amount),
+      diemOut: row.diem_out === null ? undefined : BigInt(row.diem_out),
+      operatorShares: row.operator_shares === null ? undefined : BigInt(row.operator_shares),
+    }));
+  }
+
+  /** Earliest inference event block (credit or settlement) — window first-seen bound. */
+  getInferenceFirstSeenBlock(): bigint | null {
+    const credit = this.db
+      .prepare(`SELECT MIN(block_number) AS mn FROM inference_credit`)
+      .get() as { mn: number | null } | undefined;
+    const settlement = this.db
+      .prepare(`SELECT MIN(block_number) AS mn FROM inference_settlement`)
+      .get() as { mn: number | null } | undefined;
+    const candidates = [credit?.mn, settlement?.mn].filter(
+      (v): v is number => v !== null && v !== undefined,
+    );
+    if (candidates.length === 0) {
+      return null;
+    }
+    return BigInt(Math.min(...candidates));
   }
 
   insertAlert(alert: AlertEvaluation, timestamp: number, deliveredChannels: string[]): void {

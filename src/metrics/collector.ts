@@ -176,6 +176,8 @@ export async function collectVaultMetrics(
       navDisplay: formatWad(nav.nav),
       navSource: nav.source,
       vaultTotalAssetsDiem: BigInt(totalAssets as bigint | number | string),
+      // SPEC009: persist supply for start-of-window S_start (already fetched for NAV).
+      totalSupply: BigInt(totalSupply as bigint | number | string),
     },
     readiness,
   };

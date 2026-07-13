@@ -48,6 +48,16 @@ const configSchema = z
       morphoOracle: nullableAddressSchema,
       loopExecutor: nullableAddressSchema,
       autoDeleverageExecutor: nullableAddressSchema,
+      usdc: nullableAddressSchema,
+      venueAdapters: z
+        .array(
+          z.object({
+            address: addressSchema,
+            name: z.string().min(1).optional(),
+          }),
+        )
+        .optional()
+        .transform((value) => value ?? []),
     }),
     morpho: z.object({
       marketId: z
@@ -81,6 +91,7 @@ const configSchema = z
       riskFreeRate: z.number().nonnegative(),
       basisDiscountWarnBps: z.number().int().min(1),
       basisDiscountCriticalBps: z.number().int().min(1),
+      inferenceReconcileToleranceBps: z.number().int().min(0).max(10_000),
     }),
     basis: z.object({
       // Quoted decimal string only (e.g. "0.97"); null = no configured market price.

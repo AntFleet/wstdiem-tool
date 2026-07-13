@@ -2,6 +2,12 @@ export type Address = `0x${string}`;
 export type Hex = `0x${string}`;
 export type Severity = "INFO" | "WARN" | "CRITICAL";
 
+/** SPEC009: optional venue adapter entry (config-seeded; name resolved live if omitted). */
+export interface VenueAdapterConfig {
+  address: Address;
+  name?: string;
+}
+
 export interface ContractsConfig {
   diem: Address;
   weth: Address;
@@ -18,6 +24,10 @@ export interface ContractsConfig {
   morphoOracle: Address | null;
   loopExecutor: Address | null;
   autoDeleverageExecutor: Address | null;
+  /** Base USDC (6-dec). Optional — SPEC009 flows; absence → unrouted balance n/a. */
+  usdc: Address | null;
+  /** Config-seeded venue adapters for SettlementReceived / unrouted-USDC (SPEC009). */
+  venueAdapters: VenueAdapterConfig[];
 }
 
 export interface FlashLoanConfig {
@@ -46,6 +56,11 @@ export interface ThresholdConfig {
   basisDiscountWarnBps: number;
   /** SPEC007: absolute discount bps that trigger CRITICAL (default 500; ≥ warn). */
   basisDiscountCriticalBps: number;
+  /**
+   * SPEC009 OQ-E: residual band half-width for inferenceSharePct (default 500 bps = ±5% of
+   * realized yield). Band only guards the NAV-side headline.
+   */
+  inferenceReconcileToleranceBps: number;
 }
 
 /** SPEC007: operator-supplied secondary market price seam (decimal DIEM per wstDIEM or null). */
@@ -136,6 +151,8 @@ export interface MetricSnapshot {
   navDisplay: string;
   navSource: "empty" | "onchain";
   vaultTotalAssetsDiem: bigint;
+  /** Vault totalSupply at snapshot time — required for SPEC009 S_start (start-of-window supply). */
+  totalSupply: bigint;
   baseApy: number;
   borrowRate: number;
   utilization: number;
@@ -168,6 +185,36 @@ export interface StoredHarvestEvent {
   tokenIn?: string;
   amountIn?: bigint;
   amountOut?: bigint;
+}
+
+/** SPEC009: DIEMCredited | WstDIEMCredited rows. */
+export interface StoredInferenceCredit {
+  txHash: Hex;
+  logIndex: number;
+  blockNumber: bigint;
+  timestamp: number;
+  kind: "DIEMCredited" | "WstDIEMCredited";
+  /** Indexed adapter (DIEMCredited) or source (WstDIEMCredited). */
+  adapter: Address;
+  amountDiem: bigint;
+  /** WstDIEMCredited only. */
+  shares?: bigint;
+}
+
+/** SPEC009: SettlementReceived | YieldRouted rows. */
+export interface StoredInferenceSettlement {
+  txHash: Hex;
+  logIndex: number;
+  blockNumber: bigint;
+  timestamp: number;
+  kind: "SettlementReceived" | "YieldRouted";
+  adapter: Address;
+  /** 6-dec USDC (SettlementReceived.amount / YieldRouted.usdc). */
+  usdcAmount?: bigint;
+  /** YieldRouted only, 18-dec. */
+  diemOut?: bigint;
+  /** YieldRouted only, 18-dec. */
+  operatorShares?: bigint;
 }
 
 export interface StoredCurveSwap {

@@ -5,6 +5,7 @@ import type { LoopBriefResult } from "../loop/brief.js";
 import type { LoopCapacityResult } from "../loop/capacity.js";
 import type { LoopBasisResult } from "../metrics/basis.js";
 import type { LoopDemandResult } from "../metrics/demand.js";
+import type { InferenceFlowsResult } from "../metrics/flows.js";
 import type { LoopReadinessResult } from "../loop/readiness.js";
 import type { LoopSizingReport, LoopSizingResult } from "../loop/sizing.js";
 
@@ -735,6 +736,111 @@ export function renderLoopDemandTable(result: LoopDemandResult): string {
     }
   }
   return out;
+}
+
+/**
+ * SPEC009 attributable inference-flows block. Appended under NAV-velocity when `--flows`.
+ * Never headlines settled USDC as "inference demand"; leads with Tier-1 DIEMCredited.
+ */
+export function renderInferenceFlowsTable(flows: InferenceFlowsResult): string {
+  const lines: string[] = [];
+  lines.push("");
+  lines.push("── Attributable inference flows (SPEC009) ──");
+  lines.push(flows.disclaimer);
+  if (flows.firstSeenBlock !== null) {
+    lines.push(`Window first-seen block (forward-only series): ${flows.firstSeenBlock}`);
+  } else {
+    lines.push("Window first-seen block: n/a (no inference events accrued yet)");
+  }
+
+  if (!flows.available) {
+    lines.push(`Flows: n/a (${flows.reason ?? "insufficient data"})`);
+    return lines.join("\n");
+  }
+
+  const headline = new Table({ head: ["Headline (Tier-1 lead)", "Value"], wordWrap: true });
+  const share = flows.inferenceShare;
+  const shareCell =
+    share.status === "ok" && share.inferenceSharePctMid !== null
+      ? `${share.inferenceSharePctLow}% – ${share.inferenceSharePctHigh}% ` +
+        `(mid ${share.inferenceSharePctMid}%; band ±${share.toleranceBps} bps of realized yield)`
+      : `n/a (${share.reason ?? "unavailable"})`;
+  headline.push(
+    ["DIEM credited (Tier 1, holder yield)", `${formatWad(BigInt(flows.aggregate.diemCredited))} DIEM`],
+    ["Inference share of realized yield", shareCell],
+    [
+      "Residual (base staking + deposit-fee + noise)",
+      share.residualDiem === null ? "n/a" : `${formatWad(BigInt(share.residualDiem))} DIEM`,
+    ],
+    [
+      "USDC settled as-reported (Tier 2; NOT inference demand)",
+      `${flows.aggregate.usdcSettledAsReported} (6-dec raw units)`,
+    ],
+    [
+      "Unrouted USDC balance (operator has not called routeYield) — state fact, not demand",
+      flows.aggregate.unroutedUsdcTotal === null
+        ? "n/a"
+        : `${flows.aggregate.unroutedUsdcTotal} (6-dec raw units)`,
+    ],
+    [
+      "Flow velocity / trend",
+      flows.velocity.status === "ok"
+        ? `ok (events current ${flows.velocity.currentFlowEventCount}, prior ${flows.velocity.priorFlowEventCount})`
+        : `n/a (${flows.velocity.reason ?? "gated"})`,
+    ],
+  );
+  lines.push(headline.toString());
+
+  if (flows.adapters.length > 0) {
+    const per = new Table({
+      head: [
+        "Adapter",
+        "DIEM credited (T1)",
+        "USDC settled as-reported (T2)",
+        "Unrouted USDC (state)",
+        "Conversion (DIEM/USDC)",
+        "Labels",
+      ],
+      wordWrap: true,
+    });
+    for (const a of flows.adapters) {
+      const label = a.name !== null ? `${a.name}\n${a.address}` : a.address;
+      const conv =
+        a.realizedConversionDiemPerUsdcWad === null
+          ? "n/a"
+          : formatWad(BigInt(a.realizedConversionDiemPerUsdcWad));
+      per.push([
+        label,
+        formatWad(BigInt(a.diemCredited)),
+        a.usdcSettledAsReported,
+        a.unroutedUsdc ?? "n/a",
+        conv,
+        a.trustLabels.filter((l) => l.includes("x402") || l.includes("unrestricted") || l.includes("not-registered")).join(", ") ||
+          "tier1+tier2",
+      ]);
+    }
+    lines.push(per.toString());
+  }
+
+  if (flows.caveats.length > 0) {
+    lines.push(`Caveats: ${flows.caveats.join("; ")}`);
+  }
+
+  const ban = ["inference demand is", "inference volume", "demand collapsed", "demand is up"];
+  const out = lines.join("\n");
+  for (const phrase of ban) {
+    if (out.toLowerCase().includes(phrase.toLowerCase())) {
+      throw new Error(`renderInferenceFlowsTable produced banned phrase: ${phrase}`);
+    }
+  }
+  return out;
+}
+
+export function renderLoopDemandWithFlows(
+  demand: LoopDemandResult,
+  flows: InferenceFlowsResult,
+): string {
+  return `${renderLoopDemandTable(demand)}${renderInferenceFlowsTable(flows)}`;
 }
 
 /**

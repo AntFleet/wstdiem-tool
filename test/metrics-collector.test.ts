@@ -50,6 +50,8 @@ describe("metrics collector", () => {
     expect(result.snapshot.navDisplay).toBe("2.000000");
     expect(result.snapshot.navSource).toBe("onchain");
     expect(result.snapshot.validity.yieldWindow).toBe(false);
+    // SPEC009: totalSupply carried through for S_start persistence
+    expect(result.snapshot.totalSupply).toBe(100n * WAD);
   });
 
   it("marks an empty vault as valid but empty-source NAV", async () => {

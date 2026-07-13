@@ -38,7 +38,14 @@ import { inferenceVaultAbi } from "../abi/inferenceVault.js";
 import { buildLoopBasis, type MarketPriceSourceKind } from "../metrics/basis.js";
 import { collectVaultMetrics } from "../metrics/collector.js";
 import { buildLoopDemand, DEFAULT_VELOCITY_WINDOW_HOURS, type NavSample } from "../metrics/demand.js";
+import {
+  buildInferenceFlows,
+  type AdapterLiveMeta,
+  type InferenceFlowsResult,
+} from "../metrics/flows.js";
 import { formatWad, parseDecimalToUnits, WAD } from "../metrics/math.js";
+import { erc20BalanceOfAbi } from "../abi/erc20.js";
+import { inferenceAdapterReadAbis } from "../abi/inferenceAdapter.js";
 import { evaluateReadinessAlerts } from "../monitor/readinessAlerts.js";
 import type { AppConfig, Severity } from "../types/domain.js";
 import { CliError, toCliError } from "./errors.js";
@@ -54,6 +61,7 @@ import {
   renderLoopCapacityTable,
   renderLoopBasisTable,
   renderLoopDemandTable,
+  renderLoopDemandWithFlows,
   renderLoopReadinessTable,
   renderLoopSizingTable,
   renderMonitorDashboard,
@@ -1141,11 +1149,17 @@ loop
     "append a live convertToAssets tip (memory only; does not write metric_snapshots)",
     false,
   )
+  .option(
+    "--flows",
+    "SPEC009: append attributable inference flows (DIEMCredited / SettlementReceived / inference share)",
+    false,
+  )
   .action(async function (this: Command) {
     await runAction(this, "loop demand", async (config) => {
       const options = this.opts<{
         windowHours?: string;
         fromChain?: boolean;
+        flows?: boolean;
         json?: boolean;
       }>();
       const wantsJson = this.optsWithGlobals<GlobalOptions>().json;
@@ -1235,7 +1249,172 @@ loop
           sampleSource,
           extraWarnings,
         });
-        return wantsJson ? result : renderLoopDemandTable(result);
+
+        if (!options.flows) {
+          // Additive: without --flows the output stays byte-identical to SPEC008.
+          return wantsJson ? result : renderLoopDemandTable(result);
+        }
+
+        // SPEC009 --flows: load inference events + optional live adapter/vault meta.
+        const flowLookback = nowSeconds - windowSeconds * 2;
+        const inferenceCredits = store.listInferenceCreditsSince(flowLookback);
+        const inferenceSettlements = store.listInferenceSettlementsSince(flowLookback);
+        const firstSeenBlock = store.getInferenceFirstSeenBlock();
+
+        // S_start = totalSupply at last valid sample ≤ window start (persisted column).
+        const currentStart = nowSeconds - windowSeconds;
+        const navForFlows = store.listNavSamplesForWindow(currentStart);
+        let sStart: bigint | null = null;
+        let navStart: bigint | null = null;
+        let navEnd: bigint | null = null;
+        const anchor = [...navForFlows].filter((s) => s.timestamp <= currentStart).at(-1);
+        if (anchor !== undefined && anchor.totalSupply > 0n) {
+          sStart = anchor.totalSupply;
+          navStart = anchor.nav;
+        }
+        const endSample = [...navForFlows]
+          .filter((s) => s.timestamp > currentStart && s.timestamp <= nowSeconds)
+          .at(-1);
+        if (endSample !== undefined) {
+          navEnd = endSample.nav;
+        }
+        // Prefer demand-window NAV endpoints when available (same series).
+        if (result.current.navStart !== null) {
+          navStart = BigInt(result.current.navStart);
+        }
+        if (result.current.navEnd !== null) {
+          navEnd = BigInt(result.current.navEnd);
+        }
+
+        let yieldFeeBps: number | null = null;
+        let treasuryActive = false;
+        const liveMeta: AdapterLiveMeta[] = [];
+        try {
+          const client = await createViemLoopSimulationClient(config);
+          if (client !== null && config.contracts.inferenceVault !== null) {
+            try {
+              const fee = await client.readContract({
+                address: config.contracts.inferenceVault,
+                abi: inferenceVaultAbi,
+                functionName: "yieldFeeBps",
+              });
+              yieldFeeBps = Number(fee as bigint | number | string);
+            } catch {
+              /* optional live field */
+            }
+            try {
+              const treasury = (await client.readContract({
+                address: config.contracts.inferenceVault,
+                abi: inferenceVaultAbi,
+                functionName: "treasury",
+              })) as string;
+              treasuryActive =
+                treasury.toLowerCase() !== "0x0000000000000000000000000000000000000000";
+            } catch {
+              /* optional */
+            }
+            for (const entry of config.contracts.venueAdapters ?? []) {
+              let name: string | null = entry.name ?? null;
+              let isVenueAdapter: boolean | null = null;
+              let operatorFeeBps: number | null = null;
+              let unroutedUsdc: bigint | null = null;
+              try {
+                if (name === null) {
+                  name = (await client.readContract({
+                    address: entry.address,
+                    abi: inferenceAdapterReadAbis,
+                    functionName: "inferenceName",
+                  })) as string;
+                }
+              } catch {
+                /* keep config name / null */
+              }
+              try {
+                isVenueAdapter = (await client.readContract({
+                  address: config.contracts.inferenceVault,
+                  abi: inferenceVaultAbi,
+                  functionName: "isVenueAdapter",
+                  args: [entry.address],
+                })) as boolean;
+              } catch {
+                /* optional */
+              }
+              try {
+                operatorFeeBps = Number(
+                  (await client.readContract({
+                    address: entry.address,
+                    abi: inferenceAdapterReadAbis,
+                    functionName: "operatorFeeBps",
+                  })) as bigint | number | string,
+                );
+              } catch {
+                /* optional */
+              }
+              if (config.contracts.usdc !== null) {
+                try {
+                  unroutedUsdc = BigInt(
+                    (await client.readContract({
+                      address: config.contracts.usdc,
+                      abi: [erc20BalanceOfAbi],
+                      functionName: "balanceOf",
+                      args: [entry.address],
+                    })) as bigint | number | string,
+                  );
+                } catch {
+                  /* optional */
+                }
+              }
+              liveMeta.push({
+                address: entry.address,
+                name,
+                isVenueAdapter,
+                operatorFeeBps,
+                unroutedUsdc,
+              });
+            }
+          } else if ((config.contracts.venueAdapters ?? []).length > 0) {
+            for (const entry of config.contracts.venueAdapters) {
+              liveMeta.push({
+                address: entry.address,
+                name: entry.name ?? null,
+                isVenueAdapter: null,
+                operatorFeeBps: null,
+                unroutedUsdc: null,
+              });
+            }
+          }
+        } catch {
+          for (const entry of config.contracts.venueAdapters ?? []) {
+            liveMeta.push({
+              address: entry.address,
+              name: entry.name ?? null,
+              isVenueAdapter: null,
+              operatorFeeBps: null,
+              unroutedUsdc: null,
+            });
+          }
+        }
+
+        const flows: InferenceFlowsResult = buildInferenceFlows({
+          credits: inferenceCredits,
+          settlements: inferenceSettlements,
+          nowSeconds,
+          windowSeconds,
+          configAdapters: config.contracts.venueAdapters ?? [],
+          liveMeta,
+          navStart,
+          navEnd,
+          sStart,
+          yieldFeeBps,
+          treasuryActive,
+          toleranceBps: config.thresholds.inferenceReconcileToleranceBps,
+          firstSeenBlock,
+        });
+
+        if (wantsJson) {
+          return { ...result, flows };
+        }
+        return renderLoopDemandWithFlows(result, flows);
       } finally {
         store.close();
       }

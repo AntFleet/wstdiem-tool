@@ -24,6 +24,8 @@ class MemoryBackfillStorage implements BackfillStorage {
   readonly meta = new Map<string, string>();
   readonly creditEvents: StoredCreditEvent[] = [];
   readonly harvestEvents: StoredHarvestEvent[] = [];
+  readonly inferenceCredits: import("../src/types/domain.js").StoredInferenceCredit[] = [];
+  readonly inferenceSettlements: import("../src/types/domain.js").StoredInferenceSettlement[] = [];
 
   getMeta(key: string): string | null {
     return this.meta.get(key) ?? null;
@@ -39,6 +41,14 @@ class MemoryBackfillStorage implements BackfillStorage {
 
   insertHarvestEvent(event: StoredHarvestEvent): void {
     this.harvestEvents.push(event);
+  }
+
+  insertInferenceCredit(event: import("../src/types/domain.js").StoredInferenceCredit): void {
+    this.inferenceCredits.push(event);
+  }
+
+  insertInferenceSettlement(event: import("../src/types/domain.js").StoredInferenceSettlement): void {
+    this.inferenceSettlements.push(event);
   }
 }
 
@@ -283,10 +293,12 @@ describe("credit and harvest event backfill", () => {
     expect(storage.harvestEvents).toHaveLength(1);
   });
 
-  it("does not advance the cursor when deployment addresses are missing", async () => {
+  it("does not advance the cursor when no backfill targets are configured", async () => {
     const storage = new MemoryBackfillStorage();
     const config = completeConfig();
     config.contracts.feeRouter = null;
+    config.contracts.inferenceVault = null;
+    config.contracts.venueAdapters = [];
 
     const result = await backfillCreditAndHarvestEvents({
       config,
@@ -297,8 +309,61 @@ describe("credit and harvest event backfill", () => {
 
     expect(result.creditEvents).toBe(0);
     expect(result.harvestEvents).toBe(0);
-    expect(result.readiness).toEqual(["feeRouter and inferenceVault are required for credit event backfill"]);
+    expect(result.inferenceCreditEvents).toBe(0);
+    expect(result.readiness[0]).toMatch(/required for event backfill/);
     expect(storage.getMeta("lastProcessedBlock")).toBeNull();
+  });
+
+  it("SPEC009 M3: feeRouter null still accrues inference events when vault+adapters set", async () => {
+    const ADAPTER = "0x00000000000000000000000000000000000000aa" as Address;
+    const storage = new MemoryBackfillStorage();
+    const config = completeConfig();
+    config.contracts.feeRouter = null;
+    config.contracts.venueAdapters = [{ address: ADAPTER, name: "Surplus" }];
+
+    const { inferenceVaultEventAbis } = await import("../src/abi/inferenceVault.js");
+    const { inferenceAdapterEventAbis } = await import("../src/abi/inferenceAdapter.js");
+
+    const diemCreditedLog: BackfillLog = {
+      address: INFERENCE_VAULT,
+      blockNumber: 100n,
+      logIndex: 0,
+      transactionHash: "0xinf1",
+      topics: encodeEventTopics({
+        abi: inferenceVaultEventAbis,
+        eventName: "DIEMCredited",
+        args: { adapter: ADAPTER },
+      }) as [Hex, ...Hex[]],
+      data: encodeAbiParameters([{ type: "uint256" }], [5n * WAD]),
+    };
+    const settlementLog: BackfillLog = {
+      address: ADAPTER,
+      blockNumber: 100n,
+      logIndex: 1,
+      transactionHash: "0xinf1",
+      topics: encodeEventTopics({
+        abi: inferenceAdapterEventAbis,
+        eventName: "SettlementReceived",
+      }) as [Hex, ...Hex[]],
+      data: encodeAbiParameters([{ type: "uint256" }], [1_000_000n]),
+    };
+
+    const result = await backfillCreditAndHarvestEvents({
+      config,
+      client: new MemoryBackfillClient([diemCreditedLog, settlementLog], { "100": 1_700_000_100 }),
+      storage,
+      finalizedBlock: 120n,
+      fromBlock: 90n,
+    });
+
+    expect(result.creditEvents).toBe(0);
+    expect(result.harvestEvents).toBe(0);
+    expect(result.inferenceCreditEvents).toBe(1);
+    expect(result.inferenceSettlementEvents).toBe(1);
+    expect(result.readiness.some((r) => r.includes("feeRouter null"))).toBe(true);
+    expect(storage.getMeta("lastProcessedBlock")).toBe("120");
+    expect(storage.inferenceCredits[0]?.amountDiem).toBe(5n * WAD);
+    expect(storage.inferenceSettlements[0]?.usdcAmount).toBe(1_000_000n);
   });
 
   it("blocks on corrupt cursor metadata instead of skipping history", async () => {

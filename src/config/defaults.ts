@@ -33,6 +33,9 @@ export const DEFAULT_CONFIG: AppConfig = {
     morphoOracle: "0xAF29776f93FE0bf21282bF792A52AC212f20F45c",
     loopExecutor: "0x74ad4532133Ba538945a5371D249560E66CC7c71",
     autoDeleverageExecutor: null,
+    // Base native USDC (6-dec). Optional for SPEC009; not in missingDeploymentKeys.
+    usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    venueAdapters: [],
   },
   morpho: {
     marketId: "0xdd6b9f10bf69445ebba0626ef54042af628cdf65dda98ff68df4d235d4d56c76",
@@ -63,6 +66,8 @@ export const DEFAULT_CONFIG: AppConfig = {
     riskFreeRate: 0.05,
     basisDiscountWarnBps: 100,
     basisDiscountCriticalBps: 500,
+    // SPEC009 OQ-E: ±5% residual band on inferenceSharePct (revisit after live data).
+    inferenceReconcileToleranceBps: 500,
   },
   basis: {
     marketPriceDiemPerWstDiem: null,
