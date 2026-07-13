@@ -308,7 +308,9 @@ describe("SPEC008 loop demand CLI", () => {
     return env;
   }
 
-  it("AC9/AC10: empty DB exit 0 with n/a; invalid window-hours exit 1", async () => {
+  it(
+    "AC9/AC10: empty DB exit 0 with n/a; invalid window-hours exit 1",
+    async () => {
     const dir = mkdtempSync(join(tmpdir(), "wstdiem-demand-cli-"));
     dirs.push(dir);
     const dbPath = join(dir, "t.sqlite");
@@ -319,9 +321,7 @@ describe("SPEC008 loop demand CLI", () => {
       `chainId: 8453\nrpc:\n  primaryUrl: null\nstorage:\n  sqlitePath: ${dbPath}\n`,
     );
 
-    // Ensure dist is current for compiled-CLI cases
-    await execFileAsync("npm", ["run", "build"], { cwd: process.cwd() });
-
+    // dist must already be built by CI/local gates; do not rebuild inside the test (race + timeout).
     const ok = await execFileAsync(
       "node",
       ["dist/cli/index.js", "--config", configPath, "loop", "demand", "--json"],
@@ -348,5 +348,7 @@ describe("SPEC008 loop demand CLI", () => {
         { env: offlineEnv(), cwd: process.cwd() },
       ),
     ).rejects.toMatchObject({ code: 1 });
-  });
+  },
+    30_000,
+  );
 });
