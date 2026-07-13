@@ -1,5 +1,8 @@
 # Loop Sizing Simulator
 
+> **Start here for the full operator on-ramp:** [operator-runbook.md](./operator-runbook.md)
+> (entry sizing verdicts, drained-pool fail-closed, capacity/brief).
+
 `loop sizing` is an offline advisory simulator for estimating whether a DIEM/wstDIEM loop size is economically sound before any live operator action.
 
 It does not use RPC, does not broadcast, does not deploy an executor, and does not clear the audit gate. Production readiness still requires live Curve liquidity, Morpho market liquidity, a funded owner position, executor deployment and authorization, evidence runs, and final audit signoff.

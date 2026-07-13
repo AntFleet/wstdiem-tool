@@ -1,6 +1,9 @@
 # Operator Monitoring
 
-Use the monitor command for a one-shot live dashboard of wstDIEM vault supply/assets, Curve liquidity, Morpho liquidity, deployed executor status, owner position, and Morpho authorization.
+> **Start here for the full operator on-ramp:** [operator-runbook.md](./operator-runbook.md)
+> (sizing → monitor exit codes → liquidation → exit rehearsal → intelligence commands).
+
+Use the monitor command for a one-shot live dashboard of wstDIEM vault supply/assets, Curve liquidity, Morpho liquidity, deployed executor status, owner position, Morpho authorization, and live liquidation readout (SPEC005).
 
 ```sh
 export BASE_RPC_URL="https://mainnet.base.org"
