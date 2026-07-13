@@ -378,6 +378,17 @@ budget truncation no longer reclassifies mid with leg-aware (SearchTruncatedSign
 hard-fail → `CapacitySearchError`, structural-HF proximity warning, default leverages **1.5 / 1.5,1.8**
 (2× always marginal under min HF 1.7). typecheck/lint/build clean; **280/280** green. `exitCode.ts` untouched.
 
+## Phase 9 — SPEC008 (NAV-ratchet yield velocity / demand proxy) — SPEC LOCKED (2026-07-13); implementation next
+
+`SPEC008.md` adds **`loop demand`**: short-window **NAV-only** yield velocity + prior-window acceleration as an
+on-chain coincident **demand proxy** (not AskSurplus, not a yield promise). Default window **72h**; invalid
+sample filter (empty watch ticks write WAD nav); live tip prefers `convertToAssets`; paste-safe framing;
+`windowGrowthBps` non-annualized; no brief attach; no monitor alerts; `exitCode.ts` untouched.
+
+**Two-agent pre-code gate (technical REVISE + product AWR → folded) + confirmation AWR → M1–M5 folded → LOCKED.**
+
+**Next:** executor implements `src/metrics/demand.ts` + storage `listNavSamplesForWindow` + CLI/render + tests.
+
 ## Traceability & verification
 
 - Maintain a lightweight **spec-clause ↔ test** map (a table appended to each spec).
