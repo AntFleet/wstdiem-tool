@@ -403,6 +403,31 @@ sample filter (empty watch ticks write WAD nav); live tip prefers `convertToAsse
 `LIMIT 1` anchor could hide valid history behind a dirty empty tip — SQL + bigint filter now skip
 assets=0/nav=0 sentinels. typecheck/lint/build clean; **300/300** green.
 
+## Phase 10 — SPEC009 (attributable inference-demand tracker; SPEC008 refinement) — REVIEWED + LOCKED (2026-07-13)
+
+`SPEC009.md` refines SPEC008's NAV-velocity proxy into the **attributable** signal: ingest the on-chain events by
+which inference USDC becomes wstDIEM yield — `InferenceVault.DIEMCredited(adapter, amount)` (per-venue, Tier-1) +
+the adapters' `SettlementReceived`/`YieldRouted` — and report per-adapter USDC settled + DIEM credited, plus the
+honesty headline: **`inferenceSharePct`** (inference-attributable ÷ realized yield), which honestly reports a low
+share early (base-staking + protocol-seeded yield dominates while bootstrapping — expected) and grows with adoption.
+`loop demand --flows`; read-only, decision-support. Source of truth: `Liquid-Protocol-Ops/liquid-protocol-v0`
+`src/vault/`.
+
+**Two-agent pre-code gate (technical critic REVISE + product analyst AWR → folded), then a confirmation pass (M2/M3/
+M4/M5 verified CLOSED line-by-line; 3 more surgical Majors → fixed) → LOCKED.** The gate's value showed hard here —
+five review rounds before any code caught: a **mechanically wrong reconciliation** (the 5% `yieldFeeBps` is a
+treasury share-mint / dilution, NOT a DIEM haircut; `DIEMCredited` emits the gross amount) → corrected to the
+asset-side split with a first-order NAV identity on **start-of-window** supply; the **X402 permissionless-settlement**
+honesty hole (`recordX402Settlement` is `external`, anyone can push `SettlementReceived`) → three-tier trust labeling;
+and a **`S_start` data-plumbing gap** (`totalSupply` is fetched-then-discarded, never persisted) → persist via the
+existing `ensureColumn` pattern. Framing softened pre-publish to be bootstrapping-supportive (protocol self-seeding
+is normal, not a red flag).
+
+**Next: implement SPEC009** (spec → executor → approval gate → merge), incl. the vault/adapter event decode +
+storage (`inference_credit`/`inference_settlement`, PK `(tx_hash,log_index)`), the `total_supply_diem` snapshot
+column, the feeRouter-decoupled backfill on the shared cursor, the config adapter set + `usdc`, and
+`loop demand --flows` + `test/inference-flows.test.ts`.
+
 ## Traceability & verification
 
 - Maintain a lightweight **spec-clause ↔ test** map (a table appended to each spec).
