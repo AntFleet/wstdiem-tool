@@ -105,3 +105,94 @@ The vault row tracks the configured wstDIEM vault:
 Monitor alerts intentionally ignore the closed production audit gate. They alert on actionable live-state blockers only: unavailable RPC, missing or unhealthy wstDIEM vault, empty Curve liquidity, empty Morpho supply, missing/no-code/mismatched executor, missing owner position, and missing Morpho executor authorization.
 
 When the monitor flags **empty Curve liquidity**, `loop sizing --from-chain` will fail closed (`FROM_CHAIN_SEED_BLOCKED: Curve pool has zero DIEM and wstDIEM depth`) rather than seed a verdict against an empty pool — this is expected. See [loop-sizing.md](loop-sizing.md#live-seeding---from-chain) for the fail-closed triggers and how to rehearse against a drained pool with explicit Curve legs.
+
+## Sampling cadence / starting the demand series
+
+The SPEC008 demand-velocity indicator (`loop demand`) and brief NAV deltas need a **persistent NAV history**. That series lives in SQLite `metric_snapshots` and is written only by **`watch --once`** (via `insertMetricSnapshot`). `loop demand` / `loop brief` are read-only reporters — they never create the samples.
+
+### Stable DB path (required)
+
+Point `storage.sqlitePath` at a durable file that survives reboots and shell cwd changes. Do **not** use a temp path or a path relative to whatever directory the scheduler happens to start in.
+
+Committed template: [`config.sampling.example.yaml`](../../config.sampling.example.yaml)
+
+```yaml
+storage:
+  # Expanded by config load; creates the series under the operator home.
+  sqlitePath: "${HOME}/.wstdiem/wstdiem.sqlite"
+```
+
+Use the same `--config` for sampling ticks and for `loop demand` / `loop brief` so both sides hit the same DB.
+
+NAV is read from the vault (`convertToAssets` / totalAssets), **not** the Curve pool — sampling works and accrues real history even when the pool is drained (capacity/sizing `--from-chain` still fail closed on zero depth).
+
+### One-shot tick (wrapper)
+
+```sh
+npm run build   # once, after pull
+./scripts/sample-tick.sh
+```
+
+The wrapper:
+
+1. `cd`s to the repo and runs `node dist/cli/index.js --config config.sampling.example.yaml watch --once`
+2. Appends stdout/stderr and the raw exit code to `~/.wstdiem/logs/sample-tick.log` (size-rotated)
+3. Treats SPEC004 codes **`0` / `10` / `20` / `30` as scheduler-success** so a warn or single indeterminate tick does not kill launchd/cron
+4. Escalates in the log on **sustained `20`** (≥3 consecutive) or **`1` tool-error** (≥2 consecutive)
+5. Is read-only on chain (no broadcast) and safe when RPC is down — the tick is a no-op / empty-sentinel sample
+
+Env overrides: `WSTDIEM_CONFIG`, `WSTDIEM_REPO`, `WSTDIEM_LOG_DIR`, `WSTDIEM_NODE`.
+
+RPC URL comes from the environment / repo `.env` (`BASE_RPC_URL`) — never hardcode secrets in the plist or crontab.
+
+### Schedule: every 6 hours (macOS launchd)
+
+NAV ratchets slowly; **4×/day** is enough for day-over-day / week-over-week velocity without hammering free-tier RPC limits. Daily is the minimum; hourly is overkill. The demand window default is 72h and needs ≥2 valid samples for an anchor.
+
+```sh
+./scripts/install-sample-tick-launchd.sh
+# optional: fire once immediately
+launchctl kickstart -k "gui/$(id -u)/com.wstdiem.sample-tick"
+```
+
+That installs `~/Library/LaunchAgents/com.wstdiem.sample-tick.plist` from the example template (absolute paths filled in for this host). Calendar times: **00:05, 06:05, 12:05, 18:05** local.
+
+```sh
+# status
+launchctl print "gui/$(id -u)/com.wstdiem.sample-tick" | head -40
+# logs
+tail -f ~/.wstdiem/logs/sample-tick.log
+```
+
+### Cron fallback (Linux or simple macOS)
+
+```cron
+5 */6 * * * /path/to/wstdiem/scripts/sample-tick.sh
+```
+
+### Read the accrued series
+
+```sh
+node dist/cli/index.js --config config.sampling.example.yaml loop demand
+node dist/cli/index.js --config config.sampling.example.yaml loop brief
+```
+
+SPEC008 window math (default 72h):
+
+| What you see | Meaning |
+|---|---|
+| `samples N` after N successful ticks | Series is accruing in the stable DB (good). |
+| `no-anchor` | No valid sample **at or before** the window start yet. Expected until the oldest sample is older than the configured window (with 6h cadence, roughly one window length of history). |
+| `span-too-short` / `insufficient-samples` | Anchor exists but endpoints lack span or density. |
+| `ok` with velocity `n/a` or `0` | Math ran; flat NAV stays honest — not a fake demand number. |
+
+Prefer the same stable `--config` for write (`sample-tick`) and read (`loop demand` / `loop brief`).
+
+### Guardrails
+
+| Rule | Detail |
+|---|---|
+| Read-only | Cron reads chain + writes local SQLite only. Broadcast remains audit-gated. |
+| No secrets in repo/plist | `BASE_RPC_URL` from `.env` / environment only. |
+| Exit codes | Do not `set -e` around raw `watch --once` in a custom scheduler — map `0/10/20/30` so the schedule continues. |
+| Empty pool | Expected; demand series is pool-independent. |

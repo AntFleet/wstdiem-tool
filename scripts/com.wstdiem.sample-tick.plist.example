@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent: wstDIEM sampling cron (every 6 hours).
+
+  Install (machine-local — do not commit the installed copy with absolute paths
+  unless they match this host):
+
+    REPO=/path/to/wstdiem
+    # Or use scripts/install-sample-tick-launchd.sh
+
+    cp "$REPO/scripts/com.wstdiem.sample-tick.plist.example" \
+      ~/Library/LaunchAgents/com.wstdiem.sample-tick.plist
+    # Edit ProgramArguments[0] to the absolute path of sample-tick.sh
+    launchctl bootout gui/$(id -u)/com.wstdiem.sample-tick 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.wstdiem.sample-tick.plist
+    launchctl enable gui/$(id -u)/com.wstdiem.sample-tick
+    launchctl kickstart -k gui/$(id -u)/com.wstdiem.sample-tick
+
+  Cadence: 00:05, 06:05, 12:05, 18:05 local time (4×/day).
+  Logs: ~/.wstdiem/logs/sample-tick.log (and StandardOut/Error paths below).
+  RPC URL: loaded from repo .env (BASE_RPC_URL) — never hardcode secrets here.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.wstdiem.sample-tick</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__WSTDIEM_SAMPLE_TICK_SH__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WSTDIEM_REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>__WSTDIEM_HOME__</string>
+    <key>WSTDIEM_REPO</key>
+    <string>__WSTDIEM_REPO__</string>
+  </dict>
+
+  <!-- Every 6h at :05 past the hour (local time). -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>0</integer>
+      <key>Minute</key>
+      <integer>5</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>6</integer>
+      <key>Minute</key>
+      <integer>5</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>12</integer>
+      <key>Minute</key>
+      <integer>5</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>18</integer>
+      <key>Minute</key>
+      <integer>5</integer>
+    </dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>__WSTDIEM_HOME__/.wstdiem/logs/sample-tick.launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__WSTDIEM_HOME__/.wstdiem/logs/sample-tick.launchd.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

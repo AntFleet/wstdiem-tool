@@ -24,7 +24,8 @@ This runbook is the public on-ramp. Deeper detail lives in:
 | Entry sizing grid | `loop sizing` / `loop sizing --from-chain` | Offline or live-seeded; advisory |
 | Max equity still “candidate” | `loop capacity` | Last-candidate absorption bound |
 | Daily capital brief | `loop brief --from-chain` | Capacity + net APY + Δ vs last run |
-| Yield velocity (demand proxy) | `loop demand` | NAV-ratchet only; not AskSurplus |
+| Yield velocity (demand proxy) | `loop demand` | NAV-ratchet only; not AskSurplus — needs sampling series ([monitoring.md](./monitoring.md#sampling-cadence--starting-the-demand-series)) |
+| Start / keep demand series | `./scripts/sample-tick.sh` (launchd 6h) | Writes `metric_snapshots` via `watch --once` |
 | Market vs NAV basis | `loop basis --market-price …` | Operator-supplied market; dual discount framing |
 | Exit rehearsal | `loop simulate --action exit --live` | Dry-run; no broadcast |
 | Owner / executor evidence | `loop readiness` | Audit gate still closed |
