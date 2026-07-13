@@ -357,6 +357,23 @@ non-blocking coverage nicety (normal `0<HF<1` ≠ fault sentinel) folded in as A
 clean; **248/248** green (the long-standing `cli-live` red was also root-caused + fixed in fb1ac1a — non-hermetic
 test + an empty-`BASE_RPC_URL` fail-closed bug). SPEC001 OQ#9 CLOSED. Pipeline now 10 spec-first units.
 
+## Phase 7 — SPEC006 (capacity + live brief) — SPEC LOCKED (2026-07-13); implementation next
+
+`SPEC006.md` adds **`loop capacity`** (max equity at leverage `L` still `status === "candidate"` — last-candidate
+gate-bound absorption) and **`loop brief`** (capacity grid + canonical net-APY + Δ vs last comparable SQLite run).
+Reuses SPEC002 gates + SPEC003 seeds; no new gate math; advisory exit codes only (SPEC004 untouched).
+
+**Two-agent pre-code gate (technical critic + product analyst, both REVISE → folded) + focused confirmation
+(ACCEPT-WITH-RESERVATIONS → M1–M4 folded) → LOCKED.** Load-bearing fixes: full search pseudocode with
+`maxProbeEquity` + gas-island bisect; `capacityEdge`/`bindingEdge` split; offline refuse
+(`OFFLINE_CAPACITY_REFUSED` unless `--from-chain` / explicit market flags / `--allow-offline-defaults`);
+structured honesty fields + last-candidate framing (ban “deploy up to”); brief fingerprint + incomparable
+baselines; get_dy block-pin + hard-fail vs soft demote; notional only via `positionCollateralForScenario`;
+headroom-to-block secondary metric; `morpho-util-headroom` binding name.
+
+**Next:** executor implements `src/loop/capacity.ts` + brief persistence + CLI/render + tests; adversarial
+approval gate; merge behind green gates.
+
 ## Traceability & verification
 
 - Maintain a lightweight **spec-clause ↔ test** map (a table appended to each spec).
