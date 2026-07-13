@@ -3,6 +3,7 @@ import type { AlertEvaluation, AppConfig, CliJsonOutput, MetricSnapshot } from "
 import { formatWad } from "../metrics/math.js";
 import type { LoopBriefResult } from "../loop/brief.js";
 import type { LoopCapacityResult } from "../loop/capacity.js";
+import type { LoopDemandResult } from "../metrics/demand.js";
 import type { LoopReadinessResult } from "../loop/readiness.js";
 import type { LoopSizingReport, LoopSizingResult } from "../loop/sizing.js";
 
@@ -663,4 +664,74 @@ export function renderLoopBrief(result: LoopBriefResult): string {
   }
 
   return lines.join("\n");
+}
+
+/**
+ * SPEC008 demand proxy table. Banner above numbers; columns never bare "Demand".
+ */
+export function renderLoopDemandTable(result: LoopDemandResult): string {
+  const configuredHours = result.windowSeconds / 3600;
+  const noise =
+    result.windowSeconds <= 48 * 3600 ? " short-window-noisy." : "";
+  const banner =
+    `${result.disclaimer}\n` +
+    `[${result.sampleSource}] NAV-ratchet yield velocity (demand proxy) · configured ${configuredHours}h · ` +
+    `authoritative ${result.authoritative ? "yes" : "no"}.${noise}\n` +
+    result.pasteLine;
+
+  const fmtVel = (bps: number | null): string =>
+    bps === null ? "n/a" : `${bps} bps ann.`;
+  const fmtGrowth = (bps: number | null): string =>
+    bps === null ? "n/a" : `${bps} bps`;
+
+  const table = new Table({
+    head: ["Metric", "Value"],
+    wordWrap: true,
+  });
+  const observedH =
+    result.current.spanSeconds === null
+      ? "n/a"
+      : `${Math.round(result.current.spanSeconds / 3600)}h observed`;
+  table.push(
+    ["NAV velocity (proxy) bps", `${fmtVel(result.current.velocityBps)} @ ${observedH} (configured ${configuredHours}h)`],
+    ["Window growth (non-annualized)", fmtGrowth(result.current.windowGrowthBps)],
+    ["Prior velocity (proxy) bps", fmtVel(result.prior.velocityBps)],
+    [
+      "Acceleration (proxy)",
+      result.accelerationBps === null
+        ? "n/a"
+        : `${result.accelerationBps} bps${result.accelerationGloss ? ` (${result.accelerationGloss})` : ""}`,
+    ],
+    ["Current window status", `${result.current.status} · samples ${result.current.sampleCount}`],
+    ["Prior window status", `${result.prior.status} · samples ${result.prior.sampleCount}`],
+    [
+      "Reference 7d velocity",
+      result.reference7d.status === "ok"
+        ? fmtVel(result.reference7d.velocityBps)
+        : `n/a (${result.reference7d.status})`,
+    ],
+    [
+      "NAV start → end (current)",
+      result.current.navStart === null || result.current.navEnd === null
+        ? "n/a"
+        : `${formatWad(BigInt(result.current.navStart))} → ${formatWad(BigInt(result.current.navEnd))}`,
+    ],
+    [
+      "Credit inflow (FeeRouter→vault; not NAV rate; not AskSurplus volume)",
+      result.creditInflowDiemCurrent === null
+        ? "n/a"
+        : `${formatWad(BigInt(result.creditInflowDiemCurrent))} DIEM`,
+    ],
+    ["Warnings", result.warnings.length === 0 ? "none" : result.warnings.join("; ")],
+  );
+
+  const ban = ["deploy up to", "AskSurplus demand is", "demand is up", "size larger", "demand collapsed"];
+  const out = `${banner}\n${table.toString()}`;
+  for (const phrase of ban) {
+    if (out.toLowerCase().includes(phrase.toLowerCase())) {
+      // Defensive: never ship banned solicitation/overclaim copy.
+      throw new Error(`renderLoopDemandTable produced banned phrase: ${phrase}`);
+    }
+  }
+  return out;
 }

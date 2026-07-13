@@ -226,6 +226,66 @@ export class Storage {
     }));
   }
 
+  /**
+   * NAV samples for SPEC008 demand velocity (anchor ≤ windowStart + rows > windowStart).
+   * Applies the invalid-sample filter at the SQL boundary (SPEC008 §2.1): empty/failed watch
+   * ticks write nav=WAD + vault_total_assets_diem=0 — those must not become the anchor LIMIT 1
+   * (would hide earlier valid history). Rows after start are filtered the same way.
+   * Ordered by timestamp ASC, id ASC for stable last-wins on duplicate timestamps.
+   */
+  listNavSamplesForWindow(windowStart: number): Array<{
+    timestamp: number;
+    nav: bigint;
+    totalAssetsDiem: bigint;
+  }> {
+    const initial = this.db
+      .prepare(
+        `SELECT id, timestamp, nav, vault_total_assets_diem
+         FROM metric_snapshots
+         WHERE timestamp <= ?
+           AND nav != '0'
+           AND vault_total_assets_diem != '0'
+         ORDER BY timestamp DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(windowStart) as
+      | { id: number; timestamp: number; nav: string; vault_total_assets_diem: string }
+      | undefined;
+    const rows = this.db
+      .prepare(
+        `SELECT id, timestamp, nav, vault_total_assets_diem
+         FROM metric_snapshots
+         WHERE timestamp > ?
+           AND nav != '0'
+           AND vault_total_assets_diem != '0'
+         ORDER BY timestamp ASC, id ASC`,
+      )
+      .all(windowStart) as Array<{
+      id: number;
+      timestamp: number;
+      nav: string;
+      vault_total_assets_diem: string;
+    }>;
+    // App-layer bigint filter: SQL text '0' is the empty-tick sentinel; re-check as bigint.
+    return [initial, ...rows]
+      .filter(
+        (
+          row,
+        ): row is {
+          id: number;
+          timestamp: number;
+          nav: string;
+          vault_total_assets_diem: string;
+        } => row !== undefined,
+      )
+      .map((row) => ({
+        timestamp: row.timestamp,
+        nav: BigInt(row.nav),
+        totalAssetsDiem: BigInt(row.vault_total_assets_diem),
+      }))
+      .filter((row) => row.nav > 0n && row.totalAssetsDiem > 0n);
+  }
+
   insertAlert(alert: AlertEvaluation, timestamp: number, deliveredChannels: string[]): void {
     this.db
       .prepare(

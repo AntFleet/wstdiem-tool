@@ -34,7 +34,10 @@ import {
   type FromChainExplicitFlags,
   type FromChainSeedClient,
 } from "../loop/fromChainSeed.js";
-import { formatWad, parseDecimalToUnits } from "../metrics/math.js";
+import { inferenceVaultAbi } from "../abi/inferenceVault.js";
+import { collectVaultMetrics } from "../metrics/collector.js";
+import { buildLoopDemand, DEFAULT_VELOCITY_WINDOW_HOURS, type NavSample } from "../metrics/demand.js";
+import { formatWad, parseDecimalToUnits, WAD } from "../metrics/math.js";
 import { evaluateReadinessAlerts } from "../monitor/readinessAlerts.js";
 import type { AppConfig, Severity } from "../types/domain.js";
 import { CliError, toCliError } from "./errors.js";
@@ -48,6 +51,7 @@ import {
   printJson,
   renderLoopBrief,
   renderLoopCapacityTable,
+  renderLoopDemandTable,
   renderLoopReadinessTable,
   renderLoopSizingTable,
   renderMonitorDashboard,
@@ -1118,6 +1122,123 @@ addSizingSeedFlags(
     }
   });
 });
+
+loop
+  .command("demand")
+  .description(
+    "NAV-ratchet yield velocity (demand proxy): short-window vault share-price growth + acceleration",
+  )
+  .option("--json", "emit JSON envelope")
+  .option(
+    "--window-hours <n>",
+    `configured window length in hours (integer 1..168; default ${DEFAULT_VELOCITY_WINDOW_HOURS})`,
+    String(DEFAULT_VELOCITY_WINDOW_HOURS),
+  )
+  .option(
+    "--from-chain",
+    "append a live convertToAssets tip (memory only; does not write metric_snapshots)",
+    false,
+  )
+  .action(async function (this: Command) {
+    await runAction(this, "loop demand", async (config) => {
+      const options = this.opts<{
+        windowHours?: string;
+        fromChain?: boolean;
+        json?: boolean;
+      }>();
+      const wantsJson = this.optsWithGlobals<GlobalOptions>().json;
+      const hours = parseStrictInteger(
+        options.windowHours ?? String(DEFAULT_VELOCITY_WINDOW_HOURS),
+        "--window-hours",
+      );
+      if (hours < 1 || hours > 168) {
+        throw new CliError("INVALID_INPUT", "--window-hours must be an integer from 1 to 168");
+      }
+      const windowSeconds = hours * 3600;
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      // Load samples from the earliest needed bound (prior start vs 7d reference).
+      const lookbackStart = Math.min(
+        nowSeconds - windowSeconds * 2,
+        nowSeconds - 7 * 24 * 3600,
+      );
+
+      const store = new Storage(config.storage.sqlitePath);
+      try {
+        const raw = store.listNavSamplesForWindow(lookbackStart);
+        const samples: NavSample[] = raw.map((row) => ({
+          timestamp: row.timestamp,
+          nav: row.nav,
+          totalAssetsDiem: row.totalAssetsDiem,
+        }));
+        const credits = store.listCreditSamplesSince(nowSeconds - windowSeconds);
+
+        const extraWarnings: string[] = [];
+        let sampleSource: "sqlite" | "sqlite+live-tip" = "sqlite";
+
+        if (options.fromChain) {
+          try {
+            const client = await createViemLoopSimulationClient(config);
+            if (client === null) {
+              extraWarnings.push("live tip skipped: no RPC configured");
+            } else if (config.contracts.inferenceVault === null) {
+              extraWarnings.push("live tip skipped: inferenceVault not configured");
+            } else {
+              const vault = await collectVaultMetrics(config, client, makeEmptySnapshot(nowSeconds));
+              if (!vault.snapshot.validity.vault) {
+                extraWarnings.push("live tip skipped: vault read incomplete");
+              } else {
+                let tipNav = vault.snapshot.nav;
+                let usedConvert = false;
+                try {
+                  tipNav = BigInt(
+                    (await client.readContract({
+                      address: config.contracts.inferenceVault,
+                      abi: inferenceVaultAbi,
+                      functionName: "convertToAssets",
+                      args: [WAD],
+                    })) as bigint | number | string,
+                  );
+                  usedConvert = true;
+                } catch {
+                  extraWarnings.push("live-tip-nav-fallback-totals");
+                }
+                if (usedConvert && tipNav !== vault.snapshot.nav) {
+                  extraWarnings.push("live-tip-nav-source-mismatch");
+                }
+                const tip: NavSample = {
+                  timestamp: nowSeconds,
+                  nav: tipNav,
+                  totalAssetsDiem: vault.snapshot.vaultTotalAssetsDiem,
+                };
+                if (tip.nav > 0n && tip.totalAssetsDiem !== undefined && tip.totalAssetsDiem > 0n) {
+                  samples.push(tip);
+                  sampleSource = "sqlite+live-tip";
+                } else {
+                  extraWarnings.push("invalid-nav-sample-skipped");
+                }
+              }
+            }
+          } catch (error) {
+            extraWarnings.push(
+              `live tip skipped: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+
+        const result = buildLoopDemand({
+          samples,
+          nowSeconds,
+          windowSeconds,
+          creditSamples: credits,
+          sampleSource,
+          extraWarnings,
+        });
+        return wantsJson ? result : renderLoopDemandTable(result);
+      } finally {
+        store.close();
+      }
+    });
+  });
 
 loop
   .command("simulate")
