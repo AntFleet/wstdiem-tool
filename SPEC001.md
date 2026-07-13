@@ -634,5 +634,10 @@ Ledger (`@ledgerhq/*`) and/or Safe transaction-building support is deferred; not
    live-monitoring commands, gated on a real position-assessed signal (not block freshness) — see SPEC004.
 8. **Threshold source of truth.** When the §3 alert table values differ from `config.thresholds`
    (§7), which is authoritative? (Presumably config — state it.)
-9. **Liquidation readout.** Should the dashboard surface margin-to-liquidation / liquidation price
-   (not just HF), given there is no automated liquidation protection?
+9. **Liquidation readout — SPEC'D in [`SPEC005.md`](SPEC005.md) (2026-07-12).** The dashboards surfaced HF
+   uselessly (status/watch printed a false `HF Infinity`; monitor read collateral+debt but no LLTV/oracle, so
+   computed no HF), and monitor's `critical (30)` fired only on infrastructure faults, never on the owner's
+   position drifting toward liquidation. Resolved by a live liquidation readout on `monitor` (health factor,
+   `debtGrowthHeadroomBps`, gated liquidation price) plus `position_health_factor` / `position_liquidation_fault`
+   alerts that make monitor's exit code page on position danger — closing the SPEC004 danger-detection gap. See
+   SPEC005.

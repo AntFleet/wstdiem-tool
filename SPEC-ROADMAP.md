@@ -322,6 +322,34 @@ callout). And a **MEDIUM** — `liveAssessed` was set on any non-throwing `colle
 off `validity.vault` (read-completed). typecheck/lint/build clean; **232/233** (1 pre-existing unrelated
 `cli-live` fail). SPEC001 OQ#7 CLOSED.
 
+## Phase 6 — SPEC005 (live liquidation readout, resolves SPEC001 OQ#9) — REVIEWED + LOCKED (2026-07-12)
+
+`SPEC005.md` adds a **live** liquidation readout to `monitor` (health factor, `debtGrowthHeadroomBps`, gated
+liquidation price) and — the load-bearing half — makes a position approaching liquidation a `monitor` CRITICAL, so
+the SPEC004 keeper pages on position danger, not only infrastructure faults. Today no command emits a CRITICAL when
+the owner's own position drifts toward liquidation (status/watch print a false `HF Infinity`; monitor reads
+collateral+debt but no LLTV/oracle). Reuses the dead `computeHealthFactor` (first prod caller); reads live LLTV +
+the market's own oracle via `idToMarketParams`; oracle scale 1e36 confirmed against `computeOracleDeviation`.
+
+**Two-agent pre-code gate (technical critic + product analyst, both REVISE → folded → LOCKED), then a focused
+confirmation pass (2 more Majors → fixed).** The gate's value showed again — both agents **independently converged**
+on an exit-code masking flaw (critic M1 / analyst OQ-A): the draft folded a readout failure into `isMonitorAssessed`,
+which short-circuits `!assessed→20` before the CRITICAL check and would mask a co-fired unrelated CRITICAL down to 20.
+Resolved by treating a deterministic oracle/market fault (`price==0`/`lltv==0`/underwater — Morpho values collateral
+at ~0, i.e. liquidatable) as a **CRITICAL alert** that reaches 30 via the normal path, no fold. The analyst also
+caught that reusing `healthFactorCritical=1.40`/`Warn=1.60` would perpetually CRITICAL a high-leverage position;
+reconciled by tying the thresholds to the tool's own `minPostLoopHealthFactor=1.7` operating point (entry HF≥1.7 →
+1.40/1.60 signal drift, not steady-state) + a resting-HF-no-alarm test; and a margin-axis contradiction (lead with
+`debtGrowthHeadroomBps=HF−1`, the debt-accrual axis, not the collateral-decline `(HF−1)/HF`). The confirmation pass
+then caught a **div-by-zero exception-path** that re-opened the masking regression (`lltvWad===0` in the liq-price
+denominator throws → `rpc-read` catch → 20) and an **underwater gate contradiction** (readout gated on
+`hasExitPosition` excluded the `collateral==0` underwater case it claimed to page) — both fixed (fault-detection
+before the price formula; gate on `borrowShares>0`; underwater sourced from pre-existing `owner` fields).
+
+**Next: implement SPEC005** (spec → executor → approval gate → merge), incl. the `includeLiquidation`-gated reads,
+the `liquidation` readout struct + `monitor --json` fields, the two alerts, the `status`/`watch` `HF Infinity`→`n/a`
+honesty fix, and `test/liquidation-readout.test.ts` (incl. AC6a/6b co-fired-CRITICAL-still-30 and AC8 underwater).
+
 ## Traceability & verification
 
 - Maintain a lightweight **spec-clause ↔ test** map (a table appended to each spec).
