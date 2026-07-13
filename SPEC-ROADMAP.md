@@ -322,7 +322,7 @@ callout). And a **MEDIUM** — `liveAssessed` was set on any non-throwing `colle
 off `validity.vault` (read-completed). typecheck/lint/build clean; **232/233** (1 pre-existing unrelated
 `cli-live` fail). SPEC001 OQ#7 CLOSED.
 
-## Phase 6 — SPEC005 (live liquidation readout, resolves SPEC001 OQ#9) — REVIEWED + LOCKED (2026-07-12)
+## Phase 6 — SPEC005 (live liquidation readout, resolves SPEC001 OQ#9) — SHIPPED (2026-07-12, bd4d831)
 
 `SPEC005.md` adds a **live** liquidation readout to `monitor` (health factor, `debtGrowthHeadroomBps`, gated
 liquidation price) and — the load-bearing half — makes a position approaching liquidation a `monitor` CRITICAL, so
@@ -346,9 +346,16 @@ denominator throws → `rpc-read` catch → 20) and an **underwater gate contrad
 `hasExitPosition` excluded the `collateral==0` underwater case it claimed to page) — both fixed (fault-detection
 before the price formula; gate on `borrowShares>0`; underwater sourced from pre-existing `owner` fields).
 
-**Next: implement SPEC005** (spec → executor → approval gate → merge), incl. the `includeLiquidation`-gated reads,
-the `liquidation` readout struct + `monitor --json` fields, the two alerts, the `status`/`watch` `HF Infinity`→`n/a`
-honesty fix, and `test/liquidation-readout.test.ts` (incl. AC6a/6b co-fired-CRITICAL-still-30 and AC8 underwater).
+**IMPLEMENTED + SHIPPED (bd4d831).** `buildLiquidationReadout` (fault-first branch order), the `liquidation`
+readout struct + `monitor --json` (`data.readiness.liquidation`, bigints as strings), the two alerts
+(`position_health_factor` + `position_liquidation_fault`), the `includeLiquidation`-gated block-pinned reads,
+`loop readiness` strict-evidence isolation (structural, zero new checks), the `status`/`watch` `HF Infinity`→`n/a`
+honesty fix, and `test/liquidation-readout.test.ts` (14 tests). `exitCode.ts` unchanged — faults reach 30 via the
+normal alert path, never masking a co-fired CRITICAL. **Approval gate: APPROVE, 0 blocking, every load-bearing
+property confirmed HIGH** (masking closed on all paths, math exact/unbiased, boundaries untouched); its one
+non-blocking coverage nicety (normal `0<HF<1` ≠ fault sentinel) folded in as AC2b pre-merge. typecheck/lint/build
+clean; **248/248** green (the long-standing `cli-live` red was also root-caused + fixed in fb1ac1a — non-hermetic
+test + an empty-`BASE_RPC_URL` fail-closed bug). SPEC001 OQ#9 CLOSED. Pipeline now 10 spec-first units.
 
 ## Traceability & verification
 
