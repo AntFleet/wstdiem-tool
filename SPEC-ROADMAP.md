@@ -403,7 +403,7 @@ sample filter (empty watch ticks write WAD nav); live tip prefers `convertToAsse
 `LIMIT 1` anchor could hide valid history behind a dirty empty tip — SQL + bigint filter now skip
 assets=0/nav=0 sentinels. typecheck/lint/build clean; **300/300** green.
 
-## Phase 10 — SPEC009 (attributable inference-demand tracker; SPEC008 refinement) — REVIEWED + LOCKED (2026-07-13)
+## Phase 10 — SPEC009 (attributable inference-demand tracker; SPEC008 refinement) — SHIPPED @36797fa (2026-07-13)
 
 `SPEC009.md` refines SPEC008's NAV-velocity proxy into the **attributable** signal: ingest the on-chain events by
 which inference USDC becomes wstDIEM yield — `InferenceVault.DIEMCredited(adapter, amount)` (per-venue, Tier-1) +
@@ -423,10 +423,17 @@ and a **`S_start` data-plumbing gap** (`totalSupply` is fetched-then-discarded, 
 existing `ensureColumn` pattern. Framing softened pre-publish to be bootstrapping-supportive (protocol self-seeding
 is normal, not a red flag).
 
-**Next: implement SPEC009** (spec → executor → approval gate → merge), incl. the vault/adapter event decode +
-storage (`inference_credit`/`inference_settlement`, PK `(tx_hash,log_index)`), the `total_supply_diem` snapshot
-column, the feeRouter-decoupled backfill on the shared cursor, the config adapter set + `usdc`, and
-`loop demand --flows` + `test/inference-flows.test.ts`.
+**SHIPPED @36797fa** (spec → executor → adversarial approval gate APPROVE-WITH-NITS → fold → merge). Delivered:
+the vault/adapter event decode + storage (`inference_credit`/`inference_settlement`, PK `(tx_hash,log_index)` +
+`INSERT OR REPLACE`), the `total_supply_diem` snapshot column persisting **start-of-window** supply, the
+feeRouter-decoupled backfill on the shared `lastProcessedBlock` cursor (no 302k lookback), the config venue-adapter
+set + `usdc`, and `loop demand --flows` + `test/inference-flows.test.ts`. All 11 §7 criteria + every load-bearing
+trap verified in code by the gate; the one folded fix — `yieldFeeBps` now **fails closed** (treasury active + read
+throws → headline `n/a`, never a silent over-report of the inference share). Build clean; suite **339/339**
+(`loop demand` byte-unchanged without `--flows`). 3 Low nits deferred (X402-label name-heuristic, `0%`-vs-`n/a`
+posture, renderer banned-phrase throw) — non-blocking, see the session's gate notes.
+
+Phases 0–10 all SHIPPED. Pipeline = 14 spec-first units.
 
 ## Traceability & verification
 
