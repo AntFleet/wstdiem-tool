@@ -35,6 +35,7 @@ import {
   type FromChainSeedClient,
 } from "../loop/fromChainSeed.js";
 import { inferenceVaultAbi } from "../abi/inferenceVault.js";
+import { buildLoopBasis, type MarketPriceSourceKind } from "../metrics/basis.js";
 import { collectVaultMetrics } from "../metrics/collector.js";
 import { buildLoopDemand, DEFAULT_VELOCITY_WINDOW_HOURS, type NavSample } from "../metrics/demand.js";
 import { formatWad, parseDecimalToUnits, WAD } from "../metrics/math.js";
@@ -51,6 +52,7 @@ import {
   printJson,
   renderLoopBrief,
   renderLoopCapacityTable,
+  renderLoopBasisTable,
   renderLoopDemandTable,
   renderLoopReadinessTable,
   renderLoopSizingTable,
@@ -1237,6 +1239,138 @@ loop
       } finally {
         store.close();
       }
+    });
+  });
+
+loop
+  .command("basis")
+  .description(
+    "Secondary-market basis (market price vs vault NAV) — decision-support only; discount is stress/illiquidity and possible edge",
+  )
+  .option("--json", "emit JSON envelope")
+  .option(
+    "--market-price <diemPerWstDiem>",
+    "operator-supplied secondary market price in DIEM per 1 wstDIEM (decimal > 0); overrides config",
+  )
+  .action(async function (this: Command) {
+    await runAction(this, "loop basis", async (config) => {
+      const options = this.opts<{ marketPrice?: string; json?: boolean }>();
+      const wantsJson = this.optsWithGlobals<GlobalOptions>().json;
+
+      let marketPrice: bigint | null = null;
+      let marketPriceSource: MarketPriceSourceKind = "unavailable";
+      if (options.marketPrice !== undefined) {
+        try {
+          marketPrice = parseDecimalToUnits(options.marketPrice);
+        } catch (error) {
+          throw new CliError(
+            "INVALID_INPUT",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        if (marketPrice <= 0n) {
+          throw new CliError("INVALID_INPUT", "--market-price must be greater than 0");
+        }
+        marketPriceSource = "cli-flag";
+      } else if (config.basis.marketPriceDiemPerWstDiem !== null) {
+        try {
+          marketPrice = parseDecimalToUnits(config.basis.marketPriceDiemPerWstDiem);
+        } catch (error) {
+          throw new CliError(
+            "INVALID_INPUT",
+            `config.basis.marketPriceDiemPerWstDiem: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        if (marketPrice <= 0n) {
+          throw new CliError(
+            "INVALID_INPUT",
+            "config.basis.marketPriceDiemPerWstDiem must be greater than 0",
+          );
+        }
+        marketPriceSource = "config";
+      }
+
+      let totalAssets: bigint | null = null;
+      let totalSupply: bigint | null = null;
+      let navConvert: bigint | null = null;
+      let blockNumber: bigint | null = null;
+      const extraWarnings: string[] = [];
+
+      const hasRpc =
+        config.rpc.primaryUrl !== null || config.rpc.fallbackUrls.length > 0;
+      if (hasRpc && config.contracts.inferenceVault !== null) {
+        try {
+          const client = await createViemLoopSimulationClient(config);
+          if (client === null) {
+            extraWarnings.push("RPC client unavailable for NAV read");
+          } else {
+            const vault = config.contracts.inferenceVault;
+            try {
+              blockNumber = await client.getBlockNumber();
+            } catch {
+              // optional
+            }
+            // Independent reads so convert failure does not drop totals (SPEC007 §6).
+            try {
+              totalAssets = BigInt(
+                (await client.readContract({
+                  address: vault,
+                  abi: inferenceVaultAbi,
+                  functionName: "totalAssets",
+                })) as bigint | number | string,
+              );
+            } catch (error) {
+              extraWarnings.push(
+                `totalAssets read failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            try {
+              totalSupply = BigInt(
+                (await client.readContract({
+                  address: vault,
+                  abi: inferenceVaultAbi,
+                  functionName: "totalSupply",
+                })) as bigint | number | string,
+              );
+            } catch (error) {
+              extraWarnings.push(
+                `totalSupply read failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            try {
+              navConvert = BigInt(
+                (await client.readContract({
+                  address: vault,
+                  abi: inferenceVaultAbi,
+                  functionName: "convertToAssets",
+                  args: [WAD],
+                })) as bigint | number | string,
+              );
+            } catch (error) {
+              extraWarnings.push(
+                `convertToAssets read failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              navConvert = null;
+            }
+          }
+        } catch (error) {
+          extraWarnings.push(
+            `NAV read failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      const result = buildLoopBasis({
+        totalAssets,
+        totalSupply,
+        navConvert,
+        marketPrice,
+        marketPriceSource,
+        thresholds: config.thresholds,
+        blockNumber,
+        extraWarnings,
+      });
+      return wantsJson ? result : renderLoopBasisTable(result);
     });
   });
 

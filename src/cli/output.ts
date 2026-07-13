@@ -3,6 +3,7 @@ import type { AlertEvaluation, AppConfig, CliJsonOutput, MetricSnapshot } from "
 import { formatWad } from "../metrics/math.js";
 import type { LoopBriefResult } from "../loop/brief.js";
 import type { LoopCapacityResult } from "../loop/capacity.js";
+import type { LoopBasisResult } from "../metrics/basis.js";
 import type { LoopDemandResult } from "../metrics/demand.js";
 import type { LoopReadinessResult } from "../loop/readiness.js";
 import type { LoopSizingReport, LoopSizingResult } from "../loop/sizing.js";
@@ -731,6 +732,73 @@ export function renderLoopDemandTable(result: LoopDemandResult): string {
     if (out.toLowerCase().includes(phrase.toLowerCase())) {
       // Defensive: never ship banned solicitation/overclaim copy.
       throw new Error(`renderLoopDemandTable produced banned phrase: ${phrase}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * SPEC007 secondary-market basis table. Banner above number; dual framing; ban-list guard.
+ */
+export function renderLoopBasisTable(result: LoopBasisResult): string {
+  const banner =
+    "Secondary-market basis (market vs NAV) — decision-support only. " +
+    "Discount can be stress/illiquidity or edge; tool cannot tell which. " +
+    "Morpho oracle is not market price. OPERATOR-SUPPLIED MARKET PRICE in v1 — not a live feed; may be stale.\n" +
+    `${result.disclaimer}\n` +
+    result.pasteLine;
+
+  const table = new Table({
+    head: ["Metric", "Value"],
+    wordWrap: true,
+  });
+  const fmtPrice = (s: string | null): string =>
+    s === null ? "n/a" : `${formatWad(BigInt(s))} DIEM/wstDIEM`;
+  const basisCell =
+    result.basisBps === null
+      ? "n/a"
+      : `${result.basisBps} bps (signed)` +
+        (result.basisGloss ? ` · ${result.basisGloss}` : "");
+  table.push(
+    ["Market price", `${fmtPrice(result.marketPriceDiemPerWstDiem)} (${result.marketPriceSource})`],
+    ["NAV", `${fmtPrice(result.nav)} (${result.navSource})`],
+    ["NAV totals cross-check", fmtPrice(result.navTotals)],
+    ["Basis (market vs NAV)", basisCell],
+    [
+      "Human gloss",
+      result.basisBps === null
+        ? "n/a"
+        : result.basisBps < 0
+          ? "discount — stress/illiquidity and possible edge; tool cannot tell which"
+          : result.basisBps > 0
+            ? "premium — secondary prints above NAV"
+            : "flat at NAV",
+    ],
+    [
+      "Alerts",
+      result.alerts.length === 0
+        ? "none"
+        : result.alerts.map((a) => `${a.level} ${a.alertKey}`).join("; "),
+    ],
+    ["Arithmetic complete", result.arithmeticComplete ? "yes" : "no"],
+    ["Authoritative (v1 always false)", "no"],
+    ["Block", result.blockNumber ?? "n/a"],
+    ["Warnings", result.warnings.length === 0 ? "none" : result.warnings.join("; ")],
+  );
+
+  const ban = [
+    "free money",
+    "risk-free discount",
+    "arbitrage guaranteed",
+    "buy now",
+    "buy the discount",
+    "deploy into the discount",
+    "oracle price is market",
+  ];
+  const out = `${banner}\n${table.toString()}`;
+  for (const phrase of ban) {
+    if (out.toLowerCase().includes(phrase.toLowerCase())) {
+      throw new Error(`renderLoopBasisTable produced banned phrase: ${phrase}`);
     }
   }
   return out;

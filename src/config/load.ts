@@ -79,6 +79,15 @@ const configSchema = z
       oracleDeviationCritical: z.number().positive().max(0.01),
       borrowSpikeBaseApyRatio: z.number().positive(),
       riskFreeRate: z.number().nonnegative(),
+      basisDiscountWarnBps: z.number().int().min(1),
+      basisDiscountCriticalBps: z.number().int().min(1),
+    }),
+    basis: z.object({
+      // Quoted decimal string only (e.g. "0.97"); null = no configured market price.
+      marketPriceDiemPerWstDiem: z
+        .union([z.string().regex(/^[0-9]+(\.[0-9]+)?$/), z.null()])
+        .optional()
+        .transform((value) => value ?? null),
     }),
     alerts: z.object({
       webhookUrls: z.array(z.string().url()),
@@ -139,6 +148,14 @@ const configSchema = z
         code: z.ZodIssueCode.custom,
         path: ["thresholds", "spreadCriticalNetApy35"],
         message: "spreadCriticalNetApy35 must be less than or equal to spreadWarnNetApy35",
+      });
+    }
+    // SPEC007: larger discount bps = more severe → critical ≥ warn
+    if (config.thresholds.basisDiscountCriticalBps < config.thresholds.basisDiscountWarnBps) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["thresholds", "basisDiscountCriticalBps"],
+        message: "basisDiscountCriticalBps must be greater than or equal to basisDiscountWarnBps",
       });
     }
     if (config.flashLoan.provider === "uniswap-v3") {

@@ -378,14 +378,16 @@ budget truncation no longer reclassifies mid with leg-aware (SearchTruncatedSign
 hard-fail → `CapacitySearchError`, structural-HF proximity warning, default leverages **1.5 / 1.5,1.8**
 (2× always marginal under min HF 1.7). typecheck/lint/build clean; **280/280** green. `exitCode.ts` untouched.
 
-## Phase 8 — SPEC007 (secondary-market basis: market vs NAV) — SPEC LOCKED (2026-07-13); implementation next
+## Phase 8 — SPEC007 (secondary-market basis: market vs NAV) — SHIPPED (2026-07-13)
 
 `SPEC007.md` adds **`loop basis`**: `(marketPrice − NAV) / NAV` in bps with operator-supplied market-price
 seam (CLI/config), live convertToAssets NAV (empty/WAD fail-closed), dual discount framing
 (stress/illiquidity + edge), advisory alerts only (exit 0), `authoritative: false` in v1. Morpho oracle
 never used as market. Two-agent gate + confirmation residuals folded → LOCKED.
 
-**Next:** implement `src/metrics/basis.ts` + config thresholds + CLI/render + tests.
+**IMPLEMENTED + SHIPPED.** `src/metrics/basis.ts` + config `basis`/`basisDiscount*Bps` + CLI/render +
+`test/basis.test.ts` (13). Independent totalAssets/totalSupply/convertToAssets reads; advisory
+`basis_discount` alerts; paste dual framing; suite **313/313**.
 
 ## Phase 9 — SPEC008 (NAV-ratchet yield velocity / demand proxy) — SHIPPED (2026-07-13)
 

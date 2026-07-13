@@ -61,6 +61,11 @@ export const DEFAULT_CONFIG: AppConfig = {
     oracleDeviationCritical: 0.01,
     borrowSpikeBaseApyRatio: 0.7,
     riskFreeRate: 0.05,
+    basisDiscountWarnBps: 100,
+    basisDiscountCriticalBps: 500,
+  },
+  basis: {
+    marketPriceDiemPerWstDiem: null,
   },
   alerts: {
     webhookUrls: [],

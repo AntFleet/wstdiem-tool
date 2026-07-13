@@ -42,6 +42,15 @@ export interface ThresholdConfig {
   oracleDeviationCritical: number;
   borrowSpikeBaseApyRatio: number;
   riskFreeRate: number;
+  /** SPEC007: absolute discount bps that trigger WARN (default 100). */
+  basisDiscountWarnBps: number;
+  /** SPEC007: absolute discount bps that trigger CRITICAL (default 500; ≥ warn). */
+  basisDiscountCriticalBps: number;
+}
+
+/** SPEC007: operator-supplied secondary market price seam (decimal DIEM per wstDIEM or null). */
+export interface BasisConfig {
+  marketPriceDiemPerWstDiem: string | null;
 }
 
 export interface AppConfig {
@@ -67,6 +76,7 @@ export interface AppConfig {
     owner: Address | null;
   };
   thresholds: ThresholdConfig;
+  basis: BasisConfig;
   alerts: {
     webhookUrls: string[];
     telegram: {
