@@ -12,12 +12,29 @@ import { buildLoopReadiness } from "../loop/readiness.js";
 import type { LoopReadinessResult } from "../loop/readiness.js";
 import { buildConfiguredLoopSafetyEvidence } from "../loop/safetyEvidence.js";
 import { simulateLoopExecutorCall } from "../loop/simulator.js";
-import { buildLoopSizingReport } from "../loop/sizing.js";
-import { buildLoopSizingScenarios, type LoopSizingGridOptions } from "../loop/sizingScenarios.js";
+import { buildLoopBrief, fingerprintFromTemplate } from "../loop/brief.js";
+import {
+  CapacitySearchError,
+  findLoopCapacity,
+  type CapacityInputMode,
+  type ExitSlippageQuoter,
+} from "../loop/capacity.js";
+import { buildLoopSizingReport, type LoopSizingScenario } from "../loop/sizing.js";
+import {
+  buildLoopSizingScenarios,
+  parseDecimalToBps,
+  type LoopSizingGridOptions,
+} from "../loop/sizingScenarios.js";
 import {
   assertFromChainCompatibleOptions,
   buildFromChainSizingReport,
+  computeExitSlippageInjection,
+  loadVaultApyWindow,
+  seedFromChain,
+  type FromChainExplicitFlags,
+  type FromChainSeedClient,
 } from "../loop/fromChainSeed.js";
+import { formatWad, parseDecimalToUnits } from "../metrics/math.js";
 import { evaluateReadinessAlerts } from "../monitor/readinessAlerts.js";
 import type { AppConfig, Severity } from "../types/domain.js";
 import { CliError, toCliError } from "./errors.js";
@@ -29,6 +46,8 @@ import {
 import {
   jsonEnvelope,
   printJson,
+  renderLoopBrief,
+  renderLoopCapacityTable,
   renderLoopReadinessTable,
   renderLoopSizingTable,
   renderMonitorDashboard,
@@ -495,6 +514,610 @@ function addLoopAction(name: "open" | "rebalance" | "exit"): Command {
 addLoopAction("open");
 addLoopAction("rebalance");
 addLoopAction("exit");
+
+/** Shared sizing seed/fee/gate flags for capacity + brief (mirrors `loop sizing`). */
+function addSizingSeedFlags(cmd: Command): Command {
+  return cmd
+    .option("--preset <preset>", "baseline|current-zero|liquidity-sweep", "baseline")
+    .option("--initial-diem <amounts>", "placeholder equity (capacity sweeps this dim)")
+    .option("--initial-wstdiem <amounts>", "comma-separated initial wstDIEM collateral amounts")
+    .option("--wstdiem-nav <amount>", "DIEM value of 1 wstDIEM when --initial-wstdiem is used", "1")
+    .option(
+      "--curve-depth-diem <amounts>",
+      "total Curve depth in DIEM; split into balanced legs (mutually exclusive with --curve-*-leg)",
+    )
+    .option(
+      "--curve-diem-leg <amounts>",
+      "Curve DIEM-side leg depth in DIEM (the exit draws this leg)",
+    )
+    .option(
+      "--curve-wstdiem-leg <amounts>",
+      "Curve wstDIEM-side leg depth in DIEM-equivalent (the entry draws this leg)",
+    )
+    .option("--morpho-supply-diem <amounts>", "Morpho supply assumption in DIEM")
+    .option(
+      "--morpho-existing-borrow-diem <amount>",
+      "existing Morpho borrow to reserve from usable supply",
+    )
+    .option("--vault-apy-bps <bps>", "vault APY assumption in bps")
+    .option(
+      "--borrow-rate-model <model>",
+      "borrow-cost model: adaptive-curve (default) or flat",
+      "adaptive-curve",
+    )
+    .option(
+      "--rate-at-target-apy-bps <bps>",
+      "adaptive-curve rate-at-target APY in bps",
+    )
+    .option("--borrow-apy-bps <bps>", "flat model only: Morpho borrow APY in bps")
+    .option("--curve-fee-bps <bps>", "Curve fee assumption in bps")
+    .option("--slippage-bps <bps>", "maximum acceptable simulated entry/exit slippage bps")
+    .option("--flash-fee-bps <bps>", "flash fee assumption in bps")
+    .option(
+      "--max-curve-position-share-bps <bps>",
+      "maximum position/depth share before Curve blocks",
+    )
+    .option("--max-morpho-utilization-bps <bps>", "maximum Morpho utilization available to this loop")
+    .option("--min-health-factor <value>", "minimum post-loop health factor")
+    .option("--min-net-apy-bps <bps>", "minimum acceptable net APY in bps")
+    .option("--holding-days <days>", "holding period for annualizing one-time costs")
+    .option(
+      "--gas-cost-diem <amount>",
+      "one-time gas cost in DIEM folded into net APY (default 0)",
+    )
+    .option("--from-chain", "seed market inputs from live Base reads", false)
+    .option("--planning-block <n>", "pin on-chain seed reads to a specific block (default latest)")
+    .option(
+      "--allow-offline-defaults",
+      "escape hatch: allow capacity/brief without live seed or explicit market flags (non-authoritative, not persistable)",
+      false,
+    );
+}
+
+function hasExplicitMarketInputs(options: LoopSizingGridOptions): boolean {
+  const hasCurve =
+    options.curveDepthDiem !== undefined ||
+    (options.curveDiemLeg !== undefined && options.curveWstdiemLeg !== undefined);
+  return hasCurve && options.morphoSupplyDiem !== undefined;
+}
+
+function resolveCapacityInputMode(options: {
+  fromChain?: boolean;
+  allowOfflineDefaults?: boolean;
+} & LoopSizingGridOptions): CapacityInputMode {
+  if (options.fromChain) {
+    return "from-chain";
+  }
+  if (hasExplicitMarketInputs(options)) {
+    return "explicit-flags";
+  }
+  if (options.allowOfflineDefaults) {
+    return "offline-defaults";
+  }
+  throw new CliError(
+    "OFFLINE_CAPACITY_REFUSED",
+    "capacity/brief refuse offline fantasy numbers: pass --from-chain, or explicit --curve-depth-diem (or both --curve-diem-leg and --curve-wstdiem-leg) plus --morpho-supply-diem, or --allow-offline-defaults",
+  );
+}
+
+function seedAmountGrid(value: bigint): string {
+  return formatWad(value, 18);
+}
+
+function buildSingleTemplate(
+  config: AppConfig,
+  options: LoopSizingGridOptions,
+  leverage: string,
+  inputMode: CapacityInputMode,
+): LoopSizingScenario {
+  const grid: LoopSizingGridOptions = {
+    ...options,
+    initialDiem: "1",
+    targetLeverage: leverage,
+  };
+  // Offline defaults: pin multi-value sizing defaults to single deep points so the template is unique.
+  if (inputMode === "offline-defaults") {
+    if (grid.curveDepthDiem === undefined && grid.curveDiemLeg === undefined) {
+      grid.curveDepthDiem = "10000";
+    }
+    if (grid.morphoSupplyDiem === undefined) {
+      grid.morphoSupplyDiem = "10000";
+    }
+    if (grid.vaultApyBps === undefined) {
+      grid.vaultApyBps = "1500";
+    }
+    if (grid.rateAtTargetApyBps === undefined) {
+      grid.rateAtTargetApyBps = "400";
+    }
+  }
+  let scenarios: LoopSizingScenario[];
+  try {
+    scenarios = buildLoopSizingScenarios(config, grid);
+  } catch (error) {
+    throw new CliError(
+      "INVALID_INPUT",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (scenarios.length !== 1) {
+    throw new CliError(
+      "INVALID_INPUT",
+      "capacity/brief require single-valued market inputs (no comma grids on curve/morpho/vault/borrow dims)",
+    );
+  }
+  return scenarios[0];
+}
+
+function explicitFlagsFromCommand(command: Command): FromChainExplicitFlags {
+  return {
+    rateAtTargetApyBps: command.getOptionValueSource("rateAtTargetApyBps") === "cli",
+    morphoSupplyDiem: command.getOptionValueSource("morphoSupplyDiem") === "cli",
+    morphoExistingBorrowDiem: command.getOptionValueSource("morphoExistingBorrowDiem") === "cli",
+    curveDepthDiem: command.getOptionValueSource("curveDepthDiem") === "cli",
+    curveDiemLeg: command.getOptionValueSource("curveDiemLeg") === "cli",
+    curveWstdiemLeg: command.getOptionValueSource("curveWstdiemLeg") === "cli",
+    vaultApyBps: command.getOptionValueSource("vaultApyBps") === "cli",
+  };
+}
+
+async function prepareFromChainCapacityTemplate(input: {
+  config: AppConfig;
+  client: FromChainSeedClient;
+  options: LoopSizingGridOptions;
+  explicitFlags: FromChainExplicitFlags;
+  leverage: string;
+  planningBlock?: bigint;
+  store?: import("../loop/fromChainSeed.js").VaultApyWindowStore;
+}): Promise<{
+  template: LoopSizingScenario;
+  blockNumber: bigint;
+  seedProvenance: import("../loop/sizing.js").SeedProvenance;
+  authoritative: boolean;
+  warnings: string[];
+  seedCurve: boolean;
+  vaultApySource?: "measured-7d" | "not-seeded";
+}> {
+  const { config, client, options, explicitFlags, leverage, planningBlock, store } = input;
+  assertFromChainCompatibleOptions(options);
+
+  const anyExplicitCurveFlag = Boolean(
+    explicitFlags.curveDepthDiem || explicitFlags.curveDiemLeg || explicitFlags.curveWstdiemLeg,
+  );
+  const curveSweptByPreset = options.preset === "liquidity-sweep";
+  const seedCurve = !anyExplicitCurveFlag && !curveSweptByPreset;
+
+  const { seeds, provenance } = await seedFromChain({
+    config,
+    client,
+    planningBlock,
+    seedCurve,
+  });
+
+  const gridOptions: LoopSizingGridOptions = { ...options };
+  const seededFields = { ...provenance.seededFields };
+
+  if (explicitFlags.rateAtTargetApyBps) {
+    seededFields.rateAtTargetApyBps = "flag";
+  } else {
+    gridOptions.rateAtTargetApyBps = String(seeds.rateAtTargetApyBps);
+  }
+  if (explicitFlags.morphoSupplyDiem) {
+    seededFields.morphoSupplyDiem = "flag";
+  } else {
+    gridOptions.morphoSupplyDiem = seedAmountGrid(seeds.morphoSupplyDiem);
+  }
+  if (explicitFlags.morphoExistingBorrowDiem) {
+    seededFields.morphoExistingBorrowDiem = "flag";
+  } else {
+    gridOptions.morphoExistingBorrowDiem = seedAmountGrid(seeds.morphoExistingBorrowDiem);
+  }
+  if (
+    seedCurve &&
+    seeds.curveDiemLegDiem !== undefined &&
+    seeds.curveWstDiemLegInDiem !== undefined
+  ) {
+    delete gridOptions.curveDepthDiem;
+    gridOptions.curveDiemLeg = seedAmountGrid(seeds.curveDiemLegDiem);
+    gridOptions.curveWstdiemLeg = seedAmountGrid(seeds.curveWstDiemLegInDiem);
+    seededFields.curveDepthDiem = "chain";
+  } else if (anyExplicitCurveFlag) {
+    seededFields.curveDepthDiem = "flag";
+  }
+
+  let vaultApySource: "measured-7d" | "not-seeded" | undefined;
+  let vaultAuthoritative = true;
+  const vaultWarnings: string[] = [];
+  if (explicitFlags.vaultApyBps) {
+    seededFields.vaultApyBps = "flag";
+    vaultApySource = "not-seeded";
+    vaultAuthoritative = false;
+    vaultWarnings.push(
+      "vault APY is operator-supplied (--vault-apy-bps), not chain-measured — verdict is not authoritative",
+    );
+  } else if (store !== undefined) {
+    try {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const vaultApy = await loadVaultApyWindow({ config, client, store, nowSeconds });
+      if (vaultApy.source === "measured-7d") {
+        gridOptions.vaultApyBps = String(vaultApy.vaultApyBps);
+        seededFields.vaultApyBps = "chain";
+        vaultApySource = "measured-7d";
+      } else {
+        seededFields.vaultApyBps = "default";
+        vaultApySource = "not-seeded";
+        vaultAuthoritative = false;
+        vaultWarnings.push(
+          `vault APY not seeded (${vaultApy.reason}) — verdict is not authoritative`,
+        );
+      }
+    } catch (error) {
+      seededFields.vaultApyBps = "default";
+      vaultApySource = "not-seeded";
+      vaultAuthoritative = false;
+      vaultWarnings.push(
+        `vault APY not seeded (${errorMessage(error)}) — verdict is not authoritative`,
+      );
+    }
+  }
+
+  const template = buildSingleTemplate(config, gridOptions, leverage, "from-chain");
+  const authoritative = provenance.authoritative && vaultAuthoritative;
+  const warnings = [...provenance.warnings, ...vaultWarnings];
+  return {
+    template,
+    blockNumber: provenance.blockNumber,
+    seedProvenance: {
+      ...provenance,
+      seededFields,
+      authoritative,
+      warnings,
+      vaultApySource,
+    },
+    authoritative,
+    warnings,
+    seedCurve,
+    vaultApySource,
+  };
+}
+
+function makeExitSlippageQuoter(
+  config: AppConfig,
+  client: FromChainSeedClient,
+): ExitSlippageQuoter {
+  return async (positionCollateralDiem, maxSlippageBps, blockNumber) => {
+    try {
+      const injection = await computeExitSlippageInjection({
+        config,
+        client,
+        positionCollateralDiem,
+        slippageBps: maxSlippageBps,
+        blockNumber,
+      });
+      if (injection.exitSlippageBps !== undefined) {
+        return { bps: injection.exitSlippageBps };
+      }
+      return { demote: injection.readiness ?? "no quote produced" };
+    } catch (error) {
+      if (error instanceof CliError) {
+        return { hardFail: error.message };
+      }
+      return {
+        hardFail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  };
+}
+
+addSizingSeedFlags(
+  loop
+    .command("capacity")
+    .description(
+      "Gate-bound absorption (last-candidate): largest equity clearing sizing gates at a fixed leverage",
+    )
+    .option("--json", "emit JSON envelope")
+    .option(
+      "--target-leverage <value>",
+      // Default 1.5× (not 2×): under minPostLoopHealthFactor 1.7, structural HF at 2× is ~1.72
+      // which always trips isMarginal (HF < 1.1×min ≈ 1.87) → capacity would be 0 for every
+      // market. 1.5× HF≈2.58 clears the proximity band so Morpho/curve can bind (SPEC006 impl note).
+      "single leverage > 1 (default 1.5). Comma grids are invalid — use loop brief for multi-L",
+      "1.5",
+    ),
+).action(async function (this: Command) {
+  await runAction(this, "loop capacity", async (config) => {
+    const options = this.opts<
+      LoopSizingGridOptions & {
+        fromChain?: boolean;
+        planningBlock?: string;
+        allowOfflineDefaults?: boolean;
+        targetLeverage?: string;
+      }
+    >();
+    const wantsJson = this.optsWithGlobals<GlobalOptions>().json;
+    const leverageRaw = options.targetLeverage ?? "1.5";
+    if (leverageRaw.includes(",")) {
+      throw new CliError(
+        "INVALID_INPUT",
+        "loop capacity accepts a single --target-leverage; use loop brief for a leverage grid",
+      );
+    }
+
+    const inputMode = resolveCapacityInputMode(options);
+
+    try {
+      if (inputMode === "from-chain") {
+        assertFromChainCompatibleOptions(options);
+        const planningBlock =
+          options.planningBlock === undefined
+            ? undefined
+            : BigInt(parseStrictInteger(options.planningBlock, "--planning-block"));
+        let client: Awaited<ReturnType<typeof createViemLoopSimulationClient>>;
+        try {
+          client = await createViemLoopSimulationClient(config);
+        } catch (error) {
+          throw new CliError(
+            "FROM_CHAIN_SEED_BLOCKED",
+            `RPC unavailable for --from-chain seeding: ${errorMessage(error)}`,
+          );
+        }
+        if (client === null) {
+          throw new CliError(
+            "FROM_CHAIN_SEED_BLOCKED",
+            "at least one RPC URL must be configured for --from-chain seeding",
+          );
+        }
+        // Capacity --from-chain: Storage READ only for vault APY (never write brief_runs).
+        const store = new Storage(config.storage.sqlitePath);
+        try {
+          const prepared = await prepareFromChainCapacityTemplate({
+            config,
+            client,
+            options,
+            explicitFlags: explicitFlagsFromCommand(this),
+            leverage: leverageRaw,
+            planningBlock,
+            store,
+          });
+          const quoter = prepared.seedCurve
+            ? makeExitSlippageQuoter(config, client)
+            : undefined;
+          const result = await findLoopCapacity({
+            template: prepared.template,
+            inputMode,
+            blockNumber: prepared.blockNumber,
+            quoteExitSlippage: quoter,
+            seedProvenance: prepared.seedProvenance,
+            authoritative: prepared.authoritative,
+            warnings: prepared.warnings,
+          });
+          return wantsJson ? result : renderLoopCapacityTable(result);
+        } finally {
+          store.close();
+        }
+      }
+
+      const template = buildSingleTemplate(config, options, leverageRaw, inputMode);
+      const result = await findLoopCapacity({
+        template,
+        inputMode,
+        authoritative: inputMode === "explicit-flags",
+        warnings:
+          inputMode === "offline-defaults"
+            ? ["OFFLINE DEFAULTS — not live capacity"]
+            : [],
+      });
+      return wantsJson ? result : renderLoopCapacityTable(result);
+    } catch (error) {
+      if (error instanceof CapacitySearchError) {
+        throw new CliError(error.code, error.message);
+      }
+      throw error;
+    }
+  });
+});
+
+addSizingSeedFlags(
+  loop
+    .command("brief")
+    .description(
+      "Decision-support brief: capacity grid + net APY snapshot + deltas vs last comparable run",
+    )
+    .option("--json", "emit JSON envelope")
+    .option(
+      "--target-leverage <values>",
+      // 1.8× HF≈1.935 clears the 1.1×min HF marginal band; 2× does not (always marginal-band).
+      "comma-separated leverage grid (default 1.5,1.8)",
+      "1.5,1.8",
+    )
+    .option(
+      "--canonical-equity-diem <amount>",
+      "equity for net-APY snapshot (default 100)",
+      "100",
+    ),
+).action(async function (this: Command) {
+  await runAction(this, "loop brief", async (config) => {
+    const options = this.opts<
+      LoopSizingGridOptions & {
+        fromChain?: boolean;
+        planningBlock?: string;
+        allowOfflineDefaults?: boolean;
+        targetLeverage?: string;
+        canonicalEquityDiem?: string;
+      }
+    >();
+    const wantsJson = this.optsWithGlobals<GlobalOptions>().json;
+    const leverageRaw = options.targetLeverage ?? "1.5,1.8";
+    const canonicalEquityRaw = options.canonicalEquityDiem ?? "100";
+    const inputMode = resolveCapacityInputMode(options);
+
+    const leverageParts = leverageRaw
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    if (leverageParts.length === 0) {
+      throw new CliError("INVALID_INPUT", "--target-leverage must include at least one value");
+    }
+
+    let canonicalEquityDiem: bigint;
+    try {
+      canonicalEquityDiem = parseDecimalToUnits(canonicalEquityRaw);
+    } catch (error) {
+      throw new CliError(
+        "INVALID_INPUT",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
+    const store = new Storage(config.storage.sqlitePath);
+    try {
+      const templatesByLeverage = new Map<number, LoopSizingScenario>();
+      let capacityOptions: Parameters<typeof buildLoopBrief>[0]["capacityOptions"];
+      let blockNumber: bigint | null = null;
+      let vaultApySource: "measured-7d" | "not-seeded" | "flag" | null = null;
+      let sharedWarnings: string[] = [];
+      let sharedAuthoritative = inputMode !== "offline-defaults";
+
+      if (inputMode === "from-chain") {
+        assertFromChainCompatibleOptions(options);
+        const planningBlock =
+          options.planningBlock === undefined
+            ? undefined
+            : BigInt(parseStrictInteger(options.planningBlock, "--planning-block"));
+        let client: Awaited<ReturnType<typeof createViemLoopSimulationClient>>;
+        try {
+          client = await createViemLoopSimulationClient(config);
+        } catch (error) {
+          throw new CliError(
+            "FROM_CHAIN_SEED_BLOCKED",
+            `RPC unavailable for --from-chain seeding: ${errorMessage(error)}`,
+          );
+        }
+        if (client === null) {
+          throw new CliError(
+            "FROM_CHAIN_SEED_BLOCKED",
+            "at least one RPC URL must be configured for --from-chain seeding",
+          );
+        }
+        // Seed once; clone template per leverage.
+        const prepared = await prepareFromChainCapacityTemplate({
+          config,
+          client,
+          options,
+          explicitFlags: explicitFlagsFromCommand(this),
+          leverage: leverageParts[0],
+          planningBlock,
+          store,
+        });
+        blockNumber = prepared.blockNumber;
+        vaultApySource = prepared.vaultApySource ?? null;
+        sharedWarnings = prepared.warnings;
+        sharedAuthoritative = prepared.authoritative;
+        if (prepared.seedCurve) {
+          capacityOptions = {
+            blockNumber: prepared.blockNumber,
+            quoteExitSlippage: makeExitSlippageQuoter(config, client),
+            seedProvenance: prepared.seedProvenance,
+            authoritative: prepared.authoritative,
+            warnings: prepared.warnings,
+          };
+        } else {
+          capacityOptions = {
+            seedProvenance: prepared.seedProvenance,
+            authoritative: prepared.authoritative,
+            warnings: prepared.warnings,
+          };
+        }
+        for (const lev of leverageParts) {
+          let leverageBps: number;
+          try {
+            leverageBps = parseDecimalToBps(lev, "--target-leverage");
+          } catch (error) {
+            throw new CliError(
+              "INVALID_INPUT",
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+          if (leverageBps <= 10_000) {
+            throw new CliError("INVALID_INPUT", "--target-leverage values must be greater than 1");
+          }
+          templatesByLeverage.set(leverageBps, {
+            ...prepared.template,
+            id: `brief-${leverageBps}`,
+            targetLeverageBps: leverageBps,
+          });
+        }
+      } else {
+        for (const lev of leverageParts) {
+          const template = buildSingleTemplate(config, options, lev, inputMode);
+          templatesByLeverage.set(template.targetLeverageBps, template);
+        }
+        if (inputMode === "offline-defaults") {
+          sharedWarnings = ["OFFLINE DEFAULTS — not live capacity"];
+          sharedAuthoritative = false;
+        }
+        if (this.getOptionValueSource("vaultApyBps") === "cli") {
+          vaultApySource = "flag";
+        }
+      }
+
+      const leverageGridBps = [...templatesByLeverage.keys()].sort((a, b) => a - b);
+      const firstTemplate = templatesByLeverage.get(leverageGridBps[0]);
+      if (firstTemplate === undefined) {
+        throw new CliError("INVALID_INPUT", "no leverage templates built");
+      }
+      const templateFingerprint = fingerprintFromTemplate(
+        firstTemplate,
+        inputMode,
+        leverageGridBps,
+        canonicalEquityDiem,
+      );
+      const previous =
+        inputMode === "offline-defaults"
+          ? null
+          : store.getLatestComparableBriefRun({
+              inputMode,
+              templateFingerprint,
+            });
+
+      let brief;
+      try {
+        brief = await buildLoopBrief({
+          templatesByLeverage,
+          leverageGridBps,
+          canonicalEquityDiem,
+          inputMode,
+          chainId: config.chainId,
+          blockNumber,
+          vaultApySource,
+          previous,
+          capacityOptions: {
+            ...capacityOptions,
+            authoritative: sharedAuthoritative,
+            warnings: [
+              ...(capacityOptions?.warnings ?? []),
+              ...sharedWarnings.filter(
+                (w) => !(capacityOptions?.warnings ?? []).includes(w),
+              ),
+            ],
+          },
+        });
+      } catch (error) {
+        if (error instanceof CapacitySearchError) {
+          throw new CliError(error.code, error.message);
+        }
+        throw error;
+      }
+
+      if (brief.current.persistable) {
+        store.insertBriefRun(brief.current);
+      }
+
+      return wantsJson ? brief : renderLoopBrief(brief);
+    } finally {
+      store.close();
+    }
+  });
+});
 
 loop
   .command("simulate")

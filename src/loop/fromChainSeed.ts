@@ -670,8 +670,10 @@ export async function buildFromChainSizingReport(input: {
  * notional — then reuses `quoteCurveExitRoute` (`priceImpactBps`) at the pinned block. A
  * convertToShares or quote REVERT fails closed; a `readiness`-only result (no quote) does not
  * inject and returns the reason so the caller can demote the verdict.
+ *
+ * Exported for SPEC006 capacity/brief so they do not reach for a private symbol.
  */
-async function computeExitSlippageInjection(input: {
+export async function computeExitSlippageInjection(input: {
   config: AppConfig;
   client: FromChainSeedClient;
   positionCollateralDiem: bigint;

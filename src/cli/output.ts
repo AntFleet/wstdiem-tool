@@ -1,6 +1,8 @@
 import Table from "cli-table3";
 import type { AlertEvaluation, AppConfig, CliJsonOutput, MetricSnapshot } from "../types/domain.js";
 import { formatWad } from "../metrics/math.js";
+import type { LoopBriefResult } from "../loop/brief.js";
+import type { LoopCapacityResult } from "../loop/capacity.js";
 import type { LoopReadinessResult } from "../loop/readiness.js";
 import type { LoopSizingReport, LoopSizingResult } from "../loop/sizing.js";
 
@@ -209,6 +211,16 @@ function formatLeverage(targetLeverageBps: number): string {
   return `${(targetLeverageBps / 10_000).toFixed(2)}x`;
 }
 
+function formatSignedWad(value: bigint): string {
+  if (value < 0n) {
+    return `-${formatWad(-value)}`;
+  }
+  if (value > 0n) {
+    return `+${formatWad(value)}`;
+  }
+  return formatWad(0n);
+}
+
 function formatHealthFactor(healthFactorBps: number | null): string {
   return healthFactorBps === null ? "Infinity" : (healthFactorBps / 10_000).toFixed(2);
 }
@@ -411,4 +423,244 @@ export function renderLoopSizingTable(report: LoopSizingReport): string {
     ? ""
     : "UNVERIFIED SEED: chain-seeded verdicts are candidates, not authoritative (see seed provenance)\n";
   return `${banner}${table.toString()}\n${summaryTable.toString()}\n${seedTable.toString()}`;
+}
+
+function capacityInputModeToken(mode: LoopCapacityResult["inputMode"]): string {
+  switch (mode) {
+    case "from-chain":
+      return "CHAIN-SEEDED";
+    case "explicit-flags":
+      return "EXPLICIT FLAGS";
+    case "offline-defaults":
+      return "OFFLINE DEFAULTS";
+  }
+}
+
+function bindingConstraintGloss(constraint: LoopCapacityResult["bindingConstraint"]): string {
+  switch (constraint) {
+    case "morpho-util-headroom":
+      return "util-capped Morpho borrow headroom (not raw unborrowed)";
+    case "health-factor":
+      return "structural at this leverage; reduce leverage, not equity";
+    case "marginal-band":
+      return "near hard gates";
+    case "unbounded-in-search-window":
+      return "≥ maxProbe; not a market capacity claim";
+    case "net-apy":
+      return "often sensitive to vault-APY assumption";
+    case "curve-exit-slippage":
+      return "exit slippage over cap";
+    case "curve-depth":
+      return "curve depth share";
+    case "unwind":
+      return "unwind not covered";
+    case "scenario-invalid":
+      return "scenario invalid";
+  }
+}
+
+/**
+ * Human capacity table (SPEC006 §4). Banner above the number; "gates clear up to" lexicon.
+ * Must never contain "deploy up to".
+ */
+export function renderLoopCapacityTable(result: LoopCapacityResult): string {
+  const mode = capacityInputModeToken(result.inputMode);
+  const offlineBanner =
+    result.inputMode === "offline-defaults" ? "OFFLINE DEFAULTS — not live capacity\n" : "";
+  const lev = formatLeverage(result.targetLeverageBps);
+
+  let headline: string;
+  if (result.bindingConstraint === "unbounded-in-search-window") {
+    headline = `Gates clear up to ≥ ${formatWad(result.capacityEquityDiem)} DIEM equity @ ${lev} (notional ${formatWad(result.capacityNotionalDiem)} DIEM; search window — not a market limit). Not a deploy recommendation.`;
+  } else if (result.capacityEquityDiem === 0n) {
+    headline = `Gates clear up to 0 DIEM equity @ ${lev} (notional 0). Next: ${result.capacityStatus} via ${result.bindingConstraint}. Not a deploy recommendation.`;
+  } else {
+    const nextStatus = result.bindingEdge?.status ?? "non-candidate";
+    headline = `Gates clear up to ${formatWad(result.capacityEquityDiem)} DIEM equity @ ${lev} (notional ${formatWad(result.capacityNotionalDiem)} DIEM). Next: ${nextStatus} via ${result.bindingConstraint}. Not a deploy recommendation.`;
+  }
+  if (result.search.truncated) {
+    headline += " search truncated.";
+  }
+
+  const banner = `${offlineBanner}[${mode}] ${result.disclaimer}\n${headline}`;
+
+  const table = new Table({
+    head: ["Metric", "Value"],
+    wordWrap: true,
+  });
+  table.push(
+    ["Input mode", result.inputMode],
+    ["Target leverage", lev],
+    [
+      "Capacity equity (last-candidate)",
+      result.bindingConstraint === "unbounded-in-search-window"
+        ? `≥ ${formatWad(result.capacityEquityDiem)} DIEM`
+        : `${formatWad(result.capacityEquityDiem)} DIEM`,
+    ],
+    ["Capacity notional (last-candidate)", `${formatWad(result.capacityNotionalDiem)} DIEM`],
+    ["Capacity status", result.capacityStatus],
+    [
+      "Binding constraint",
+      `${result.bindingConstraint} — ${bindingConstraintGloss(result.bindingConstraint)}`,
+    ],
+    [
+      "Headroom to hard block (includes marginal — riskier)",
+      result.headroomToBlockEquityDiem === result.capacityEquityDiem
+        ? `${formatWad(result.headroomToBlockEquityDiem)} DIEM (same as capacity)`
+        : `${formatWad(result.headroomToBlockEquityDiem)} DIEM equity / ${formatWad(result.headroomToBlockNotionalDiem)} DIEM notional`,
+    ],
+    ["Morpho raw unborrowed (info)", `${formatWad(result.morphoRawAvailableDiem)} DIEM`],
+    [
+      "Util-capped borrow headroom (gate)",
+      `${formatWad(result.availableMorphoBorrowDiem)} DIEM`,
+    ],
+    [
+      "Search",
+      `probes ${result.search.probes}, get_dy ${result.search.getDyQuotes}, resolution ${formatWad(result.search.resolutionDiem)} DIEM${result.search.truncated ? ", truncated" : ""}`,
+    ],
+    ["Authoritative", result.authoritative ? "yes" : "no"],
+    ["Warnings", result.warnings.length === 0 ? "none" : result.warnings.join("; ")],
+    [
+      "Marginal reasons",
+      result.marginalReasons.length === 0 ? "none" : result.marginalReasons.join("; "),
+    ],
+  );
+
+  if (result.bindingEdge !== null) {
+    table.push(
+      ["morphoSupplyShortfallDiem", formatShortfallDiem(result.bindingEdge.morphoSupplyShortfallDiem)],
+      [
+        "curveDiemLegSlippageShortfallDiem",
+        formatShortfallDiem(result.bindingEdge.curveDiemLegSlippageShortfallDiem),
+      ],
+      ["exitSlippageExcessBps", formatBps(result.bindingEdge.exitSlippageExcessBps)],
+      ["netApyShortfallBps", formatBps(result.bindingEdge.netApyShortfallBps)],
+    );
+  }
+
+  return `${banner}\n${table.toString()}`;
+}
+
+/**
+ * Human brief: capacity rows + net APY grid + deltas (SPEC006 §3).
+ * First run deltas render as n/a, never 0.
+ */
+export function renderLoopBrief(result: LoopBriefResult): string {
+  const lines: string[] = [];
+  const mode = capacityInputModeToken(result.current.inputMode);
+  if (result.current.inputMode === "offline-defaults") {
+    lines.push("OFFLINE DEFAULTS — not live capacity");
+  }
+  lines.push(`[${mode}] ${result.disclaimer}`);
+  lines.push(
+    `template ${result.current.templateFingerprint.slice(0, 12)}… · persistable ${result.current.persistable ? "yes" : "no"} · authoritative ${result.authoritative ? "yes" : "no"}`,
+  );
+
+  const capTable = new Table({
+    head: ["Leverage", "Capacity equity", "Notional", "Status", "Binding", "Δ equity"],
+    wordWrap: true,
+  });
+  for (const cap of result.capacities) {
+    const snap = result.current.capacities.find(
+      (row) => row.targetLeverageBps === cap.targetLeverageBps,
+    );
+    const deltaRow = result.deltas?.perLeverage.find(
+      (row) => row.targetLeverageBps === cap.targetLeverageBps,
+    );
+    let deltaCell = "n/a";
+    if (result.deltas !== null && deltaRow !== undefined) {
+      deltaCell =
+        deltaRow.capacityEquityDiem === null
+          ? "n/a"
+          : `${formatSignedWad(BigInt(deltaRow.capacityEquityDiem))} DIEM`;
+    }
+    const equityLabel =
+      cap.bindingConstraint === "unbounded-in-search-window"
+        ? `≥ ${formatWad(cap.capacityEquityDiem)} DIEM`
+        : `${formatWad(cap.capacityEquityDiem)} DIEM`;
+    capTable.push([
+      formatLeverage(cap.targetLeverageBps),
+      equityLabel,
+      `${formatWad(cap.capacityNotionalDiem)} DIEM`,
+      snap?.capacityStatus ?? cap.capacityStatus,
+      cap.bindingConstraint,
+      deltaCell,
+    ]);
+  }
+  lines.push(capTable.toString());
+
+  const apyTable = new Table({
+    head: ["Leverage", "Equity", "Net APY", "Stressed net APY", "Status", "Δ net APY"],
+    wordWrap: true,
+  });
+  for (const row of result.netApyGrid) {
+    const deltaRow = result.deltas?.perLeverage.find(
+      (d) => d.targetLeverageBps === row.scenario.targetLeverageBps,
+    );
+    const deltaApy =
+      result.deltas === null
+        ? "n/a"
+        : deltaRow?.netApyBps === null || deltaRow?.netApyBps === undefined
+          ? "n/a"
+          : formatBps(deltaRow.netApyBps);
+    apyTable.push([
+      formatLeverage(row.scenario.targetLeverageBps),
+      `${formatWad(row.equityDiem)} DIEM`,
+      formatBps(row.netApyBps),
+      formatBps(row.netApyStressedBps),
+      row.status,
+      deltaApy,
+    ]);
+  }
+  lines.push(apyTable.toString());
+
+  const deltaTable = new Table({
+    head: ["Delta", "Value"],
+    wordWrap: true,
+  });
+  if (result.previous === null || result.deltas === null) {
+    deltaTable.push(
+      ["Previous comparable run", "n/a"],
+      ["Δ rateAtTarget", "n/a"],
+      ["Δ vault APY", "n/a"],
+      ["Δ morpho raw available", "n/a"],
+      ["Δ curve DIEM leg", "n/a"],
+    );
+  } else {
+    deltaTable.push(
+      [
+        "Previous comparable run",
+        `ts ${result.previous.timestamp} fingerprint ${result.previous.templateFingerprint.slice(0, 12)}…`,
+      ],
+      [
+        "Δ rateAtTarget",
+        result.deltas.rateAtTargetApyBps === null
+          ? "n/a"
+          : `${result.deltas.rateAtTargetApyBps} bps`,
+      ],
+      [
+        "Δ vault APY",
+        result.deltas.vaultApyBps === null ? "n/a" : `${result.deltas.vaultApyBps} bps`,
+      ],
+      [
+        "Δ morpho raw available",
+        result.deltas.morphoRawAvailableDiem === null
+          ? "n/a"
+          : `${formatSignedWad(BigInt(result.deltas.morphoRawAvailableDiem))} DIEM`,
+      ],
+      [
+        "Δ curve DIEM leg",
+        result.deltas.curveDiemLegDiem === null
+          ? "n/a"
+          : `${formatSignedWad(BigInt(result.deltas.curveDiemLegDiem))} DIEM`,
+      ],
+    );
+  }
+  lines.push(deltaTable.toString());
+
+  if (result.warnings.length > 0) {
+    lines.push(`Warnings: ${result.warnings.join("; ")}`);
+  }
+
+  return lines.join("\n");
 }

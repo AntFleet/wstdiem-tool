@@ -26,8 +26,16 @@ comparable run** for a recurring post/cron brief.
 
 | Surface | Job |
 |---|---|
-| **`loop capacity`** | At a fixed target leverage `L`, find the largest equity `E` for which `sizeLoopScenario` returns `status === "candidate"` (last-candidate), report notional from the engine ceil, name the **binding** constraint on the first non-candidate above, and optionally report headroom-to-hard-block. |
+| **`loop capacity`** | At a fixed target leverage `L`, find the largest equity `E` for which `sizeLoopScenario` returns `status === "candidate"` (last-candidate), report notional from the engine ceil, name the **binding** constraint on the first non-candidate above, and report headroom-to-hard-block. |
 | **`loop brief`** | Emit a decision-support brief: capacity (default leverage grid) + net-APY snapshot + **Δ vs the last *comparable* stored brief run**. Persist this run so the next run has a baseline. |
+
+**Impl note — default leverages vs HF proximity (folded post-executor).** Structural HF =
+`LLTV·L/(L−1)` is equity-independent. Under default `minPostLoopHealthFactor` 1.7, the engine's
+`isMarginal` health band is HF < 1.1×1.7 ≈ 1.87. At **2.0×**, HF ≈ 1.72 always trips that band →
+last-candidate capacity is **0 / `marginal-band` for every market depth**. Defaults therefore use
+**capacity `1.5`** (HF ≈ 2.58) and brief grid **`1.5,1.8`** (1.8× HF ≈ 1.935 clears the band). 2×
+and 3× remain opt-in flags; the CLI emits a structural-HF proximity warning when capacity is
+identically zero for that reason.
 
 **Headline lexicon (normative — render + docs + JSON labels).** Use **"gate-bound absorption
 (last-candidate)"** / **"gates clear up to …"**. Ban **"deployable capacity"**, **"can absorb and
@@ -101,7 +109,7 @@ Capacity freezes the market inputs and sweeps only equity:
 | Input | Source (live / offline) | Notes |
 |---|---|---|
 | Curve legs / Morpho supply / existing borrow / rateAtTarget / vaultApy | `--from-chain` seed (SPEC003) or **explicit** market flags | Same precedence as `loop sizing --from-chain` |
-| `targetLeverageBps` | `--target-leverage` (single value; **optional, default `2`** → 20000 bps) | Must be `> 1`; parse via the sizing leverage parser (`>1`, ≤4 dp → bps) — **not** the loop open/rebalance 1.5–3.8 clamp |
+| `targetLeverageBps` | `--target-leverage` (single value; **optional, default `1.5`** → 15000 bps) | Must be `> 1`; parse via the sizing leverage parser (`>1`, ≤4 dp → bps) — **not** the loop open/rebalance 1.5–3.8 clamp. Default is 1.5 (not 2) so structural HF clears the proximity band under min HF 1.7 — see §1 impl note. |
 | fees, share caps, min HF, min net APY, holding days, gas | config / existing sizing flags | Unchanged from SPEC002 |
 | `externalExitSlippageBps` | live `get_dy` **re-quoted per candidate size** when curve is chain-seeded | Injectable quoter; block-pinned (§2.3) |
 
@@ -330,10 +338,11 @@ unless `--allow-offline-defaults` is set.
 
 A single command a cron can run that prints:
 
-1. **Capacity** at each requested leverage (default **`1.5,2`** — healthy entry band under
-   `minPostLoopHealthFactor` 1.7). **3× is opt-in:** under default min HF, structural HF at 3× is
-   ≈1.29 < 1.7 → capacity 0 / `health-factor` at all equities (expected). SPEC005 continuous WARN at
-   HF≈1.29 describes a *live* aggressive position, not a peer default capacity row.
+1. **Capacity** at each requested leverage (default **`1.5,1.8`** — both clear the HF proximity band
+   under `minPostLoopHealthFactor` 1.7; see §1 impl note). **2× / 3× are opt-in:** under default min
+   HF, 2× is always `marginal-band` (HF≈1.72 < 1.87) and 3× is `health-factor` blocked (HF≈1.29 <
+   1.7) at all equities (expected). SPEC005 continuous WARN at HF≈1.29 describes a *live* aggressive
+   position, not a peer default capacity row.
 2. **Net-APY snapshot** at canonical equity (default **100 DIEM**) across those leverages — model
    net APY at that size, **not** "what capital will earn." Inherits SPEC002 §8 caveats banner.
    Stress net APY is shown. Positive net APY at 100 DIEM with capacity 0 at large size is a valid
@@ -475,7 +484,7 @@ Brief disclaimer = capacity `disclaimer` + exact suffix:
 
 ```text
 loop capacity
-  --target-leverage <value>          # optional SINGLE leverage > 1; default 2
+  --target-leverage <value>          # optional SINGLE leverage > 1; default 1.5
                                      # comma grid → INVALID_INPUT (multi-L is loop brief only)
   --from-chain                       # live seed (recommended for capital numbers)
   --planning-block <n>
@@ -484,7 +493,7 @@ loop capacity
   --json
 
 loop brief
-  --target-leverage <values>         # comma grid; default "1.5,2"
+  --target-leverage <values>         # comma grid; default "1.5,1.8"
   --canonical-equity-diem <amount>   # default 100
   --from-chain
   --planning-block <n>
@@ -596,8 +605,9 @@ When `search.truncated`, append `search truncated`. When unbounded, use `≥ max
 
 ## 8. Open questions
 
-- **[OQ-A — RESOLVED]** Default brief leverages = **`1.5,2`**; 3 opt-in. Under default min HF 1.7,
-  3× → capacity 0 / `health-factor` (not "WARN capacity").
+- **[OQ-A — RESOLVED]** Default brief leverages = **`1.5,1.8`** (post-executor correction: 2× always
+  sits in the HF proximity band under min HF 1.7 → last-candidate capacity identically 0). Capacity
+  default leverage = **1.5**. 2×/3× opt-in; 3× → capacity 0 / `health-factor`.
 - **[OQ-B — RESOLVED]** **Refuse** offline fantasy capacity/brief unless explicit market flags or
   `--allow-offline-defaults`. Offline-defaults are non-authoritative and non-persistable as capital
   baselines.

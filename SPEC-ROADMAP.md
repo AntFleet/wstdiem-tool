@@ -357,7 +357,7 @@ non-blocking coverage nicety (normal `0<HF<1` ≠ fault sentinel) folded in as A
 clean; **248/248** green (the long-standing `cli-live` red was also root-caused + fixed in fb1ac1a — non-hermetic
 test + an empty-`BASE_RPC_URL` fail-closed bug). SPEC001 OQ#9 CLOSED. Pipeline now 10 spec-first units.
 
-## Phase 7 — SPEC006 (capacity + live brief) — SPEC LOCKED (2026-07-13); implementation next
+## Phase 7 — SPEC006 (capacity + live brief) — SHIPPED (2026-07-13)
 
 `SPEC006.md` adds **`loop capacity`** (max equity at leverage `L` still `status === "candidate"` — last-candidate
 gate-bound absorption) and **`loop brief`** (capacity grid + canonical net-APY + Δ vs last comparable SQLite run).
@@ -371,8 +371,12 @@ structured honesty fields + last-candidate framing (ban “deploy up to”); bri
 baselines; get_dy block-pin + hard-fail vs soft demote; notional only via `positionCollateralForScenario`;
 headroom-to-block secondary metric; `morpho-util-headroom` binding name.
 
-**Next:** executor implements `src/loop/capacity.ts` + brief persistence + CLI/render + tests; adversarial
-approval gate; merge behind green gates.
+**IMPLEMENTED + SHIPPED.** `src/loop/capacity.ts` + `src/loop/brief.ts` + `brief_runs` storage + CLI/render +
+tests (`test/capacity.test.ts`, `test/brief.test.ts`). **Approval gate REQUEST-CHANGES → fixed:** (1) get_dy
+budget truncation no longer reclassifies mid with leg-aware (SearchTruncatedSignal freezes proven low);
+(2) zero-path any-marginal → `bindingConstraint: "marginal-band"`; plus fingerprint leverage sort, brief
+hard-fail → `CapacitySearchError`, structural-HF proximity warning, default leverages **1.5 / 1.5,1.8**
+(2× always marginal under min HF 1.7). typecheck/lint/build clean; **280/280** green. `exitCode.ts` untouched.
 
 ## Traceability & verification
 

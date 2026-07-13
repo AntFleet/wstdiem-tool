@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import type { BriefSnapshot } from "../loop/brief.js";
 import type {
   AlertEvaluation,
   MetricSnapshot,
@@ -122,6 +123,19 @@ export class Storage {
         projected_metrics_json TEXT NOT NULL,
         receipt_json TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS brief_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp INTEGER NOT NULL,
+        block_number INTEGER,
+        chain_id INTEGER,
+        input_mode TEXT NOT NULL,
+        authoritative INTEGER NOT NULL,
+        persistable INTEGER NOT NULL,
+        template_fingerprint TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS brief_runs_ts ON brief_runs(timestamp DESC, id DESC);
     `);
     this.ensureColumn("metric_snapshots", "vault_total_assets_diem", "TEXT NOT NULL DEFAULT '0'");
   }
@@ -350,5 +364,57 @@ export class Storage {
          FROM tx_history ORDER BY timestamp DESC LIMIT ?`,
       )
       .all(limit);
+  }
+
+  /**
+   * Persist a brief run only when `persistable === true` (SPEC006 §3.2).
+   * Offline-defaults never enter the capital delta chain.
+   */
+  insertBriefRun(snapshot: BriefSnapshot): number | null {
+    if (!snapshot.persistable) {
+      return null;
+    }
+    const result = this.db
+      .prepare(
+        `INSERT INTO brief_runs (
+          timestamp, block_number, chain_id, input_mode, authoritative, persistable,
+          template_fingerprint, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        snapshot.timestamp,
+        snapshot.blockNumber === null ? null : Number(snapshot.blockNumber),
+        snapshot.chainId,
+        snapshot.inputMode,
+        snapshot.authoritative ? 1 : 0,
+        snapshot.persistable ? 1 : 0,
+        snapshot.templateFingerprint,
+        JSON.stringify(snapshot),
+      );
+    return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Latest comparable brief: same inputMode + templateFingerprint, persistable = 1.
+   * ORDER BY timestamp DESC, id DESC (SPEC006 §3.2).
+   */
+  getLatestComparableBriefRun(query: {
+    inputMode: string;
+    templateFingerprint: string;
+  }): BriefSnapshot | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload_json FROM brief_runs
+         WHERE input_mode = ? AND template_fingerprint = ? AND persistable = 1
+         ORDER BY timestamp DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(query.inputMode, query.templateFingerprint) as
+      | { payload_json: string }
+      | undefined;
+    if (row === undefined) {
+      return null;
+    }
+    return JSON.parse(row.payload_json) as BriefSnapshot;
   }
 }
