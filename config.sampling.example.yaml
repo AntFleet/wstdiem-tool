@@ -23,6 +23,17 @@ contracts:
   morphoOracle: "0xAF29776f93FE0bf21282bF792A52AC212f20F45c"
   loopExecutor: "0x74ad4532133Ba538945a5371D249560E66CC7c71"
   autoDeleverageExecutor: null
+  # SPEC009 (optional): Base USDC + venue adapters for attributable inference flows
+  # (loop demand --flows). Absence → those surfaces report n/a; not a hard deploy error.
+  # The Tier-1 DIEMCredited stream accrues from `inferenceVault` above regardless of this list.
+  usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+  # Empty by design: verified on-chain 2026-07-13 that the standalone SurplusAdapter/X402Adapter/
+  # AntSeedAdapter contracts are RETIRED (isVenueAdapter=false, via SafeRetireOldAdapters). The only
+  # currently-enabled venue adapter is the feeRouter above, whose credit path emits DIEMCredited
+  # (captured by the vault scan) — it is NOT a BaseInferenceAdapter, so do NOT list it here (its
+  # SettlementReceived/inferenceName reads would just fail). Add an address here only when a standalone
+  # BaseInferenceAdapter is re-enabled on the vault — detectable via the vault's VenueAdapterSet event.
+  venueAdapters: []
 
 morpho:
   marketId: "0xdd6b9f10bf69445ebba0626ef54042af628cdf65dda98ff68df4d235d4d56c76"
