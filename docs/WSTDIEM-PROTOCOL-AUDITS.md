@@ -23,6 +23,47 @@
 
 ---
 
+## 0. Live protocol monitoring — 2026-07-13
+
+On-chain observations from the Liquid Protocol monitoring pass. All state verified at **block 48,607,346** unless noted. This is operational ground-truth for the loop-manager tool; the config in `src/config/defaults.ts` (v6 market `0xdd6b9f10…`, oracle `0xAF29776f…`, vault `0xe49FA849…`, 86% LLTV) is confirmed correct against it.
+
+### v6 vault state — `0xe49FA849cB37b0e7A42B2335e333fb99474167ba`
+
+| Metric | Value | Note |
+|---|---|---|
+| totalAssets | 81.088349050 DIEM | up from 44.60 DIEM (Jul 5) — large deposit + keeper catch-up |
+| totalSupply | 80.275276343 wstDIEM | |
+| NAV (`convertToAssets(1e18)`) | 1.010128557 | was 1.004754733 (Jul 11); keeper swept ~0.43 DIEM in one catch-up burst |
+| Entry fee | **2.5%** confirmed | 2.746136 DIEM deposited Jul 10 → 2.664812 wstDIEM |
+
+**Keeper is intermittent, NOT steady-cadence.** Vault has been **frozen since ~block 48,520,613 (Jul 12), ~48h**. The Jul 11→13 NAV jump was catch-up from a **15-day keeper outage (Jun 20 – Jul 5)**, not steady-state yield. Model yield as **lumpy** — periodic catch-up bursts, not continuous — with a **conservative ~0.1 DIEM/day base rate**. See the caveat added to [`HANDOFF-ecosystem-units.md`](../HANDOFF-ecosystem-units.md) (NAV-velocity / `loop demand`) and [`monitoring.md`](./deployment/monitoring.md).
+
+### 86% LLTV leverage market is LIVE with real borrows
+
+The v6 Morpho market (`morpho.marketId` = `0xdd6b9f10bf69445ebba0626ef54042af628cdf65dda98ff68df4d235d4d56c76`, confirmed via `Morpho.idToMarketParams` Jul 13) has its **first confirmed active borrower**:
+
+- **~6.0 DIEM** supplied as collateral · **~2.5 DIEM** borrowed → the leverage loop is operating.
+- Oracle **WstDiemDiemOracle** `0xAF29776f93FE0bf21282bF792A52AC212f20F45c` — pure `vault.convertToAssets()` redemption rate, no AMM leg, immutable.
+
+### ⚠️ Dead v5 markets — DO NOT reference or test against
+
+`Liquid-Protocol-Ops/liquid-protocol-v0` PR #28 (open Jul 13) found the protocol's own docs/tests had drifted onto a **dead** market for weeks — the **same-LLTV trap**:
+
+- **DEAD:** wstDIEM/VVV **v5**, market id `0xab034569…`, oracle `0xC76e2fe5…`, collateral = v5 vault `0xb9f23c33…` (~$0 TVL, superseded at v6 launch). Shares the **same 62.5% LLTV/IRM** as a real market, so a stale id looks plausible.
+- **Loop-manager status:** clean — no live config/test/doc references `0xab034569…`, `0xC76e2fe5…`, or `0xb9f23c33…` (only historical `.omx/` session logs). Keep it that way; the live market is `0xdd6b9f10…` (86% LLTV).
+
+### VVV 62.5% LLTV market — do NOT plan on for launch
+
+- Market id `0x9262c400a82397a3191bb139f824c04c692647d60a45b1c2183a91ffce7ca615`, oracle **WstDiemVvvOracle** `0x9E982637f26aAaAd0bfDBe3c6c1846120C4E5A62` (`vault.convertToAssets()` × Aerodrome DIEM/VVV TWAP, granularity 24 ≈ 12h, 2h staleness guard).
+- **State:** created but **unseeded** — 0 supply / 0 borrow (MOG-536 gate blocks seeding).
+- **Risk:** the Aerodrome **2h staleness guard (MOG-548)** will brick the market if trading goes quiet. **Do not build AntFleet features or loop scenarios on this market** until MOG-536 ships. Not referenced anywhere in the tool today.
+
+### Operational risk — `veniceSigner` unrotated
+
+`KeeperRelay.veniceSigner` is still `0x10900528…` (old v5 deployer EOA), **not** a Privy wallet. Protocol `mainnet-addresses.md` flags "rotate before production." Any future keeper integration in this tool must carry this caveat (see [`operator-runbook.md`](./deployment/operator-runbook.md)).
+
+---
+
 ## 1. Loop manager tool audit — 2026-06-03
 
 **Full report:** [`~/wstdiem-internal-docs/audit/AUDIT-2026-06-03.md`](file:///Users/augstar/wstdiem-internal-docs/audit/AUDIT-2026-06-03.md)  
