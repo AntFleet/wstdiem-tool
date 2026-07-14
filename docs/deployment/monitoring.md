@@ -102,6 +102,11 @@ The vault row tracks the configured wstDIEM vault:
 - total DIEM assets
 - `convertToAssets(1 wstDIEM)` NAV
 
+**Live baseline (verified on-chain 2026-07-13, block 48,607,346):**
+
+- Vault `0xe49FA849…`: totalAssets **81.088349050 DIEM**, totalSupply **80.275276343 wstDIEM**, NAV **1.010128557**, 2.5% entry fee. **Keeper is intermittent** — vault frozen ~48h (since ~block 48,520,613); the recent NAV rise was catch-up from a 15-day outage, not steady yield. Treat a flat NAV as *normal* between bursts; do not read a frozen NAV as a fault, and do not annualize a single catch-up burst.
+- **86% LLTV Morpho market `0xdd6b9f10…` is LIVE with a real borrower:** ~**6.0 DIEM** supplied as collateral, ~**2.5 DIEM** borrowed (first confirmed active loop). Oracle `WstDiemDiemOracle 0xAF29776f…` (pure `convertToAssets()` redemption, no AMM leg). Empty-Morpho-supply alerts should now clear against this market.
+
 Monitor alerts intentionally ignore the closed production audit gate. They alert on actionable live-state blockers only: unavailable RPC, missing or unhealthy wstDIEM vault, empty Curve liquidity, empty Morpho supply, missing/no-code/mismatched executor, missing owner position, and missing Morpho executor authorization.
 
 When the monitor flags **empty Curve liquidity**, `loop sizing --from-chain` will fail closed (`FROM_CHAIN_SEED_BLOCKED: Curve pool has zero DIEM and wstDIEM depth`) rather than seed a verdict against an empty pool — this is expected. See [loop-sizing.md](loop-sizing.md#live-seeding---from-chain) for the fail-closed triggers and how to rehearse against a drained pool with explicit Curve legs.

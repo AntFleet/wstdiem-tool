@@ -239,6 +239,8 @@ node dist/cli/index.js loop demand --window-hours 24 --json
 
 Short-window **NAV** growth (not totalAssets — deposits do not move NAV). Coincident proxy of inference demand, **not** AskSurplus itself and **not** a yield promise. Flat NAV ≠ “zero demand” (harvest lag). Needs SQLite samples from prior **`watch --once`** runs (`status` / `monitor` do not insert `metric_snapshots`).
 
+> **Keeper is intermittent — read `loop demand` accordingly (verified 2026-07-13).** The keeper does not run on a steady cadence (a 15-day outage Jun 20 – Jul 5, a catch-up burst Jul 11–13, then frozen ~48h). NAV is **lumpy**: a burst annualizes to an absurd rate; a freeze reads ~0. Neither is steady-state. Prefer a **conservative ~0.1 DIEM/day base rate**, require the window to span **≥1 catch-up event**, and frame bursts as *catch-up*, not acceleration.
+
 ### 6.2 Basis — secondary market vs NAV
 
 ```sh
@@ -267,3 +269,13 @@ node dist/cli/index.js loop basis --market-price 0.97 --json
 - `candidate` / capacity / brief / demand / basis are **decision-support**, not investment advice.
 - Gate **confirmed danger** on `monitor` exit **30**, not on vault-only commands.
 - Large capital still needs independent diligence, fork proofs, and operational ownership of out-of-band actions.
+
+---
+
+## 9. Live protocol state & caveats (verified 2026-07-13, block 48,607,346)
+
+- **Active market = v6 `0xdd6b9f10…` (86% LLTV).** Live borrower: ~6.0 DIEM collateral / ~2.5 DIEM borrowed. Oracle `WstDiemDiemOracle 0xAF29776f…` (pure `convertToAssets()` redemption, no AMM leg). This is the market the tool is configured for.
+- **Do NOT reference the dead v5 market** `0xab034569…` / oracle `0xC76e2fe5…` / v5 vault `0xb9f23c33…` (~$0 TVL, superseded). It shares the **same 62.5% LLTV/IRM** as a real market, so a stale id looks valid — this exact drift bit the protocol's own docs for weeks (Liquid-Protocol-Ops PR #28). The loop-manager config is clean; keep it so.
+- **Do NOT build on the VVV 62.5% market** `0x9262c400…` (oracle `0x9E982637…`): created but **unseeded/gated** (MOG-536), and its Aerodrome **2h staleness guard (MOG-548)** will brick it if trading goes quiet. Not production-ready.
+- **`veniceSigner` unrotated:** `KeeperRelay.veniceSigner` is still `0x10900528…` (old v5 deployer EOA), not a Privy wallet — protocol docs flag "rotate before production." Any keeper integration built here inherits this caveat.
+- **Keeper cadence is intermittent** (see §6.1): model vault yield as lumpy catch-up bursts, ~0.1 DIEM/day conservative base, not a 6h steady ratchet.
