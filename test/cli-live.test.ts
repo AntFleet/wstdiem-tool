@@ -68,10 +68,17 @@ describe("compiled CLI live simulation mode", () => {
       };
     };
     expect(missingParsed.ok).toBe(true);
+    // SPEC010: loopExecutor is optional — deployment-config passes with null.
+    // Without RPC, readiness short-circuits before the executor-config check.
     expect(missingParsed.data.checks).toContainEqual({
       key: "deployment-config",
+      status: "pass",
+      message: "required deployment config is present",
+    });
+    expect(missingParsed.data.checks).toContainEqual({
+      key: "rpc-client",
       status: "fail",
-      message: "missing: loopExecutor",
+      message: "live RPC client is required for loop readiness",
     });
 
     const result = await execFileAsync(

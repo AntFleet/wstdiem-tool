@@ -30,7 +30,8 @@ describe("config loading", () => {
     expect(config.contracts.agentTgeRegistry).toBe("0xb13830e7f72Eef167A7F188285feBa5f7C1198Ef");
     expect(config.contracts.curvePool).toBe("0x21c33a1Bb5f6Eb43563e1fB9e7AA1D4E90C1A0CD");
     expect(config.contracts.morphoOracle).toBe("0xAF29776f93FE0bf21282bF792A52AC212f20F45c");
-    expect(config.contracts.loopExecutor).toBe("0x74ad4532133Ba538945a5371D249560E66CC7c71");
+    // SPEC010: loopExecutor is optional and defaults to null (Router was wrong).
+    expect(config.contracts.loopExecutor).toBeNull();
     expect(config.morpho.marketId).toBe("0xdd6b9f10bf69445ebba0626ef54042af628cdf65dda98ff68df4d235d4d56c76");
     expect(config.morpho.lltvWad).toBe("860000000000000000");
     expect(config.execution.exitRepayBufferBps).toBe(200);
@@ -43,9 +44,19 @@ describe("config loading", () => {
       pairToken: DEFAULT_CONFIG.contracts.weth,
       feeTier: 10_000,
     });
+    // SPEC010 AC10: null loopExecutor is not a missing deployment key.
     expect(missingDeploymentKeys(config)).not.toContain("loopExecutor");
     expect(missingDeploymentKeys(config)).not.toContain("morphoOracle");
     expect(missingDeploymentKeys(config)).not.toContain("marketId");
+  });
+
+  it("SPEC010: loopExecutor null parses and passes deployment-config", () => {
+    const config = loadConfig({
+      configPath: "/tmp/does-not-exist-wstdiem.yaml",
+      overrides: { contracts: { ...DEFAULT_CONFIG.contracts, loopExecutor: null } },
+    });
+    expect(config.contracts.loopExecutor).toBeNull();
+    expect(missingDeploymentKeys(config)).toEqual([]);
   });
 
   it("loads YAML overrides", () => {

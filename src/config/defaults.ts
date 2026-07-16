@@ -31,7 +31,10 @@ export const DEFAULT_CONFIG: AppConfig = {
     agentTgeRegistry: "0xb13830e7f72Eef167A7F188285feBa5f7C1198Ef",
     curvePool: "0x21c33a1Bb5f6Eb43563e1fB9e7AA1D4E90C1A0CD",
     morphoOracle: "0xAF29776f93FE0bf21282bF792A52AC212f20F45c",
-    loopExecutor: "0x74ad4532133Ba538945a5371D249560E66CC7c71",
+    // Optional (SPEC010): null until a real LoopExecutor is deployed. The former
+    // default (0x74ad…) was the V6 Router — not a LoopExecutor — and caused
+    // false CRITICAL/throw on monitor (canonicalFlashPool unknown-selector).
+    loopExecutor: null,
     autoDeleverageExecutor: null,
     // Base native USDC (6-dec). Optional for SPEC009; not in missingDeploymentKeys.
     usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",

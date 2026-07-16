@@ -89,6 +89,99 @@ export function renderStatusTable(snapshot: MetricSnapshot, readiness: string[])
   return table.toString();
 }
 
+/**
+ * SPEC010 §4.E — owner row for monitor + loop readiness (shared renderer).
+ * Levered: existing collateral/debt/auth + in-wallet line.
+ * Unlevered holding: vault-NAV accounting caveat (non-executable).
+ * No position / partial n/a / whole-row unavailable when all owner reads fail.
+ */
+export function renderOwnerReadinessRow(result: LoopReadinessResult): string {
+  const owner = result.owner;
+  if (owner === undefined) {
+    return "unavailable";
+  }
+
+  const walletNa = owner.walletWstDiem === null || owner.walletValueDiem === null;
+  const morphoNa =
+    owner.borrowShares === null ||
+    owner.collateralWstDiem === null ||
+    owner.borrowedDiem === null;
+
+  // Whole-row unavailable only when every owner line failed.
+  if (
+    walletNa &&
+    morphoNa &&
+    owner.walletWstDiem === null &&
+    owner.borrowShares === null &&
+    owner.collateralWstDiem === null
+  ) {
+    return "unavailable";
+  }
+
+  // Levered (borrowShares > 0): byte-unchanged Morpho readout + in-wallet line.
+  if (owner.borrowShares !== null && owner.borrowShares > 0n) {
+    const collateral =
+      owner.collateralWstDiem === null ? "n/a" : formatWad(owner.collateralWstDiem);
+    const debt = owner.borrowedDiem === null ? "n/a" : formatWad(owner.borrowedDiem);
+    const authorized = owner.executorAuthorized === true ? "yes" : "no";
+    const walletLine =
+      owner.walletWstDiem === null
+        ? "in-wallet: n/a"
+        : `in-wallet: ${formatWad(owner.walletWstDiem)} wstDIEM`;
+    return `${owner.address}; collateral ${collateral} wstDIEM, debt ${debt} DIEM, authorized ${authorized}; ${walletLine}`;
+  }
+
+  // Unlevered with wallet holding.
+  if (
+    owner.borrowShares === 0n &&
+    owner.walletWstDiem !== null &&
+    owner.walletWstDiem > 0n
+  ) {
+    if (owner.walletValueDiem === null) {
+      return `${owner.address}; holding ${formatWad(owner.walletWstDiem)} wstDIEM (vault NAV n/a); no debt; HF n/a (unlevered)`;
+    }
+    return (
+      `${owner.address}; holding ${formatWad(owner.walletWstDiem)} wstDIEM ` +
+      `(vault NAV ≈ ${formatWad(owner.walletValueDiem)} DIEM — accounting value; ` +
+      `redemption not currently executable, Curve drained; not a market/exit quote); ` +
+      `no debt; HF n/a (unlevered)`
+    );
+  }
+
+  // No position: wallet 0, Morpho empty, reads OK.
+  if (
+    owner.walletWstDiem === 0n &&
+    owner.borrowShares === 0n &&
+    (owner.collateralWstDiem === null || owner.collateralWstDiem === 0n)
+  ) {
+    return `${owner.address}; no position`;
+  }
+
+  // Partial: wallet and/or Morpho n/a lines.
+  const parts: string[] = [owner.address];
+  if (owner.walletWstDiem === null || owner.walletValueDiem === null) {
+    parts.push("in-wallet: n/a");
+  } else if (owner.walletWstDiem > 0n) {
+    parts.push(
+      `in-wallet: ${formatWad(owner.walletWstDiem)} wstDIEM (vault NAV ≈ ${formatWad(
+        owner.walletValueDiem,
+      )} DIEM — accounting value; redemption not currently executable, Curve drained; not a market/exit quote)`,
+    );
+  } else {
+    parts.push("in-wallet: 0 wstDIEM");
+  }
+  if (morphoNa) {
+    parts.push("Morpho position n/a");
+  } else {
+    parts.push(
+      `collateral ${formatWad(owner.collateralWstDiem!)} wstDIEM, debt ${formatWad(
+        owner.borrowedDiem!,
+      )} DIEM`,
+    );
+  }
+  return parts.join("; ");
+}
+
 export function renderLoopReadinessTable(result: LoopReadinessResult): string {
   const table = new Table({
     head: ["Area", "Status"],
@@ -125,18 +218,15 @@ export function renderLoopReadinessTable(result: LoopReadinessResult): string {
       "Executor",
       result.executor === undefined
         ? "unavailable"
-        : `${result.executor.address}; code ${result.executor.hasCode ? "yes" : "no"}; config ${
-            result.executor.verified ? "verified" : "not verified"
-          }`,
+        : result.executor.readReverted === true
+          ? `${result.executor.address}; code ${result.executor.hasCode ? "yes" : "no"}; config not verified; ${
+              result.executor.reason ?? "flash getters reverted"
+            }`
+          : `${result.executor.address}; code ${result.executor.hasCode ? "yes" : "no"}; config ${
+              result.executor.verified ? "verified" : "not verified"
+            }`,
     ],
-    [
-      "Owner",
-      result.owner === undefined
-        ? "unavailable"
-        : `${result.owner.address}; collateral ${formatWad(result.owner.collateralWstDiem)} wstDIEM, debt ${formatWad(
-            result.owner.borrowedDiem,
-          )} DIEM, authorized ${result.owner.executorAuthorized === true ? "yes" : "no"}`,
-    ],
+    ["Owner", renderOwnerReadinessRow(result)],
     [
       // SPEC005 §7 — headline liquidation row: HF + debt-growth headroom only.
       // Liquidation price + NAV caveat live in the detailed/--json view (OQ-B).

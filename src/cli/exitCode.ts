@@ -50,14 +50,24 @@ export function classifyMonitoringOutcome(input: {
 }
 
 /**
- * Whether a `monitor` tick completed the live read (SPEC004 §3): a block was read
- * AND neither the `rpc-client` nor `rpc-read` check failed. A failed `rpc-*` check
- * (or an undefined blockNumber) means the position was not assessed → indeterminate.
+ * Whether a `monitor` tick completed the live read (SPEC004 §3 / SPEC010 §3):
+ * a block was read, no `rpc-client`/`rpc-read` check failed, AND the owner's
+ * leverage is determinable when an owner is configured (blind ⇒ unassessed → 20).
+ *
+ * A failed `rpc-*` check (or undefined blockNumber) means the position was not
+ * assessed → indeterminate. SPEC010 adds the blind gate: owner configured but
+ * Morpho position unreadable must never resolve as warn(10) / "safe".
  */
 export function isMonitorAssessed(
-  readiness: Pick<LoopReadinessResult, "blockNumber" | "checks">,
+  readiness: Pick<
+    LoopReadinessResult,
+    "blockNumber" | "checks" | "ownerLeverageUndeterminable"
+  >,
 ): boolean {
   if (readiness.blockNumber === undefined) {
+    return false;
+  }
+  if (readiness.ownerLeverageUndeterminable === true) {
     return false;
   }
   return !readiness.checks.some(

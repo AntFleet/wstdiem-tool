@@ -1,5 +1,5 @@
 import type { AlertEvaluation, ThresholdConfig } from "../types/domain.js";
-import type { LoopReadinessResult, ReadinessCheck } from "../loop/readiness.js";
+import type { LoopReadinessResult, LeverageState, ReadinessCheck } from "../loop/readiness.js";
 
 type HealthFactorThresholds = Pick<ThresholdConfig, "healthFactorWarn" | "healthFactorCritical">;
 
@@ -32,11 +32,25 @@ function checkStatus(
   return result.checks.find((check) => check.key === key)?.status;
 }
 
+/**
+ * SPEC010 §4.B — leveraged-exit alerts are CRITICAL only when leverage is not
+ * affirmatively unlevered. `unknown` keeps CRITICAL (no downgrade).
+ */
+function leveragedExitLevel(
+  leverage: LeverageState,
+  criticalLevel: "CRITICAL" = "CRITICAL",
+): AlertEvaluation["level"] {
+  return leverage === "unlevered" ? "WARN" : criticalLevel;
+}
+
 export function evaluateReadinessAlerts(
   result: LoopReadinessResult,
   thresholds: HealthFactorThresholds = DEFAULT_HEALTH_FACTOR_THRESHOLDS,
 ): AlertEvaluation[] {
   const alerts: AlertEvaluation[] = [];
+  const leverage = result.leverage;
+  // Prefer explicit result.ownerConfigured; fall back for partial test fixtures.
+  const ownerConfigured = result.ownerConfigured === true;
 
   if (checkStatus(result, "rpc-client") === "fail" || checkStatus(result, "rpc-read") === "fail") {
     alerts.push(
@@ -53,7 +67,7 @@ export function evaluateReadinessAlerts(
     alerts.push(
       alert(
         "curve_liquidity_empty",
-        "CRITICAL",
+        leveragedExitLevel(leverage),
         "Curve DIEM/wstDIEM liquidity is not ready.",
         "Add DIEM and wstDIEM liquidity before any full-unwind evidence run.",
         {
@@ -89,7 +103,7 @@ export function evaluateReadinessAlerts(
     alerts.push(
       alert(
         "morpho_liquidity_empty",
-        "CRITICAL",
+        leveragedExitLevel(leverage),
         "Morpho DIEM market has no supply assets.",
         "Supply DIEM liquidity to the configured Morpho market before owner debt can exist.",
         {
@@ -114,16 +128,32 @@ export function evaluateReadinessAlerts(
       alerts.push(
         alert(
           "executor_no_code",
-          "CRITICAL",
+          leveragedExitLevel(leverage),
           "Configured LoopExecutor has no deployed bytecode.",
           "Replace the executor address with a real Base deployment.",
+        ),
+      );
+    } else if (result.executor.readReverted === true) {
+      // SPEC010 §4.F — mutually exclusive with executor_config_mismatch (pre-empts !verified).
+      // WARN in all leverage states (config-identity, not a live danger).
+      alerts.push(
+        alert(
+          "executor_read_reverted",
+          "WARN",
+          result.executor.reason ??
+            "Configured LoopExecutor flash getters reverted (not a LoopExecutor).",
+          "Point contracts.loopExecutor at a real LoopExecutor or leave it null until one is deployed.",
+          {
+            executor: result.executor.address,
+            reason: result.executor.reason,
+          },
         ),
       );
     } else if (!result.executor.verified) {
       alerts.push(
         alert(
           "executor_config_mismatch",
-          "CRITICAL",
+          leveragedExitLevel(leverage),
           "Configured LoopExecutor runtime config does not match expected Base evidence.",
           "Stop deployment gating and investigate flashConfig()/protocolConfig() before proceeding.",
           {
@@ -134,7 +164,8 @@ export function evaluateReadinessAlerts(
     }
   }
 
-  if (result.owner === undefined) {
+  // SPEC010 §4.F — owner_missing is config-gated, not result.owner-gated.
+  if (!ownerConfigured) {
     alerts.push(
       alert(
         "owner_missing",
@@ -143,8 +174,26 @@ export function evaluateReadinessAlerts(
         "Set position.owner or pass --owner once a funded owner position exists.",
       ),
     );
+  } else if (
+    result.owner === undefined ||
+    result.owner.borrowShares === null
+  ) {
+    // Configured but unreadable (full miss or partial Morpho miss) — never the
+    // "not configured" copy. Blind ⇒ exit 20 is driven by ownerLeverageUndeterminable.
+    alerts.push(
+      alert(
+        "owner_unreadable",
+        "WARN",
+        "Owner position could not be read.",
+        "Verify Morpho marketId, RPC health, and the owner address; position safety is unassessed.",
+        result.owner === undefined ? {} : { owner: result.owner.address },
+      ),
+    );
   } else {
-    if (!result.owner.hasExitPosition) {
+    // Morpho position readable (borrowShares !== null).
+    // SPEC010 §4.B/§4.F: suppress owner_position_missing when unlevered;
+    // never evaluate it when borrowShares was null (handled above).
+    if (leverage !== "unlevered" && result.owner.hasExitPosition === false) {
       alerts.push(
         alert(
           "owner_position_missing",
@@ -153,8 +202,8 @@ export function evaluateReadinessAlerts(
           "Create or fund the owner position with wstDIEM collateral and DIEM debt before full-unwind evidence.",
           {
             owner: result.owner.address,
-            collateralWstDiem: result.owner.collateralWstDiem.toString(),
-            borrowedDiem: result.owner.borrowedDiem.toString(),
+            collateralWstDiem: result.owner.collateralWstDiem?.toString() ?? null,
+            borrowedDiem: result.owner.borrowedDiem?.toString() ?? null,
           },
         ),
       );
@@ -163,7 +212,7 @@ export function evaluateReadinessAlerts(
       alerts.push(
         alert(
           "executor_not_authorized",
-          "CRITICAL",
+          leveragedExitLevel(leverage),
           "Owner has not authorized the LoopExecutor in Morpho.",
           "Have the owner submit Morpho setAuthorization(executor, true) before evidence collection.",
           {

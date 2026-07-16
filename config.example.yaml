@@ -21,7 +21,9 @@ contracts:
   agentTgeRegistry: "0xb13830e7f72Eef167A7F188285feBa5f7C1198Ef"
   curvePool: "0x21c33a1Bb5f6Eb43563e1fB9e7AA1D4E90C1A0CD"
   morphoOracle: "0xAF29776f93FE0bf21282bF792A52AC212f20F45c"
-  loopExecutor: "0x74ad4532133Ba538945a5371D249560E66CC7c71"
+  # Optional until a real LoopExecutor is deployed (SPEC010). Do not point at the
+  # V6 Router (0x74ad…) — it is not a LoopExecutor.
+  loopExecutor: null
   autoDeleverageExecutor: null
   # SPEC009 (optional): Base USDC + venue adapters for attributable inference flows.
   # Absence → loop demand --flows reports n/a for those surfaces; not a hard deploy error.

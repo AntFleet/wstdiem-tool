@@ -38,12 +38,31 @@ export interface LiquidationReadout {
   lltvBps: number;
 }
 
+/** SPEC010 §3 — tri-state leverage for alert severity + blind exit-code gating. */
+export type LeverageState = "levered" | "unlevered" | "unknown";
+
 export interface LoopReadinessResult {
   status: "ready" | "blocked";
   blockNumber?: bigint;
   liquidation: LiquidationReadout | null;
   checks: ReadinessCheck[];
   blockers: string[];
+  /**
+   * SPEC010: true when an owner was configured for this run (config or --owner).
+   * Distinct from `owner` presence — a configured owner can still be unreadable.
+   */
+  ownerConfigured: boolean;
+  /**
+   * SPEC010 §3 — levered | unlevered | unknown. Downgrade leveraged-exit CRITICAL
+   * alerts only for `unlevered`. `unknown` → no downgrade.
+   */
+  leverage: LeverageState;
+  /**
+   * SPEC010 §3 blind flag: owner configured AND leverage undeterminable
+   * (Morpho position failed / marketId null / shape mismatch / borrowShares null).
+   * Forces indeterminate(20) regardless of alert severity.
+   */
+  ownerLeverageUndeterminable: boolean;
   vault?: {
     address: Address;
     asset: Address | null;
@@ -69,11 +88,16 @@ export interface LoopReadinessResult {
   };
   owner?: {
     address: Address;
-    collateralWstDiem: bigint;
-    borrowShares: bigint;
-    borrowedDiem: bigint;
-    hasExitPosition: boolean;
+    /** Nullable when Morpho position is unreadable (SPEC010 Medium-3). */
+    collateralWstDiem: bigint | null;
+    borrowShares: bigint | null;
+    borrowedDiem: bigint | null;
+    hasExitPosition: boolean | null;
     executorAuthorized: boolean | null;
+    /** Vault share balance; null when balanceOf/convert failed or vault no-code. */
+    walletWstDiem: bigint | null;
+    /** vault.convertToAssets(walletWstDiem); null when NAV unavailable. Never fabricate 0. */
+    walletValueDiem: bigint | null;
   };
   executor?: {
     address: Address;
@@ -84,6 +108,9 @@ export interface LoopReadinessResult {
     flashConfig?: ExecutorFlashConfig;
     protocolConfig?: ExecutorProtocolConfig;
     verified: boolean;
+    /** SPEC010 §4.F — flash getters reverted (wrong contract / not a LoopExecutor). */
+    readReverted?: boolean;
+    reason?: string;
   };
   broadcastAvailable: false;
   auditRequired: true;
@@ -99,6 +126,41 @@ function addressEqual(left: Address, right: Address): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * SPEC010 §4.D — classify a caught error as contract-revert vs transport.
+ * Contract revert (degrade that line, continue): error or any cause is
+ * `ContractFunctionRevertedError` or `ExecutionRevertedError`.
+ * Everything else (HttpRequestError/TimeoutError/socket/unclassifiable) re-raises
+ * → outer catch → rpc-read:fail → 20 (fail-closed).
+ */
+export function isContractRevert(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current !== undefined && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if (typeof current === "object") {
+      const name = (current as { name?: unknown }).name;
+      if (name === "ContractFunctionRevertedError" || name === "ExecutionRevertedError") {
+        return true;
+      }
+      current = (current as { cause?: unknown }).cause;
+      continue;
+    }
+    break;
+  }
+  return false;
+}
+
+function computeLeverageState(
+  ownerConfigured: boolean,
+  owner: LoopReadinessResult["owner"],
+): LeverageState {
+  if (!ownerConfigured || owner === undefined || owner.borrowShares === null) {
+    return "unknown";
+  }
+  return owner.borrowShares > 0n ? "levered" : "unlevered";
 }
 
 function tupleField(value: unknown, index: number, name: string): unknown {
@@ -268,6 +330,8 @@ export async function buildLoopReadiness(input: {
     blockers.push(`missing deployment config: ${missing.join(", ")}`);
   }
 
+  const ownerConfigured = owner !== null;
+
   if (input.client === undefined) {
     checks.push(check("rpc-client", "fail", "live RPC client is required for loop readiness"));
     blockers.push("live RPC client unavailable");
@@ -284,6 +348,10 @@ export async function buildLoopReadiness(input: {
       liquidation: null,
       checks,
       blockers,
+      ownerConfigured,
+      leverage: "unknown",
+      // Owner configured but never read → position-safety unassessed (blind).
+      ownerLeverageUndeterminable: ownerConfigured,
       broadcastAvailable: false,
       auditRequired: true,
     };
@@ -488,184 +556,288 @@ export async function buildLoopReadiness(input: {
         checks.push(check("executor-config", "fail", "loopExecutor has no deployed code"));
         blockers.push("loopExecutor has no deployed code");
       } else {
-        const [
-          canonicalFlashPool,
-          executorFee,
-          loanTokenIsToken0,
-          rawFlashConfig,
-          rawProtocolConfig,
-        ] = await Promise.all([
-          input.client.readContract({
-            address: config.contracts.loopExecutor,
-            abi: loopExecutorAbi,
-            functionName: "canonicalFlashPool",
-            blockNumber,
-          }),
-          input.client.readContract({
-            address: config.contracts.loopExecutor,
-            abi: loopExecutorAbi,
-            functionName: "expectedFlashFee",
-            args: [50n * WAD],
-            blockNumber,
-          }),
-          input.client.readContract({
-            address: config.contracts.loopExecutor,
-            abi: loopExecutorAbi,
-            functionName: "loanTokenIsToken0",
-            blockNumber,
-          }),
-          input.client.readContract({
-            address: config.contracts.loopExecutor,
-            abi: loopExecutorAbi,
-            functionName: "flashConfig",
-            blockNumber,
-          }),
-          input.client.readContract({
-            address: config.contracts.loopExecutor,
-            abi: loopExecutorAbi,
-            functionName: "protocolConfig",
-            blockNumber,
-          }),
-        ]);
-        const flashConfig = parseExecutorFlashConfig(rawFlashConfig);
-        const protocolConfig = parseExecutorProtocolConfig(rawProtocolConfig);
-        const configuredFee = expectedUniswapV3FlashFee(50n * WAD, config.flashLoan.feeTier);
-        const configuredTokenSide =
-          config.flashLoan.loanToken !== null && config.flashLoan.pairToken !== null
-            ? config.flashLoan.loanToken.toLowerCase() < config.flashLoan.pairToken.toLowerCase()
-            : null;
-        const mismatches: string[] = [];
-        pushMismatch(
-          mismatches,
-          "canonicalFlashPool",
-          config.flashLoan.pool !== null &&
-            addressEqual(canonicalFlashPool as Address, config.flashLoan.pool),
-        );
-        pushMismatch(
-          mismatches,
-          "expectedFlashFee",
-          configuredFee !== null &&
-            BigInt(executorFee as bigint | number | string) === configuredFee,
-        );
-        pushMismatch(
-          mismatches,
-          "loanTokenIsToken0",
-          configuredTokenSide !== null && Boolean(loanTokenIsToken0) === configuredTokenSide,
-        );
-        pushMismatch(mismatches, "flashConfig", flashConfig !== null);
-        pushMismatch(mismatches, "protocolConfig", protocolConfig !== null);
-        if (flashConfig !== null) {
+        // SPEC010 §4.D — isolate executor probe: contract revert degrades the row;
+        // transport re-raises into the outer catch → rpc-read:fail → 20.
+        try {
+          const [
+            canonicalFlashPool,
+            executorFee,
+            loanTokenIsToken0,
+            rawFlashConfig,
+            rawProtocolConfig,
+          ] = await Promise.all([
+            input.client.readContract({
+              address: config.contracts.loopExecutor,
+              abi: loopExecutorAbi,
+              functionName: "canonicalFlashPool",
+              blockNumber,
+            }),
+            input.client.readContract({
+              address: config.contracts.loopExecutor,
+              abi: loopExecutorAbi,
+              functionName: "expectedFlashFee",
+              args: [50n * WAD],
+              blockNumber,
+            }),
+            input.client.readContract({
+              address: config.contracts.loopExecutor,
+              abi: loopExecutorAbi,
+              functionName: "loanTokenIsToken0",
+              blockNumber,
+            }),
+            input.client.readContract({
+              address: config.contracts.loopExecutor,
+              abi: loopExecutorAbi,
+              functionName: "flashConfig",
+              blockNumber,
+            }),
+            input.client.readContract({
+              address: config.contracts.loopExecutor,
+              abi: loopExecutorAbi,
+              functionName: "protocolConfig",
+              blockNumber,
+            }),
+          ]);
+          const flashConfig = parseExecutorFlashConfig(rawFlashConfig);
+          const protocolConfig = parseExecutorProtocolConfig(rawProtocolConfig);
+          const configuredFee = expectedUniswapV3FlashFee(50n * WAD, config.flashLoan.feeTier);
+          const configuredTokenSide =
+            config.flashLoan.loanToken !== null && config.flashLoan.pairToken !== null
+              ? config.flashLoan.loanToken.toLowerCase() < config.flashLoan.pairToken.toLowerCase()
+              : null;
+          const mismatches: string[] = [];
           pushMismatch(
             mismatches,
-            "flashConfig.factory",
-            config.flashLoan.factory !== null &&
-              addressEqual(flashConfig.factory, config.flashLoan.factory),
+            "canonicalFlashPool",
+            config.flashLoan.pool !== null &&
+              addressEqual(canonicalFlashPool as Address, config.flashLoan.pool),
           );
           pushMismatch(
             mismatches,
-            "flashConfig.pool",
-            config.flashLoan.pool !== null && addressEqual(flashConfig.pool, config.flashLoan.pool),
+            "expectedFlashFee",
+            configuredFee !== null &&
+              BigInt(executorFee as bigint | number | string) === configuredFee,
           );
           pushMismatch(
             mismatches,
-            "flashConfig.loanToken",
-            config.flashLoan.loanToken !== null &&
-              addressEqual(flashConfig.loanToken, config.flashLoan.loanToken),
+            "loanTokenIsToken0",
+            configuredTokenSide !== null && Boolean(loanTokenIsToken0) === configuredTokenSide,
           );
-          pushMismatch(
-            mismatches,
-            "flashConfig.pairToken",
-            config.flashLoan.pairToken !== null &&
-              addressEqual(flashConfig.pairToken, config.flashLoan.pairToken),
+          pushMismatch(mismatches, "flashConfig", flashConfig !== null);
+          pushMismatch(mismatches, "protocolConfig", protocolConfig !== null);
+          if (flashConfig !== null) {
+            pushMismatch(
+              mismatches,
+              "flashConfig.factory",
+              config.flashLoan.factory !== null &&
+                addressEqual(flashConfig.factory, config.flashLoan.factory),
+            );
+            pushMismatch(
+              mismatches,
+              "flashConfig.pool",
+              config.flashLoan.pool !== null &&
+                addressEqual(flashConfig.pool, config.flashLoan.pool),
+            );
+            pushMismatch(
+              mismatches,
+              "flashConfig.loanToken",
+              config.flashLoan.loanToken !== null &&
+                addressEqual(flashConfig.loanToken, config.flashLoan.loanToken),
+            );
+            pushMismatch(
+              mismatches,
+              "flashConfig.pairToken",
+              config.flashLoan.pairToken !== null &&
+                addressEqual(flashConfig.pairToken, config.flashLoan.pairToken),
+            );
+            pushMismatch(
+              mismatches,
+              "flashConfig.feeTier",
+              config.flashLoan.feeTier !== null && flashConfig.feeTier === config.flashLoan.feeTier,
+            );
+          }
+          if (protocolConfig !== null) {
+            pushMismatch(
+              mismatches,
+              "protocolConfig.morpho",
+              addressEqual(protocolConfig.morpho, config.contracts.morphoBlue),
+            );
+            pushMismatch(
+              mismatches,
+              "protocolConfig.curvePool",
+              config.contracts.curvePool !== null &&
+                addressEqual(protocolConfig.curvePool, config.contracts.curvePool),
+            );
+            pushMismatch(
+              mismatches,
+              "protocolConfig.wstDiem",
+              config.contracts.inferenceVault !== null &&
+                addressEqual(protocolConfig.wstDiem, config.contracts.inferenceVault),
+            );
+          }
+          executor = {
+            ...executor,
+            canonicalFlashPool: canonicalFlashPool as Address,
+            expectedFlashFeeFor50Diem: BigInt(executorFee as bigint | number | string),
+            loanTokenIsToken0: Boolean(loanTokenIsToken0),
+            flashConfig: flashConfig ?? undefined,
+            protocolConfig: protocolConfig ?? undefined,
+            verified: mismatches.length === 0,
+          };
+          checks.push(
+            check(
+              "executor-config",
+              executor.verified ? "pass" : "fail",
+              executor.verified
+                ? "loopExecutor runtime config matches flash and protocol config"
+                : `loopExecutor runtime config mismatch: ${mismatches.join(", ")}`,
+            ),
           );
-          pushMismatch(
-            mismatches,
-            "flashConfig.feeTier",
-            config.flashLoan.feeTier !== null && flashConfig.feeTier === config.flashLoan.feeTier,
-          );
-        }
-        if (protocolConfig !== null) {
-          pushMismatch(
-            mismatches,
-            "protocolConfig.morpho",
-            addressEqual(protocolConfig.morpho, config.contracts.morphoBlue),
-          );
-          pushMismatch(
-            mismatches,
-            "protocolConfig.curvePool",
-            config.contracts.curvePool !== null &&
-              addressEqual(protocolConfig.curvePool, config.contracts.curvePool),
-          );
-          pushMismatch(
-            mismatches,
-            "protocolConfig.wstDiem",
-            config.contracts.inferenceVault !== null &&
-              addressEqual(protocolConfig.wstDiem, config.contracts.inferenceVault),
-          );
-        }
-        executor = {
-          ...executor,
-          canonicalFlashPool: canonicalFlashPool as Address,
-          expectedFlashFeeFor50Diem: BigInt(executorFee as bigint | number | string),
-          loanTokenIsToken0: Boolean(loanTokenIsToken0),
-          flashConfig: flashConfig ?? undefined,
-          protocolConfig: protocolConfig ?? undefined,
-          verified: mismatches.length === 0,
-        };
-        checks.push(
-          check(
-            "executor-config",
-            executor.verified ? "pass" : "fail",
-            executor.verified
-              ? "loopExecutor runtime config matches flash and protocol config"
-              : `loopExecutor runtime config mismatch: ${mismatches.join(", ")}`,
-          ),
-        );
-        if (!executor.verified) {
-          blockers.push("loopExecutor runtime config mismatch");
+          if (!executor.verified) {
+            blockers.push("loopExecutor runtime config mismatch");
+          }
+        } catch (error) {
+          if (!isContractRevert(error)) {
+            throw error;
+          }
+          const reason =
+            "configured address is not a LoopExecutor (flash getters absent)";
+          executor = {
+            ...executor,
+            verified: false,
+            readReverted: true,
+            reason,
+          };
+          checks.push(check("executor-config", "fail", reason));
+          blockers.push("loopExecutor runtime config read reverted");
         }
       }
     }
 
+    // SPEC010 §4.C/§4.D/§4.E — owner wallet + Morpho position with isolated reverts.
     if (owner === null) {
       checks.push(
         check("owner-position", "skip", "owner not configured; position readiness not checked"),
       );
       blockers.push("owner is not configured");
-    } else if (config.morpho.marketId === null || morpho === undefined) {
-      checks.push(
-        check(
-          "owner-position",
-          "fail",
-          "Morpho market state is required before owner position readiness",
-        ),
-      );
-      blockers.push("owner position cannot be checked without Morpho market state");
     } else {
-      const position = parseMorphoPosition(
-        await input.client.readContract({
-          address: config.contracts.morphoBlue,
-          abi: morphoAbi,
-          functionName: "position",
-          args: [config.morpho.marketId, owner],
-          blockNumber,
-        }),
-      );
-      if (position === null) {
+      let walletWstDiem: bigint | null = null;
+      let walletValueDiem: bigint | null = null;
+      let collateralWstDiem: bigint | null = null;
+      let borrowShares: bigint | null = null;
+      let borrowedDiem: bigint | null = null;
+      let executorAuthorized: boolean | null = null;
+      let morphoPositionReadable = false;
+      let walletReadAttempted = false;
+      let morphoReadAttempted = false;
+
+      // Wallet holding: independent of Morpho-market availability (SPEC010 §4.C).
+      if (config.contracts.inferenceVault !== null && vault !== undefined && vault.hasCode) {
+        walletReadAttempted = true;
+        try {
+          const rawBalance = await input.client.readContract({
+            address: config.contracts.inferenceVault,
+            abi: inferenceVaultAbi,
+            functionName: "balanceOf",
+            args: [owner],
+            blockNumber,
+          });
+          const balance = BigInt(rawBalance as bigint | number | string);
+          const rawValue = await input.client.readContract({
+            address: config.contracts.inferenceVault,
+            abi: inferenceVaultAbi,
+            functionName: "convertToAssets",
+            args: [balance],
+            blockNumber,
+          });
+          walletWstDiem = balance;
+          walletValueDiem = BigInt(rawValue as bigint | number | string);
+        } catch (error) {
+          if (!isContractRevert(error)) {
+            throw error;
+          }
+          // Per-read failure → n/a (null); continue.
+          walletWstDiem = null;
+          walletValueDiem = null;
+        }
+      }
+      // vault no-code or missing → wallet stays null (n/a), never ≈ 0 DIEM.
+
+      if (config.morpho.marketId === null || morpho === undefined) {
+        morphoReadAttempted = true;
         checks.push(
-          check("owner-position", "fail", "Morpho position returned an unsupported shape"),
+          check(
+            "owner-position",
+            "fail",
+            "Morpho market state is required before owner position readiness",
+          ),
         );
-        blockers.push("owner position state unreadable");
+        blockers.push("owner position cannot be checked without Morpho market state");
       } else {
-        const borrowedDiem = computeBorrowedDiem(
-          {
-            totalBorrowAssets: morpho.totalBorrowAssets,
-            totalBorrowShares: morpho.totalBorrowShares,
-          },
-          { borrowShares: position.borrowShares },
+        morphoReadAttempted = true;
+        try {
+          const position = parseMorphoPosition(
+            await input.client.readContract({
+              address: config.contracts.morphoBlue,
+              abi: morphoAbi,
+              functionName: "position",
+              args: [config.morpho.marketId, owner],
+              blockNumber,
+            }),
+          );
+          if (position === null) {
+            checks.push(
+              check("owner-position", "fail", "Morpho position returned an unsupported shape"),
+            );
+            blockers.push("owner position state unreadable");
+          } else {
+            morphoPositionReadable = true;
+            collateralWstDiem = position.collateral;
+            borrowShares = position.borrowShares;
+            borrowedDiem = computeBorrowedDiem(
+              {
+                totalBorrowAssets: morpho.totalBorrowAssets,
+                totalBorrowShares: morpho.totalBorrowShares,
+              },
+              { borrowShares: position.borrowShares },
+            );
+            const hasExitPosition =
+              position.collateral > 0n && position.borrowShares > 0n && borrowedDiem > 0n;
+            checks.push(
+              check(
+                "owner-position",
+                hasExitPosition ? "pass" : "fail",
+                hasExitPosition
+                  ? "owner has collateral and DIEM debt"
+                  : "owner does not have an exit-ready position",
+              ),
+            );
+            if (!hasExitPosition) {
+              blockers.push("owner does not have an exit-ready position");
+            }
+          }
+        } catch (error) {
+          if (!isContractRevert(error)) {
+            throw error;
+          }
+          checks.push(
+            check("owner-position", "fail", "Morpho position read reverted"),
+          );
+          blockers.push("owner position state unreadable");
+        }
+      }
+
+      // Authorization: isolated; skipped when loopExecutor is null (SPEC010 §4.A).
+      if (config.contracts.loopExecutor === null) {
+        checks.push(
+          check(
+            "morpho-authorization",
+            "skip",
+            "loopExecutor is not configured; authorization not checked",
+          ),
         );
-        let executorAuthorized: boolean | null = null;
-        if (config.contracts.loopExecutor !== null) {
+      } else {
+        try {
           executorAuthorized = Boolean(
             await input.client.readContract({
               address: config.contracts.morphoBlue,
@@ -675,54 +847,6 @@ export async function buildLoopReadiness(input: {
               blockNumber,
             }),
           );
-        }
-        ownerReadiness = {
-          address: owner,
-          collateralWstDiem: position.collateral,
-          borrowShares: position.borrowShares,
-          borrowedDiem,
-          hasExitPosition:
-            position.collateral > 0n && position.borrowShares > 0n && borrowedDiem > 0n,
-          executorAuthorized,
-        };
-        // SPEC005 §7 — flag-gated live liquidation readout, block-pinned to the same
-        // blockNumber as the position/market reads. Off for `loop readiness`.
-        if (
-          input.includeLiquidation === true &&
-          blockNumber !== undefined &&
-          config.morpho.marketId !== null
-        ) {
-          liquidation = await buildLiquidationReadout({
-            client: input.client,
-            config,
-            blockNumber,
-            marketId: config.morpho.marketId,
-            collateral: position.collateral,
-            borrowShares: position.borrowShares,
-            borrowedDiem,
-          });
-        }
-        checks.push(
-          check(
-            "owner-position",
-            ownerReadiness.hasExitPosition ? "pass" : "fail",
-            ownerReadiness.hasExitPosition
-              ? "owner has collateral and DIEM debt"
-              : "owner does not have an exit-ready position",
-          ),
-        );
-        if (!ownerReadiness.hasExitPosition) {
-          blockers.push("owner does not have an exit-ready position");
-        }
-        if (config.contracts.loopExecutor === null) {
-          checks.push(
-            check(
-              "morpho-authorization",
-              "skip",
-              "loopExecutor is not configured; authorization not checked",
-            ),
-          );
-        } else {
           checks.push(
             check(
               "morpho-authorization",
@@ -732,9 +856,69 @@ export async function buildLoopReadiness(input: {
                 : "owner has not authorized loopExecutor",
             ),
           );
+          if (executorAuthorized !== true) {
+            blockers.push("owner has not authorized loopExecutor");
+          }
+        } catch (error) {
+          if (!isContractRevert(error)) {
+            throw error;
+          }
+          executorAuthorized = null;
+          checks.push(
+            check("morpho-authorization", "fail", "Morpho isAuthorized read reverted"),
+          );
+          blockers.push("owner authorization state unreadable");
         }
-        if (config.contracts.loopExecutor !== null && executorAuthorized !== true) {
-          blockers.push("owner has not authorized loopExecutor");
+      }
+
+      // Partial owner result when any owner read produced data (SPEC010 §4.E).
+      // Whole-row unavailable only when *all* owner reads failed.
+      const anyOwnerData =
+        walletWstDiem !== null ||
+        morphoPositionReadable ||
+        executorAuthorized !== null;
+      // Always surface a configured owner when we attempted any read — even if all
+      // lines are null — so alerts can distinguish unreadable from unconfigured.
+      // Exception: if literally nothing was attempted (shouldn't happen with vault
+      // or morpho config present), leave owner undefined.
+      if (anyOwnerData || walletReadAttempted || morphoReadAttempted) {
+        const hasExitPosition =
+          morphoPositionReadable &&
+          collateralWstDiem !== null &&
+          borrowShares !== null &&
+          borrowedDiem !== null
+            ? collateralWstDiem > 0n && borrowShares > 0n && borrowedDiem > 0n
+            : null;
+        ownerReadiness = {
+          address: owner,
+          collateralWstDiem,
+          borrowShares,
+          borrowedDiem,
+          hasExitPosition,
+          executorAuthorized,
+          walletWstDiem,
+          walletValueDiem,
+        };
+
+        // SPEC005 §7 — liquidation only when Morpho position is fully readable.
+        if (
+          input.includeLiquidation === true &&
+          blockNumber !== undefined &&
+          config.morpho.marketId !== null &&
+          morphoPositionReadable &&
+          collateralWstDiem !== null &&
+          borrowShares !== null &&
+          borrowedDiem !== null
+        ) {
+          liquidation = await buildLiquidationReadout({
+            client: input.client,
+            config,
+            blockNumber,
+            marketId: config.morpho.marketId,
+            collateral: collateralWstDiem,
+            borrowShares,
+            borrowedDiem,
+          });
         }
       }
     }
@@ -753,12 +937,18 @@ export async function buildLoopReadiness(input: {
   );
   blockers.push("broadcast disabled pending production executor audit/review");
 
+  const leverage = computeLeverageState(ownerConfigured, ownerReadiness);
+  const ownerLeverageUndeterminable = ownerConfigured && leverage === "unknown";
+
   return {
     status: blockers.length === 0 ? "ready" : "blocked",
     blockNumber,
     liquidation,
     checks,
     blockers,
+    ownerConfigured,
+    leverage,
+    ownerLeverageUndeterminable,
     vault,
     curve,
     morpho,

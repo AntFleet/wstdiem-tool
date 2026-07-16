@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { assertBroadcastNotAllowed, buildLoopExecutorParamsForCommand, projectLoopCommand } from "../src/cli/loop.js";
 
+// SPEC010: loopExecutor is optional for monitor/deployment-config, but loop open
+// still requires it operationally. Use a still-required key (inferenceVault) for
+// the deployment-config fail path; null executor alone no longer fails that check.
 const missingDeploymentConfig = {
   ...DEFAULT_CONFIG,
   contracts: {
     ...DEFAULT_CONFIG.contracts,
+    inferenceVault: null,
     loopExecutor: null,
   },
 };
@@ -29,6 +33,26 @@ describe("loop safety behavior", () => {
     expect(projection.blockers.join(" ")).toContain("LoopExecutor");
     expect(projection.blockers.join(" ")).toContain("projection-only");
     expect(projection.projectedPositionNotionalDiemWei).toBe("300000000000000000000");
+  });
+
+  it("SPEC010: null loopExecutor alone does not fail deployment-config but still blocks open", () => {
+    const projection = projectLoopCommand(
+      {
+        ...DEFAULT_CONFIG,
+        contracts: { ...DEFAULT_CONFIG.contracts, loopExecutor: null },
+      },
+      {
+        action: "open",
+        targetLeverage: 3,
+        initialDiem: "100",
+        dryRun: true,
+      },
+    );
+    expect(projection.preflightChecks.map((check) => `${check.key}:${check.status}`)).toContain(
+      "deployment-config:pass",
+    );
+    expect(projection.blocked).toBe(true);
+    expect(projection.blockers.join(" ")).toMatch(/LoopExecutor|loopExecutor/i);
   });
 
   it("rejects invalid leverage and excessive slippage", () => {

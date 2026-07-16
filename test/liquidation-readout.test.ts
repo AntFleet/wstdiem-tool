@@ -80,8 +80,13 @@ class MockClient implements LoopSimulationClient {
     switch (args.functionName) {
       case "balances":
         return liquid ? 1_000n * WAD : 0n;
-      case "convertToAssets":
-        return WAD;
+      case "balanceOf":
+        // Unlevered wallet holding is independent of Morpho position (SPEC010).
+        return 0n;
+      case "convertToAssets": {
+        const shares = BigInt((args.args?.[0] as bigint | number | string | undefined) ?? WAD);
+        return shares; // 1:1 NAV for tests
+      }
       case "asset":
         return DEFAULT_CONFIG.contracts.diem;
       case "totalSupply":

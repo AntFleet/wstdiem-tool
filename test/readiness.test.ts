@@ -23,6 +23,13 @@ function completeConfig(): AppConfig {
   };
 }
 
+/** Error that looks like a viem contract-revert chain (SPEC010 §4.D). */
+function contractRevert(message: string): Error {
+  const err = new Error(message);
+  err.name = "ExecutionRevertedError";
+  return err;
+}
+
 class MockReadinessClient implements LoopSimulationClient {
   constructor(
     private readonly options: {
@@ -39,8 +46,15 @@ class MockReadinessClient implements LoopSimulationClient {
       vaultTotalSupply?: bigint;
       vaultTotalAssets?: bigint;
       vaultNav?: bigint;
+      walletWstDiem?: bigint;
       executorCurvePool?: Address;
       readFailureFunction?: string;
+      /** When true, failure is a contract revert (degrade); else transport (re-raise). */
+      readFailureIsRevert?: boolean;
+      executorReadReverts?: boolean;
+      positionReadReverts?: boolean;
+      walletReadReverts?: boolean;
+      noVaultCode?: boolean;
     } = {},
   ) {}
 
@@ -54,8 +68,25 @@ class MockReadinessClient implements LoopSimulationClient {
     return 8453;
   }
 
-  async getCode(_address: Address): Promise<Hex> {
-    return this.options.hasExecutorCode === false ? "0x" : "0x01";
+  async getCode(address: Address): Promise<Hex> {
+    if (
+      this.options.noVaultCode &&
+      address.toLowerCase() === DEFAULT_CONFIG.contracts.inferenceVault?.toLowerCase()
+    ) {
+      return "0x";
+    }
+    if (
+      this.options.hasExecutorCode === false &&
+      address.toLowerCase() === loopExecutor.toLowerCase()
+    ) {
+      return "0x";
+    }
+    // Default: code present (vault + executor).
+    if (this.options.hasExecutorCode === false) {
+      // Only executor has no code; vault still has code unless noVaultCode.
+      return "0x01";
+    }
+    return "0x01";
   }
 
   async readContract(args: {
@@ -65,6 +96,9 @@ class MockReadinessClient implements LoopSimulationClient {
   }): Promise<unknown> {
     this.readBlockNumbers.push(args.blockNumber);
     if (args.functionName === this.options.readFailureFunction) {
+      if (this.options.readFailureIsRevert) {
+        throw contractRevert(`forced ${args.functionName} failure`);
+      }
       throw new Error(`forced ${args.functionName} failure`);
     }
     if (args.functionName === "balances") {
@@ -72,8 +106,16 @@ class MockReadinessClient implements LoopSimulationClient {
         ? (this.options.curveDiem ?? 0n)
         : (this.options.curveWstDiem ?? 0n);
     }
+    if (args.functionName === "balanceOf") {
+      if (this.options.walletReadReverts) {
+        throw contractRevert("balanceOf reverted");
+      }
+      return this.options.walletWstDiem ?? 0n;
+    }
     if (args.functionName === "convertToAssets") {
-      return this.options.vaultNav ?? WAD;
+      const shares = BigInt((args.args?.[0] as bigint | number | string | undefined) ?? WAD);
+      const nav = this.options.vaultNav ?? WAD;
+      return (shares * nav) / WAD;
     }
     if (args.functionName === "asset") {
       return this.options.vaultAsset ?? DEFAULT_CONFIG.contracts.diem;
@@ -93,6 +135,17 @@ class MockReadinessClient implements LoopSimulationClient {
         0n,
         0n,
       ];
+    }
+    if (
+      args.functionName === "canonicalFlashPool" ||
+      args.functionName === "expectedFlashFee" ||
+      args.functionName === "loanTokenIsToken0" ||
+      args.functionName === "flashConfig" ||
+      args.functionName === "protocolConfig"
+    ) {
+      if (this.options.executorReadReverts) {
+        throw contractRevert("executor flash getter reverted");
+      }
     }
     if (args.functionName === "canonicalFlashPool") {
       return DEFAULT_CONFIG.flashLoan.pool;
@@ -120,6 +173,9 @@ class MockReadinessClient implements LoopSimulationClient {
       ];
     }
     if (args.functionName === "position") {
+      if (this.options.positionReadReverts) {
+        throw contractRevert("position reverted");
+      }
       return [0n, this.options.borrowShares ?? 0n, this.options.collateral ?? 0n];
     }
     if (args.functionName === "isAuthorized") {
@@ -271,5 +327,104 @@ describe("loop readiness", () => {
         "broadcast disabled pending production executor audit/review",
       ]),
     );
+  });
+
+  it("SPEC010: unlevered wallet holder gets leverage unlevered + wallet fields", async () => {
+    const wallet = 42n * WAD;
+    const result = await buildLoopReadiness({
+      config: { ...completeConfig(), contracts: { ...completeConfig().contracts, loopExecutor: null } },
+      owner,
+      client: new MockReadinessClient({
+        walletWstDiem: wallet,
+        collateral: 0n,
+        borrowShares: 0n,
+        marketSupply: 1n * WAD,
+      }),
+    });
+
+    expect(result.leverage).toBe("unlevered");
+    expect(result.ownerLeverageUndeterminable).toBe(false);
+    expect(result.ownerConfigured).toBe(true);
+    expect(result.owner).toMatchObject({
+      address: owner,
+      walletWstDiem: wallet,
+      walletValueDiem: wallet,
+      borrowShares: 0n,
+      borrowedDiem: 0n,
+      hasExitPosition: false,
+    });
+  });
+
+  it("SPEC010: executor flash-getter revert degrades executor row (not rpc-read fail)", async () => {
+    const result = await buildLoopReadiness({
+      config: completeConfig(),
+      owner,
+      client: new MockReadinessClient({
+        executorReadReverts: true,
+        collateral: 0n,
+        borrowShares: 0n,
+        marketSupply: 1n * WAD,
+        walletWstDiem: WAD,
+      }),
+    });
+
+    expect(result.checks.some((c) => c.key === "rpc-read" && c.status === "fail")).toBe(false);
+    expect(result.executor?.readReverted).toBe(true);
+    expect(result.executor?.verified).toBe(false);
+    expect(result.owner?.walletWstDiem).toBe(WAD);
+    expect(result.leverage).toBe("unlevered");
+  });
+
+  it("SPEC010: Morpho position revert leaves wallet visible and leverage undeterminable", async () => {
+    const result = await buildLoopReadiness({
+      config: completeConfig(),
+      owner,
+      client: new MockReadinessClient({
+        positionReadReverts: true,
+        marketSupply: 1n * WAD,
+        walletWstDiem: 7n * WAD,
+      }),
+    });
+
+    expect(result.owner?.walletWstDiem).toBe(7n * WAD);
+    expect(result.owner?.borrowShares).toBeNull();
+    expect(result.leverage).toBe("unknown");
+    expect(result.ownerLeverageUndeterminable).toBe(true);
+    expect(result.checks.some((c) => c.key === "rpc-read" && c.status === "fail")).toBe(false);
+  });
+
+  it("SPEC010: transport failure on executor re-raises to rpc-read fail", async () => {
+    const result = await buildLoopReadiness({
+      config: completeConfig(),
+      owner,
+      client: new MockReadinessClient({
+        readFailureFunction: "canonicalFlashPool",
+        readFailureIsRevert: false,
+      }),
+    });
+
+    expect(result.checks).toContainEqual({
+      key: "rpc-read",
+      status: "fail",
+      message: "live readiness read failed: forced canonicalFlashPool failure",
+    });
+  });
+
+  it("SPEC010: vault no-code → wallet n/a (never ≈ 0 DIEM)", async () => {
+    const result = await buildLoopReadiness({
+      config: completeConfig(),
+      owner,
+      client: new MockReadinessClient({
+        noVaultCode: true,
+        marketSupply: 1n * WAD,
+        collateral: 0n,
+        borrowShares: 0n,
+      }),
+    });
+
+    expect(result.vault?.hasCode).toBe(false);
+    // Owner may still be present from Morpho; wallet must be null.
+    expect(result.owner?.walletWstDiem ?? null).toBeNull();
+    expect(result.owner?.walletValueDiem ?? null).toBeNull();
   });
 });

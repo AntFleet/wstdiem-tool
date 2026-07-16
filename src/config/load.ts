@@ -276,7 +276,9 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
 }
 
 export function missingDeploymentKeys(config: AppConfig): string[] {
-  const required = ["inferenceVault", "feeRouter", "curvePool", "morphoOracle", "loopExecutor"] as const;
+  // loopExecutor is optional (SPEC010): null is a normal pre-launch state, not a
+  // deployment-config failure (same precedent as venueAdapters/usdc in SPEC009).
+  const required = ["inferenceVault", "feeRouter", "curvePool", "morphoOracle"] as const;
   const missing = required.filter((key) => config.contracts[key] === null);
   if (config.morpho.marketId === null) {
     missing.push("marketId" as (typeof required)[number]);
