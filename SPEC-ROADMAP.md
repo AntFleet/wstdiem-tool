@@ -435,6 +435,16 @@ posture, renderer banned-phrase throw) — non-blocking, see the session's gate 
 
 Phases 0–10 all SHIPPED. Pipeline = 14 spec-first units.
 
+## Phase 11 — SPEC010 core (unlevered owner readout + position-safety exits) — SHIPPED @89dd85d (2026-07-16)
+
+`SPEC010.md` (LOCKED) fixes `monitor` false-CRITICAL on safe unlevered holders and false-safe on unread
+positions: optional `loopExecutor:null` (Router was wrong contract), tri-state leverage severity, blind ⇒ 20,
+revert-vs-transport isolation (`Promise.allSettled`), wallet `balanceOf`/`convertToAssets`, `executor_read_reverted`
+⊕ `owner_unreadable`. **SPEC010-B.md** (dashboard header/Checks/Blockers/neutral copy) is **PARKED**, not blocking.
+
+**SHIPPED @89dd85d** on `main` (ff from `feature/spec010-core`): core impl `6bdadf3` + auditor C/H/M close-out
+`89dd85d`. Three-lane Codex re-audit CLEAN (0 C/H/M). Build clean; suite **374/374**.
+
 ## Traceability & verification
 
 - Maintain a lightweight **spec-clause ↔ test** map (a table appended to each spec).
