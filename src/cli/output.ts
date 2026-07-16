@@ -285,6 +285,66 @@ function loopStatusToken(result: LoopSizingResult, authoritative: boolean | unde
   return `${result.status}${result.firstBlocker === null ? "" : `: ${result.firstBlocker}`}`;
 }
 
+/**
+ * Compact, share-friendly sizing view. The full {@link renderLoopSizingTable} is
+ * a complete ~12-column risk readout that wraps on any normal terminal (unreadable
+ * in a screenshot); this keeps only the decision columns — leverage, net APY,
+ * health factor, margin-to-liquidation, verdict — so it fits a narrow terminal and
+ * pastes/screenshots cleanly. A footer states the shared modeled assumptions so the
+ * view is self-explanatory (net APY is only as good as the vault/borrow inputs).
+ */
+export function renderLoopSizingCompact(report: LoopSizingReport): string {
+  const blockerTag: Record<string, string> = {
+    health_factor_below_threshold: "HF",
+    curve_liquidity_insufficient: "curve depth",
+    morpho_supply_insufficient: "morpho supply",
+    net_apy_below_threshold: "net APY",
+    scenario_invalid: "invalid scenario",
+    unwind_not_covered: "unwind not covered",
+  };
+  const table = new Table({ head: ["Lev", "Net APY", "HF", "Margin→liq", "Verdict"] });
+  for (const result of report.results) {
+    const degraded =
+      report.authoritative === false &&
+      (result.status === "candidate" || result.status === "marginal");
+    let verdict: string;
+    if (result.status === "blocked" && result.firstBlocker !== null) {
+      verdict = `blocked (${blockerTag[result.firstBlocker] ?? result.firstBlocker})`;
+    } else {
+      verdict = degraded ? `${result.status} — unverified seed` : result.status;
+    }
+    table.push([
+      formatLeverage(result.scenario.targetLeverageBps),
+      formatBps(result.netApyBps),
+      formatHealthFactor(result.healthFactorBps),
+      result.structuralMarginToLiquidationBps === null
+        ? "n/a"
+        : formatBps(result.structuralMarginToLiquidationBps),
+      verdict,
+    ]);
+  }
+  const first = report.results[0];
+  const modeled: string[] = [];
+  if (first !== undefined) {
+    modeled.push(`vault ${formatBps(first.scenario.vaultApyBps)} APY`);
+    if (report.assumptions.borrowRateModel !== "flat") {
+      modeled.push(`borrow ${formatBps(first.borrowAprAtTargetBps)} @target`);
+    }
+    // Only claim a funded pool when the modeled scenario actually carries curve + Morpho depth.
+    // This view is built for external sharing, so it must not assert liquidity that isn't there —
+    // the drained-pool case is exactly where the blocked-row tag already tells the true story.
+    const curveDepth = first.scenario.curveDiemLegDiem + first.scenario.curveWstDiemLegDiem;
+    if (curveDepth > 0n && first.scenario.morphoSupplyDiem > 0n) {
+      modeled.push("funded curve+morpho pool");
+    }
+  }
+  const footer = modeled.length > 0 ? `modeled: ${modeled.join(" · ")}` : "";
+  const readOnly = `read-only · broadcast ${
+    report.assumptions.broadcastAvailable ? "available" : "disabled"
+  }`;
+  return [table.toString(), footer, readOnly].filter((line) => line.length > 0).join("\n");
+}
+
 export function renderLoopSizingTable(report: LoopSizingReport): string {
   const table = new Table({
     head: [

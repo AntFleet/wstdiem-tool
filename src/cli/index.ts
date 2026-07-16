@@ -19,7 +19,11 @@ import {
   type CapacityInputMode,
   type ExitSlippageQuoter,
 } from "../loop/capacity.js";
-import { buildLoopSizingReport, type LoopSizingScenario } from "../loop/sizing.js";
+import {
+  buildLoopSizingReport,
+  type LoopSizingReport,
+  type LoopSizingScenario,
+} from "../loop/sizing.js";
 import {
   buildLoopSizingScenarios,
   parseDecimalToBps,
@@ -63,6 +67,7 @@ import {
   renderLoopDemandTable,
   renderLoopDemandWithFlows,
   renderLoopReadinessTable,
+  renderLoopSizingCompact,
   renderLoopSizingTable,
   renderMonitorDashboard,
   renderStatusTable,
@@ -358,11 +363,18 @@ loop
     false,
   )
   .option("--planning-block <n>", "pin the on-chain seed reads to a specific block (default latest)")
+  .option(
+    "--compact",
+    "compact share-friendly table (leverage · net APY · HF · margin · verdict)",
+    false,
+  )
   .action(async function (this: Command) {
     await runAction(this, "loop sizing", async (config) => {
       const options = this.opts<
-        LoopSizingGridOptions & { fromChain?: boolean; planningBlock?: string }
+        LoopSizingGridOptions & { fromChain?: boolean; planningBlock?: string; compact?: boolean }
       >();
+      const renderReport = (report: LoopSizingReport): string =>
+        options.compact ? renderLoopSizingCompact(report) : renderLoopSizingTable(report);
       const wantsJson = this.optsWithGlobals<GlobalOptions>().json;
 
       if (!options.fromChain) {
@@ -376,7 +388,7 @@ loop
           );
         }
         const report = buildLoopSizingReport(scenarios);
-        return wantsJson ? report : renderLoopSizingTable(report);
+        return wantsJson ? report : renderReport(report);
       }
 
       // Static conflict guards run BEFORE any RPC client is constructed, so a
@@ -426,7 +438,7 @@ loop
       } finally {
         store.close();
       }
-      return wantsJson ? report : renderLoopSizingTable(report);
+      return wantsJson ? report : renderReport(report);
     });
   });
 

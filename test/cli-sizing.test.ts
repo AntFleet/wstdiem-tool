@@ -136,4 +136,97 @@ describe("compiled CLI loop sizing", () => {
     // --gas-cost-diem propagates as a single wei-denominated value.
     expect(scenario.gasCostDiem).toBe(parseDecimalToUnits("3").toString());
   }, 15_000);
+
+  it("--compact renders the narrow share view (decision columns only)", async () => {
+    const result = await execFileAsync(
+      "node",
+      [
+        "dist/cli/index.js",
+        "loop",
+        "sizing",
+        "--initial-diem",
+        "50",
+        "--curve-depth-diem",
+        "20000",
+        "--morpho-supply-diem",
+        "500",
+        "--rate-at-target-apy-bps",
+        "217",
+        "--vault-apy-bps",
+        "1200",
+        "--target-leverage",
+        "1.5,2,2.5",
+        "--min-health-factor",
+        "1.7",
+        "--compact",
+      ],
+      { env: offlineEnv() },
+    );
+    const out = result.stdout;
+    // Compact decision columns present.
+    for (const header of ["Lev", "Net APY", "HF", "Margin→liq", "Verdict"]) {
+      expect(out).toContain(header);
+    }
+    // The wide-table-only columns are gone — proving this is the compact view, not the full readout.
+    expect(out).not.toContain("Scenario");
+    expect(out).not.toContain("Curve req/actual");
+    expect(out).not.toContain("Morpho req/actual");
+    // Verdicts across the tiers, including the short blocker tag.
+    expect(out).toContain("candidate");
+    expect(out).toContain("marginal");
+    expect(out).toContain("blocked (HF)");
+    // Self-explanatory footer (modeled assumptions + read-only rigor).
+    expect(out).toContain("modeled:");
+    expect(out).toContain("borrow 2.17% @target");
+    expect(out).toContain("read-only");
+    // Funded scenario (curve 20000 + morpho 500) → the pool claim is truthful here.
+    expect(out).toContain("funded curve+morpho pool");
+  }, 15_000);
+
+  it("--compact does NOT claim a funded pool when depth is zero (honesty guard)", async () => {
+    const result = await execFileAsync(
+      "node",
+      [
+        "dist/cli/index.js",
+        "loop",
+        "sizing",
+        "--initial-diem",
+        "100",
+        "--target-leverage",
+        "2",
+        "--curve-depth-diem",
+        "0",
+        "--morpho-supply-diem",
+        "0",
+        "--compact",
+      ],
+      { env: offlineEnv() },
+    );
+    // The row is blocked precisely because the pool is empty; the footer must not assert it is funded.
+    expect(result.stdout).not.toContain("funded curve+morpho pool");
+    expect(result.stdout).toContain("modeled:");
+  }, 15_000);
+
+  it("without --compact still renders the full risk table (additive flag)", async () => {
+    const result = await execFileAsync(
+      "node",
+      [
+        "dist/cli/index.js",
+        "loop",
+        "sizing",
+        "--initial-diem",
+        "50",
+        "--curve-depth-diem",
+        "20000",
+        "--morpho-supply-diem",
+        "500",
+        "--target-leverage",
+        "1.5",
+      ],
+      { env: offlineEnv() },
+    );
+    // The full renderer keeps its wide columns when --compact is absent.
+    expect(result.stdout).toContain("Curve req/actual");
+    expect(result.stdout).toContain("Scenario");
+  }, 15_000);
 });
