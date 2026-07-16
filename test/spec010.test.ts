@@ -39,7 +39,10 @@ interface Spec010MockOptions {
   hasExecutorCode?: boolean;
   noVaultCode?: boolean;
   executorReadReverts?: boolean;
+  /** Per-function mixed executor failures: revert vs transport. */
+  executorMixed?: Record<string, "revert" | "transport">;
   positionReadReverts?: boolean;
+  marketReadReverts?: boolean;
   positionShapeBad?: boolean;
   marketIdNull?: boolean;
   transportOn?: string;
@@ -98,6 +101,9 @@ class Spec010Client implements LoopSimulationClient {
       case "totalAssets":
         return WAD;
       case "market": {
+        if (this.options.marketReadReverts) {
+          throw contractRevert("market reverted");
+        }
         const supply = this.options.marketSupply ?? 0n;
         const borrowShares = this.options.borrowShares ?? 0n;
         return [supply, supply, borrowShares, borrowShares, 0n, 0n];
@@ -132,8 +138,12 @@ class Spec010Client implements LoopSimulationClient {
       case "expectedFlashFee":
       case "loanTokenIsToken0":
       case "flashConfig":
-      case "protocolConfig":
-        if (this.options.executorReadReverts) {
+      case "protocolConfig": {
+        const mixed = this.options.executorMixed?.[args.functionName];
+        if (mixed === "transport") {
+          throw transportError(`transport ${args.functionName}`);
+        }
+        if (mixed === "revert" || this.options.executorReadReverts) {
           throw contractRevert("not a LoopExecutor");
         }
         if (args.functionName === "canonicalFlashPool") return DEFAULT_CONFIG.flashLoan.pool;
@@ -155,6 +165,7 @@ class Spec010Client implements LoopSimulationClient {
           DEFAULT_CONFIG.contracts.curvePool,
           DEFAULT_CONFIG.contracts.inferenceVault,
         ];
+      }
       default:
         throw new Error(`unexpected ${args.functionName}`);
     }
@@ -484,5 +495,54 @@ describe("SPEC010 core acceptance", () => {
     });
     const table = renderLoopReadinessTable(readiness);
     expect(table).toMatch(/not a LoopExecutor|flash getters/);
+  });
+
+  it("auditor fix: mixed executor revert+transport → rpc-read fail → 20 (not mask)", async () => {
+    const { exitCode, readiness } = await runMonitor({
+      walletWstDiem: WAD,
+      borrowShares: 0n,
+      collateral: 0n,
+      marketSupply: 1n * WAD,
+      curveLiquid: false,
+      loopExecutor: loopExecutor,
+      executorMixed: {
+        canonicalFlashPool: "revert",
+        expectedFlashFee: "transport",
+        loanTokenIsToken0: "revert",
+        flashConfig: "revert",
+        protocolConfig: "revert",
+      },
+    });
+    expect(readiness.checks.some((c) => c.key === "rpc-read" && c.status === "fail")).toBe(true);
+    expect(readiness.executor?.readReverted).not.toBe(true);
+    expect(exitCode).toBe(20);
+  });
+
+  it("auditor fix: Morpho market() revert still shows wallet (decoupled)", async () => {
+    const { readiness, exitCode } = await runMonitor({
+      walletWstDiem: 9n * WAD,
+      marketReadReverts: true,
+      loopExecutor: null,
+    });
+    expect(readiness.owner?.walletWstDiem).toBe(9n * WAD);
+    expect(readiness.morpho).toBeUndefined();
+    expect(readiness.ownerLeverageUndeterminable).toBe(true);
+    expect(exitCode).toBe(20);
+    expect(renderOwnerReadinessRow(readiness)).not.toBe("unavailable");
+  });
+
+  it("auditor fix: auth null renders n/a not affirmative no", async () => {
+    const { readiness } = await runMonitor({
+      walletWstDiem: 0n,
+      borrowShares: 50n * WAD,
+      collateral: 100n * WAD,
+      marketSupply: 2_000n * WAD,
+      curveLiquid: true,
+      loopExecutor: null, // auth skipped → null
+      authorized: false,
+    });
+    expect(readiness.owner?.executorAuthorized).toBeNull();
+    expect(renderOwnerReadinessRow(readiness)).toMatch(/authorized n\/a/);
+    expect(renderOwnerReadinessRow(readiness)).not.toMatch(/authorized no/);
   });
 });

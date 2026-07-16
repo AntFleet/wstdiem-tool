@@ -258,4 +258,26 @@ describe("monitor readiness alerts", () => {
     expect(keys).toEqual(["owner_unreadable"]);
     expect(keys).not.toContain("owner_position_missing");
   });
+
+  it("SPEC010: partial Morpho miss + unauthorized still emits executor_not_authorized CRITICAL", () => {
+    const result = baseResult({
+      ownerConfigured: true,
+      leverage: "unknown",
+      ownerLeverageUndeterminable: true,
+      owner: {
+        address: owner,
+        collateralWstDiem: null,
+        borrowShares: null,
+        borrowedDiem: null,
+        hasExitPosition: null,
+        executorAuthorized: false,
+        walletWstDiem: 5n,
+        walletValueDiem: 5n,
+      },
+    });
+
+    expect(
+      evaluateReadinessAlerts(result).map((a) => `${a.alertKey}:${a.level}`),
+    ).toEqual(["owner_unreadable:WARN", "executor_not_authorized:CRITICAL"]);
+  });
 });

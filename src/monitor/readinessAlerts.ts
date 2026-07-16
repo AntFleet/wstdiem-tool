@@ -174,26 +174,29 @@ export function evaluateReadinessAlerts(
         "Set position.owner or pass --owner once a funded owner position exists.",
       ),
     );
-  } else if (
-    result.owner === undefined ||
-    result.owner.borrowShares === null
-  ) {
-    // Configured but unreadable (full miss or partial Morpho miss) — never the
-    // "not configured" copy. Blind ⇒ exit 20 is driven by ownerLeverageUndeterminable.
-    alerts.push(
-      alert(
-        "owner_unreadable",
-        "WARN",
-        "Owner position could not be read.",
-        "Verify Morpho marketId, RPC health, and the owner address; position safety is unassessed.",
-        result.owner === undefined ? {} : { owner: result.owner.address },
-      ),
-    );
   } else {
-    // Morpho position readable (borrowShares !== null).
-    // SPEC010 §4.B/§4.F: suppress owner_position_missing when unlevered;
-    // never evaluate it when borrowShares was null (handled above).
-    if (leverage !== "unlevered" && result.owner.hasExitPosition === false) {
+    // Configured-but-unreadable: full miss or partial Morpho miss.
+    // Blind ⇒ exit 20 is driven by ownerLeverageUndeterminable.
+    if (result.owner === undefined || result.owner.borrowShares === null) {
+      alerts.push(
+        alert(
+          "owner_unreadable",
+          "WARN",
+          "Owner position could not be read.",
+          "Verify Morpho marketId, RPC health, and the owner address; position safety is unassessed.",
+          result.owner === undefined ? {} : { owner: result.owner.address },
+        ),
+      );
+    }
+    // Position-missing only when Morpho is readable (borrowShares !== null) and
+    // hasExitPosition is affirmatively false. Skip on null to avoid null-deref.
+    // Suppressed when unlevered (§4.B).
+    if (
+      result.owner !== undefined &&
+      result.owner.borrowShares !== null &&
+      leverage !== "unlevered" &&
+      result.owner.hasExitPosition === false
+    ) {
       alerts.push(
         alert(
           "owner_position_missing",
@@ -208,7 +211,10 @@ export function evaluateReadinessAlerts(
         ),
       );
     }
-    if (result.owner.executorAuthorized === false) {
+    // Authorization is independent of Morpho position readability: when leverage
+    // is unknown, §4.B keeps CRITICAL (no downgrade). Must not be nested under
+    // borrowShares !== null or a partial Morpho miss would suppress it.
+    if (result.owner !== undefined && result.owner.executorAuthorized === false) {
       alerts.push(
         alert(
           "executor_not_authorized",

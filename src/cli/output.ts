@@ -101,29 +101,31 @@ export function renderOwnerReadinessRow(result: LoopReadinessResult): string {
     return "unavailable";
   }
 
-  const walletNa = owner.walletWstDiem === null || owner.walletValueDiem === null;
   const morphoNa =
     owner.borrowShares === null ||
     owner.collateralWstDiem === null ||
     owner.borrowedDiem === null;
+  const formatAuthorized = (value: boolean | null): string =>
+    value === true ? "yes" : value === false ? "no" : "n/a";
 
-  // Whole-row unavailable only when every owner line failed.
+  // Whole-row unavailable only when *all* owner reads failed (wallet, Morpho, auth).
   if (
-    walletNa &&
-    morphoNa &&
     owner.walletWstDiem === null &&
+    owner.walletValueDiem === null &&
     owner.borrowShares === null &&
-    owner.collateralWstDiem === null
+    owner.collateralWstDiem === null &&
+    owner.borrowedDiem === null &&
+    owner.executorAuthorized === null
   ) {
     return "unavailable";
   }
 
-  // Levered (borrowShares > 0): byte-unchanged Morpho readout + in-wallet line.
+  // Levered (borrowShares > 0): Morpho readout + in-wallet; auth null → n/a (not "no").
   if (owner.borrowShares !== null && owner.borrowShares > 0n) {
     const collateral =
       owner.collateralWstDiem === null ? "n/a" : formatWad(owner.collateralWstDiem);
     const debt = owner.borrowedDiem === null ? "n/a" : formatWad(owner.borrowedDiem);
-    const authorized = owner.executorAuthorized === true ? "yes" : "no";
+    const authorized = formatAuthorized(owner.executorAuthorized);
     const walletLine =
       owner.walletWstDiem === null
         ? "in-wallet: n/a"
@@ -178,6 +180,11 @@ export function renderOwnerReadinessRow(result: LoopReadinessResult): string {
         owner.borrowedDiem!,
       )} DIEM`,
     );
+  }
+  if (owner.executorAuthorized !== null) {
+    parts.push(`authorized ${formatAuthorized(owner.executorAuthorized)}`);
+  } else if (morphoNa || owner.walletWstDiem === null) {
+    parts.push("authorized n/a");
   }
   return parts.join("; ");
 }

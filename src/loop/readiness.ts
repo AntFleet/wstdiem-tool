@@ -501,43 +501,55 @@ export async function buildLoopReadiness(input: {
       checks.push(check("morpho-market-liquidity", "fail", "marketId is required"));
       blockers.push("Morpho marketId missing");
     } else {
-      const market = parseMorphoMarket(
-        await input.client.readContract({
-          address: config.contracts.morphoBlue,
-          abi: morphoAbi,
-          functionName: "market",
-          args: [config.morpho.marketId],
-          blockNumber,
-        }),
-      );
-      if (market === null) {
+      // SPEC010 §4.C/§4.D — isolate Morpho market() so a contract revert does not
+      // prevent the independent wallet balanceOf path (transport still re-raises).
+      try {
+        const market = parseMorphoMarket(
+          await input.client.readContract({
+            address: config.contracts.morphoBlue,
+            abi: morphoAbi,
+            functionName: "market",
+            args: [config.morpho.marketId],
+            blockNumber,
+          }),
+        );
+        if (market === null) {
+          checks.push(
+            check("morpho-market-liquidity", "fail", "Morpho market returned an unsupported shape"),
+          );
+          blockers.push("Morpho market state unreadable");
+        } else {
+          morpho = {
+            totalSupplyAssets: market.totalSupplyAssets,
+            totalBorrowAssets: market.totalBorrowAssets,
+            totalBorrowShares: market.totalBorrowShares,
+            empty:
+              market.totalSupplyAssets === 0n &&
+              market.totalSupplyShares === 0n &&
+              market.totalBorrowAssets === 0n &&
+              market.totalBorrowShares === 0n,
+          };
+          checks.push(
+            check(
+              "morpho-market-liquidity",
+              morpho.totalSupplyAssets > 0n ? "pass" : "fail",
+              morpho.totalSupplyAssets > 0n
+                ? "Morpho market has DIEM supply assets"
+                : "Morpho market has no DIEM supply assets",
+            ),
+          );
+          if (morpho.totalSupplyAssets === 0n) {
+            blockers.push("Morpho market has no DIEM supply assets");
+          }
+        }
+      } catch (error) {
+        if (!isContractRevert(error)) {
+          throw error;
+        }
         checks.push(
-          check("morpho-market-liquidity", "fail", "Morpho market returned an unsupported shape"),
+          check("morpho-market-liquidity", "fail", "Morpho market read reverted"),
         );
         blockers.push("Morpho market state unreadable");
-      } else {
-        morpho = {
-          totalSupplyAssets: market.totalSupplyAssets,
-          totalBorrowAssets: market.totalBorrowAssets,
-          totalBorrowShares: market.totalBorrowShares,
-          empty:
-            market.totalSupplyAssets === 0n &&
-            market.totalSupplyShares === 0n &&
-            market.totalBorrowAssets === 0n &&
-            market.totalBorrowShares === 0n,
-        };
-        checks.push(
-          check(
-            "morpho-market-liquidity",
-            morpho.totalSupplyAssets > 0n ? "pass" : "fail",
-            morpho.totalSupplyAssets > 0n
-              ? "Morpho market has DIEM supply assets"
-              : "Morpho market has no DIEM supply assets",
-          ),
-        );
-        if (morpho.totalSupplyAssets === 0n) {
-          blockers.push("Morpho market has no DIEM supply assets");
-        }
       }
     }
 
@@ -556,48 +568,69 @@ export async function buildLoopReadiness(input: {
         checks.push(check("executor-config", "fail", "loopExecutor has no deployed code"));
         blockers.push("loopExecutor has no deployed code");
       } else {
-        // SPEC010 §4.D — isolate executor probe: contract revert degrades the row;
-        // transport re-raises into the outer catch → rpc-read:fail → 20.
-        try {
+        // SPEC010 §4.D — isolate executor probe with allSettled so a fast revert
+        // cannot mask a concurrent transport failure (fail-closed → rpc-read:fail).
+        // All rejections revert-classified → degrade executor row; any transport → rethrow.
+        const executorReads = [
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "canonicalFlashPool",
+            blockNumber,
+          }),
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "expectedFlashFee",
+            args: [50n * WAD],
+            blockNumber,
+          }),
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "loanTokenIsToken0",
+            blockNumber,
+          }),
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "flashConfig",
+            blockNumber,
+          }),
+          input.client.readContract({
+            address: config.contracts.loopExecutor,
+            abi: loopExecutorAbi,
+            functionName: "protocolConfig",
+            blockNumber,
+          }),
+        ];
+        const settled = await Promise.allSettled(executorReads);
+        const transportRejection = settled.find(
+          (entry) => entry.status === "rejected" && !isContractRevert(entry.reason),
+        );
+        if (transportRejection !== undefined && transportRejection.status === "rejected") {
+          throw transportRejection.reason;
+        }
+        const anyRevert = settled.some((entry) => entry.status === "rejected");
+        if (anyRevert) {
+          const reason =
+            "configured address is not a LoopExecutor (flash getters absent)";
+          executor = {
+            ...executor,
+            verified: false,
+            readReverted: true,
+            reason,
+          };
+          checks.push(check("executor-config", "fail", reason));
+          blockers.push("loopExecutor runtime config read reverted");
+        } else {
           const [
             canonicalFlashPool,
             executorFee,
             loanTokenIsToken0,
             rawFlashConfig,
             rawProtocolConfig,
-          ] = await Promise.all([
-            input.client.readContract({
-              address: config.contracts.loopExecutor,
-              abi: loopExecutorAbi,
-              functionName: "canonicalFlashPool",
-              blockNumber,
-            }),
-            input.client.readContract({
-              address: config.contracts.loopExecutor,
-              abi: loopExecutorAbi,
-              functionName: "expectedFlashFee",
-              args: [50n * WAD],
-              blockNumber,
-            }),
-            input.client.readContract({
-              address: config.contracts.loopExecutor,
-              abi: loopExecutorAbi,
-              functionName: "loanTokenIsToken0",
-              blockNumber,
-            }),
-            input.client.readContract({
-              address: config.contracts.loopExecutor,
-              abi: loopExecutorAbi,
-              functionName: "flashConfig",
-              blockNumber,
-            }),
-            input.client.readContract({
-              address: config.contracts.loopExecutor,
-              abi: loopExecutorAbi,
-              functionName: "protocolConfig",
-              blockNumber,
-            }),
-          ]);
+          ] = settled.map((entry) => (entry as PromiseFulfilledResult<unknown>).value);
           const flashConfig = parseExecutorFlashConfig(rawFlashConfig);
           const protocolConfig = parseExecutorProtocolConfig(rawProtocolConfig);
           const configuredFee = expectedUniswapV3FlashFee(50n * WAD, config.flashLoan.feeTier);
@@ -696,20 +729,6 @@ export async function buildLoopReadiness(input: {
           if (!executor.verified) {
             blockers.push("loopExecutor runtime config mismatch");
           }
-        } catch (error) {
-          if (!isContractRevert(error)) {
-            throw error;
-          }
-          const reason =
-            "configured address is not a LoopExecutor (flash getters absent)";
-          executor = {
-            ...executor,
-            verified: false,
-            readReverted: true,
-            reason,
-          };
-          checks.push(check("executor-config", "fail", reason));
-          blockers.push("loopExecutor runtime config read reverted");
         }
       }
     }
