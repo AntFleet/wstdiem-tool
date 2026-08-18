@@ -123,6 +123,13 @@ const configSchema = z
     storage: z.object({
       sqlitePath: z.string().min(1),
     }),
+    diemYield: z.object({
+      creditUsdPerDiemPerDay: z.number().positive(),
+      creditCitation: z.string().min(1),
+      marketedClaim: z.string().min(1),
+      marketedSource: z.string().min(1),
+      historicalMarketed: z.boolean(),
+    }),
     execution: z.object({
       defaultSlippageBps: z.number().int().min(0).max(300),
       maxSlippageBps: z.number().int().min(0).max(300),

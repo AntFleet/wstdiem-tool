@@ -298,7 +298,7 @@ Dust + empty Curve → Morpho error; `readFunctions` has `market` and does **not
 - `monitor` / readiness `morpho_liquidity_empty` still keys `=== 0n`, so at 0.00052 they still
   **pass** `morpho-market-liquidity`. Empty-loop screenshots are `loop sizing --from-chain` or
   `loop capacity --from-chain` **only** — not `monitor` / `status` — until a later chip.
-- SPEC011 `diem yield` remains PARKED.
+- SPEC011 `diem yield` is unparked as rev-2 (2026-08-18); this leftover message is its loop cell.
 - 100% util with `supply ≥ dust` can still hit Curve empty next (cliff). Out of this chip.
 
 ### SPEC006 interaction

@@ -48,6 +48,8 @@ describe("config loading", () => {
     expect(missingDeploymentKeys(config)).not.toContain("loopExecutor");
     expect(missingDeploymentKeys(config)).not.toContain("morphoOracle");
     expect(missingDeploymentKeys(config)).not.toContain("marketId");
+    expect(config.diemYield.historicalMarketed).toBe(false);
+    expect(config.diemYield.marketedClaim).toBe("7-12% APR");
   });
 
   it("SPEC010: loopExecutor null parses and passes deployment-config", () => {

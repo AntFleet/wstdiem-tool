@@ -98,6 +98,13 @@ export const DEFAULT_CONFIG: AppConfig = {
   storage: {
     sqlitePath: "./wstdiem-loop-manager.sqlite",
   },
+  diemYield: {
+    creditUsdPerDiemPerDay: 1,
+    creditCitation: "Venice documented constant; DIEM token views revert (2026-07-16)",
+    marketedClaim: "7-12% APR",
+    marketedSource: "@_proxystudio 2026-08-18",
+    historicalMarketed: false,
+  },
   execution: {
     defaultSlippageBps: 50,
     maxSlippageBps: 300,

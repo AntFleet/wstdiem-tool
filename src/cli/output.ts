@@ -5,6 +5,7 @@ import type { LoopBriefResult } from "../loop/brief.js";
 import type { LoopCapacityResult } from "../loop/capacity.js";
 import type { LoopBasisResult } from "../metrics/basis.js";
 import type { LoopDemandResult } from "../metrics/demand.js";
+import type { DiemYieldResult } from "../metrics/diemYield.js";
 import type { InferenceFlowsResult } from "../metrics/flows.js";
 import type { LoopReadinessResult } from "../loop/readiness.js";
 import type { LoopSizingReport, LoopSizingResult } from "../loop/sizing.js";
@@ -1083,6 +1084,53 @@ export function renderLoopBasisTable(result: LoopBasisResult): string {
     if (out.toLowerCase().includes(phrase.toLowerCase())) {
       throw new Error(`renderLoopBasisTable produced banned phrase: ${phrase}`);
     }
+  }
+  return out;
+}
+
+/** SPEC011 route comparison. Banner first. Four rows, audit footer. Not a ranking. */
+export function renderDiemYieldTable(result: DiemYieldResult): string {
+  const dayLabel = result.windowHours % 24 === 0 ? `${result.windowHours / 24}d` : null;
+  const windowNote = dayLabel
+    ? `configured ${result.windowHours}h (${dayLabel})`
+    : `configured ${result.windowHours}h`;
+  const lines = [
+    result.banner,
+    `[${result.windowKind}] ${windowNote} · not advice.`,
+    result.disclaimer,
+  ];
+  const table = new Table({
+    head: ["Route", "Tier", "Figure"],
+    wordWrap: true,
+  });
+  for (const row of result.rows) {
+    table.push([row.label, row.tier, row.primary]);
+  }
+  lines.push(table.toString());
+  if (result.audit !== null) {
+    lines.push(result.audit.line);
+  }
+  const out = lines.join("\n");
+  const ban = [
+    "opportunity",
+    "recommended",
+    "winner",
+    "opens when",
+    "will open",
+    "deploy up to",
+    "demand is up",
+    "apy you will earn",
+    "autonomous",
+    "deltavslow",
+    "deltavshigh",
+  ];
+  for (const phrase of ban) {
+    if (out.toLowerCase().includes(phrase.toLowerCase())) {
+      throw new Error(`renderDiemYieldTable produced banned phrase: ${phrase}`);
+    }
+  }
+  if (/\bbest\b/i.test(out)) {
+    throw new Error("renderDiemYieldTable produced banned phrase: best");
   }
   return out;
 }

@@ -108,6 +108,13 @@ export interface AppConfig {
   storage: {
     sqlitePath: string;
   };
+  diemYield: {
+    creditUsdPerDiemPerDay: number;
+    creditCitation: string;
+    marketedClaim: string;
+    marketedSource: string;
+    historicalMarketed: boolean;
+  };
   execution: {
     defaultSlippageBps: number;
     maxSlippageBps: number;

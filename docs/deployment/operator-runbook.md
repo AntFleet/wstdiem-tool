@@ -252,6 +252,19 @@ Needs SQLite samples from prior **`watch --once`** runs (`status` / `monitor` do
 
 > **Keeper is intermittent — read `loop demand` accordingly (verified 2026-07-13).** The keeper does not run on a steady cadence (a 15-day outage Jun 20 – Jul 5, a catch-up burst Jul 11–13, then frozen ~48h). NAV is **lumpy**: a burst annualizes to an absurd rate; a freeze reads ~0. Neither is steady-state. Prefer a **conservative ~0.1 DIEM/day base rate**, require the window to span **≥1 catch-up event**, and frame bursts as *catch-up*, not acceleration.
 
+### 6.1b Route comparison — `diem yield`
+
+```sh
+node dist/cli/index.js diem yield                         # default 23d / 552h realized
+node dist/cli/index.js diem yield --window-hours 840      # 35d
+node dist/cli/index.js diem yield --diem-usd 1400 --json
+```
+
+Not a ranking and not advice. Vault cell is SPEC008 REALIZED NAV growth (not a forward yield).
+Loop leftover prints the Morpho refuse and **does not** invent a 1.5× APY. Marketed 7-12% is an
+audit footer only when the vault window is ok. `--window-hours 72` is rejected (demand-proxy
+belongs on `loop demand`).
+
 ### 6.2 Basis — secondary market vs NAV
 
 ```sh

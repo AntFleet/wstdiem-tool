@@ -50,6 +50,12 @@ import {
   type NavSample,
 } from "../metrics/demand.js";
 import {
+  buildDiemYield,
+  DEFAULT_DIEM_YIELD_WINDOW_HOURS,
+  isLeftoverSeedError,
+  type DiemYieldLoopInput,
+} from "../metrics/diemYield.js";
+import {
   buildInferenceFlows,
   type AdapterLiveMeta,
   type InferenceFlowsResult,
@@ -71,6 +77,7 @@ import {
   renderLoopBrief,
   renderLoopCapacityTable,
   renderLoopBasisTable,
+  renderDiemYieldTable,
   renderLoopDemandTable,
   renderLoopDemandWithFlows,
   renderLoopReadinessTable,
@@ -1812,6 +1819,205 @@ loop
         );
       } finally {
         storage.close();
+      }
+    });
+  });
+
+const diem = program.command("diem").description("DIEM-holder route comparison");
+
+diem
+  .command("yield")
+  .description(
+    "DIEM-holder route comparison (not advice, not a ranking). Realized window hours; 23d=552, 35d=840.",
+  )
+  .option("--diem <amount>", "DIEM amount (scales $ notions, not percents)", "1")
+  .option("--diem-usd <price>", "operator-supplied DIEM/USD for credit upper-bound %")
+  .option(
+    "--window-hours <n>",
+    `realized window hours (integer ${MAX_DEMAND_PROXY_WINDOW_HOURS + 1}..${MAX_WINDOW_HOURS}; default ${DEFAULT_DIEM_YIELD_WINDOW_HOURS}; 23d=552, 35d=840)`,
+    String(DEFAULT_DIEM_YIELD_WINDOW_HOURS),
+  )
+  .option("--json", "emit JSON envelope")
+  .action(async function (this: Command) {
+    await runAction(this, "diem yield", async (config) => {
+      const options = this.opts<{
+        diem?: string;
+        diemUsd?: string;
+        windowHours?: string;
+        json?: boolean;
+      }>();
+      const wantsJson = this.optsWithGlobals<GlobalOptions>().json;
+      const hours = parseStrictInteger(
+        options.windowHours ?? String(DEFAULT_DIEM_YIELD_WINDOW_HOURS),
+        "--window-hours",
+      );
+      if (hours <= MAX_DEMAND_PROXY_WINDOW_HOURS || hours > MAX_WINDOW_HOURS) {
+        throw new CliError(
+          "INVALID_INPUT",
+          `--window-hours must be ${MAX_DEMAND_PROXY_WINDOW_HOURS + 1}..${MAX_WINDOW_HOURS} (hours; 23d=552, 35d=840)`,
+        );
+      }
+      const diemAmount = parseStrictFloat(options.diem ?? "1", "--diem");
+      if (diemAmount <= 0) {
+        throw new CliError("INVALID_INPUT", "--diem must be > 0");
+      }
+      const diemUsd =
+        options.diemUsd === undefined
+          ? undefined
+          : parseStrictFloat(options.diemUsd, "--diem-usd");
+      if (diemUsd !== undefined && diemUsd <= 0) {
+        throw new CliError("INVALID_INPUT", "--diem-usd must be > 0");
+      }
+
+      const windowSeconds = hours * 3600;
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const lookbackStart = demandLookbackStart(nowSeconds, windowSeconds);
+      const store = new Storage(config.storage.sqlitePath);
+      try {
+        const raw = store.listNavSamplesForWindow(lookbackStart);
+        const samples: NavSample[] = raw.map((row) => ({
+          timestamp: row.timestamp,
+          nav: row.nav,
+          totalAssetsDiem: row.totalAssetsDiem,
+        }));
+        const extraWarnings: string[] = [];
+        let sampleSource: "sqlite" | "sqlite+live-tip" = "sqlite";
+        let liveNavDecimal: string | null = null;
+        try {
+          const client = await createViemLoopSimulationClient(config);
+          if (client !== null && config.contracts.inferenceVault !== null) {
+            const vault = await collectVaultMetrics(config, client, makeEmptySnapshot(nowSeconds));
+            if (vault.snapshot.validity.vault) {
+              let tipNav = vault.snapshot.nav;
+              try {
+                tipNav = BigInt(
+                  (await client.readContract({
+                    address: config.contracts.inferenceVault,
+                    abi: inferenceVaultAbi,
+                    functionName: "convertToAssets",
+                    args: [WAD],
+                  })) as bigint | number | string,
+                );
+                liveNavDecimal = formatWad(tipNav, 18);
+              } catch {
+                extraWarnings.push("live-tip-nav-fallback-totals");
+                liveNavDecimal = formatWad(tipNav, 18);
+              }
+              const tip: NavSample = {
+                timestamp: nowSeconds,
+                nav: tipNav,
+                totalAssetsDiem: vault.snapshot.vaultTotalAssetsDiem,
+              };
+              if (tip.nav > 0n && tip.totalAssetsDiem !== undefined && tip.totalAssetsDiem > 0n) {
+                samples.push(tip);
+                sampleSource = "sqlite+live-tip";
+              }
+            }
+          }
+        } catch (error) {
+          extraWarnings.push(
+            `live tip skipped: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+
+        const demand = buildLoopDemand({
+          samples,
+          nowSeconds,
+          windowSeconds,
+          sampleSource,
+          extraWarnings,
+        });
+
+        let loop: DiemYieldLoopInput;
+        const vaultOk = demand.current.status === "ok" && demand.current.velocityBps !== null;
+        try {
+          const client = await createViemLoopSimulationClient(config);
+          if (client === null) {
+            throw new CliError(
+              "FROM_CHAIN_SEED_BLOCKED",
+              "at least one RPC URL must be configured for diem yield loop seed",
+            );
+          }
+          const explicitFlags: FromChainExplicitFlags = {
+            rateAtTargetApyBps: false,
+            morphoSupplyDiem: false,
+            morphoExistingBorrowDiem: false,
+            vaultApyBps: vaultOk,
+          };
+          const report = await buildFromChainSizingReport({
+            config,
+            client,
+            options: {
+              initialDiem: String(diemAmount),
+              targetLeverage: "1.5",
+              ...(vaultOk ? { vaultApyBps: String(demand.current.velocityBps) } : {}),
+            },
+            explicitFlags,
+            store,
+          });
+          if (!vaultOk) {
+            loop = { kind: "unavailable", reason: "UNAVAILABLE: no realized window to seed vault APY" };
+          } else {
+            const first = report.results[0];
+            const hf =
+              first.healthFactorBps === null ? "n/a" : `${first.healthFactorBps} bps`;
+            const margin =
+              first.structuralMarginToLiquidationBps === null
+                ? "n/a"
+                : `${first.structuralMarginToLiquidationBps} bps`;
+            loop = {
+              kind: "modeled",
+              primary: `modeled 1.5x net ${first.netApyBps} bps (${first.status}); HF ${hf}; liq-margin ${margin} — modeled, not a deploy recommendation`,
+              extras: {
+                status: first.status,
+                netApyBps: String(first.netApyBps),
+                healthFactorBps:
+                  first.healthFactorBps === null ? null : String(first.healthFactorBps),
+                structuralMarginToLiquidationBps:
+                  first.structuralMarginToLiquidationBps === null
+                    ? null
+                    : String(first.structuralMarginToLiquidationBps),
+              },
+            };
+          }
+        } catch (error) {
+          if (isLeftoverSeedError(error)) {
+            const data = error.data as {
+              totalSupplyAssetsWei: string;
+              totalBorrowAssetsWei: string;
+              dustFloorWei: string;
+              blockNumber: string;
+            };
+            loop = {
+              kind: "leftover",
+              message: error.message,
+              extras: {
+                totalSupplyAssetsWei: data.totalSupplyAssetsWei,
+                totalBorrowAssetsWei: data.totalBorrowAssetsWei,
+                dustFloorWei: data.dustFloorWei,
+                blockNumber: data.blockNumber,
+              },
+            };
+          } else {
+            throw error;
+          }
+        }
+
+        const result = buildDiemYield({
+          windowHours: hours,
+          diemAmount,
+          diemUsd,
+          demand,
+          liveNavDecimal,
+          loop,
+          marketed: {
+            claim: config.diemYield.marketedClaim,
+            source: config.diemYield.marketedSource,
+          },
+        });
+        return wantsJson ? result : renderDiemYieldTable(result);
+      } finally {
+        store.close();
       }
     });
   });

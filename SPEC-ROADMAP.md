@@ -445,7 +445,13 @@ revert-vs-transport isolation (`Promise.allSettled`), wallet `balanceOf`/`conver
 **SHIPPED @89dd85d** on `main` (ff from `feature/spec010-core`): core impl `6bdadf3` + auditor C/H/M close-out
 `89dd85d`. Three-lane Codex re-audit CLEAN (0 C/H/M). Build clean; suite **374/374**.
 
-## Phase 13 — SPEC008 rev-2 (realized window 169..840h) — IN PROGRESS (2026-08-18)
+## Phase 14 — SPEC011 `diem yield` (rev-2) — IN PROGRESS (2026-08-18)
+
+Unparked after measured post + SPEC008 rev-2 + SPEC003 rev-4. Route comparison (not a
+finder). Vault = realized 552h default. Loop leftover = UNAVAILABLE row / exit 0.
+Marketed 7-12 audit footer only, no Δ.
+
+## Phase 13 — SPEC008 rev-2 (realized window 169..840h) — SHIPPED @30987a5 (2026-08-18)
 
 `--window-hours` cap 168 → 840. 1..168 stays demand-proxy (byte-stable). 169..840 is
 `windowKind=realized`: REALIZED NAV growth paste/disclaimer, `authoritative` always false,
