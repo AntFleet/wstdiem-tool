@@ -445,6 +445,15 @@ revert-vs-transport isolation (`Promise.allSettled`), wallet `balanceOf`/`conver
 **SHIPPED @89dd85d** on `main` (ff from `feature/spec010-core`): core impl `6bdadf3` + auditor C/H/M close-out
 `89dd85d`. Three-lane Codex re-audit CLEAN (0 C/H/M). Build clean; suite **374/374**.
 
+## Phase 12 — SPEC003 rev-4 (Morpho leftover / dust floor) — IN PROGRESS (2026-08-18)
+
+`--from-chain` treats Morpho `totalSupplyAssets < 10^15` (0.001 DIEM) as **not currently
+enterable**: `FROM_CHAIN_SEED_BLOCKED` **before** any Curve read, locked screenshot string,
+no sizing/capacity/brief report. Live 86% book leftover 0.00052/0.00052 no longer hides
+behind empty-Curve. `MORPHO_DUST_WEI` ≠ `MIN_PROBE_EQUITY` (same literal, two names).
+Explicit `--morpho-supply-diem` remains hypothetical (flag-wins). monitor/readiness `=== 0`
+is known honesty debt — screenshot `loop sizing|capacity --from-chain` only.
+
 ## Traceability & verification
 
 - Maintain a lightweight **spec-clause ↔ test** map (a table appended to each spec).

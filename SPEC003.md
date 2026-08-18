@@ -69,8 +69,8 @@ convert with `perSecWadToAprBps` (`src/loop/morphoRate.ts`). Requires **adding `
 
 `Morpho.market(marketId).totalSupplyAssets` / `.totalBorrowAssets`. Reuse `readMorphoMarket` — which
 **must be exported** (`src/loop/preflight.ts:518` is module-private today) or extracted into a shared
-helper (readiness re-inlines the same `market` read). Guard: `totalSupplyAssets == 0` → fail-closed
-(cannot size against an empty market).
+helper (readiness re-inlines the same `market` read). Guard: `totalSupplyAssets < MORPHO_DUST_WEI` → fail-closed
+(cannot size against an empty **or dust** market). See **rev-4**. `== 0` remains a subset.
 
 ### 3.3 Flat-model interaction
 
@@ -194,7 +194,7 @@ fail-closed, SPEC001); or make a `candidate` safe on a thin pool without the for
 2. `rateAtTarget == 0` → fail-closed / `uninitialized-default` + `authoritative:false` — **not** clamp-to-10.
 3. Non-zero rate clamps to `[10, 20000]`; a direct-read **revert fails closed** (inversion deferred, §3.1).
 4. Fail-closed matrix: RPC down / `chainId≠8453` / `marketId` null / market revert / zero-or-codeless
-   IRM/Morpho address / `totalSupplyAssets==0` → error, **no report**. (The "pinned block > threshold
+   IRM/Morpho address / `totalSupplyAssets < MORPHO_DUST_WEI` (includes `==0`) → error, **no report**. (The "pinned block > threshold
    behind head" stale-pin arm is **deferred pending Open Question 1**'s threshold; `latest` mode pins
    to head so it cannot be stale, and `--planning-block` staleness is operator-intentional.)
 5. `--from-chain --borrow-rate-model flat` → error (or seeds `borrowApyBps` + records it in provenance).
@@ -208,6 +208,120 @@ fail-closed, SPEC001); or make a `candidate` safe on a thin pool without the for
 11. Insufficient / low-density history → `not-seeded` + `authoritative:false` + sizing continues (no 0 seed, no hard error).
 12. `get_dy`-seeded slippage is direction-correct (a fat-DIEM-leg exit is **not** over-blocked); both-legs-zero → fail-closed.
 13. `--from-chain --preset current-zero` → error.
+
+## rev-4 — Morpho dust floor (2026-08-18)
+
+**Status: REVIEWED + LOCKED (2026-08-18).** Pre-code gate: critic **REVISE** + analyst
+**ACCEPT-WITH-RESERVATIONS** → folds below. Amends §3.2 and AC4. Does **not** change the
+model, Curve empty-pool rule, or SPEC006 capacity search math.
+
+### Why
+
+§3.2's `totalSupplyAssets == 0` guard is **vacuous against a fully unwound book**. Verified Base
+2026-08-18 (block 50114848): Morpho 86% wstDIEM/DIEM `marketId 0xdd6b…6c76` is
+`totalSupplyAssets = totalBorrowAssets = 520023189765570` wei (**0.000520023189765570 DIEM**, ~100%
+util at leftover). The market is **not enterable**. The current check lets the seed proceed; Curve
+`0/0` then throws `cannot seed an empty pool` and **hides the Morpho unwind**. A 1.5× grid must
+never be produced from **chain-seeded** leftover of this book.
+
+This is the SPEC011 M4 primitive (present-tense enterability), not a `diem yield` renderer.
+
+### Constants (two names, same literal, documented coincidence)
+
+```
+MORPHO_DUST_WEI  = 10^15   // 0.001 DIEM. Unwind leftover cutoff. Lives next to the seed
+                           // (fromChainSeed.ts). NOT a Morpho protocol parameter.
+MIN_PROBE_EQUITY = 10^15   // capacity search floor (equity). Stays in capacity.ts.
+                           // May diverge. Capacity MUST NOT import MORPHO_DUST_WEI.
+```
+
+0.001 is a **round number above the verified leftover** `520023189765570`. It is **not** an
+enterability proof (min-probe equity of 0.001 at 1.5× / 80% util needs only ~0.000625 supply).
+Do not alias the two symbols.
+
+Comparison is **`<`** (strict): supply `== 10^15` proceeds (capacity may still return 0 /
+`morpho-util-headroom`).
+
+### Rule (seed, `--from-chain`)
+
+After a successful pinned `readMorphoMarket` and **before** any Curve read (`seedCurve` block),
+when Morpho supply is **chain-seeded** (`enforceMorphoDust === true`, the default):
+
+```
+if market.totalSupplyAssets < MORPHO_DUST_WEI:
+    throw FROM_CHAIN_SEED_BLOCKED
+    emit NO sizing/capacity/brief report
+```
+
+`== 0` uses the **same** template (one string for the whole `< dust` range).
+
+**Flag-wins (B):** an explicit `--morpho-supply-diem` is hypothetical. `buildFromChainSizingReport`
+/ `prepareFromChainCapacityTemplate` pass `enforceMorphoDust: !explicitFlags.morphoSupplyDiem`.
+Default `--from-chain` always enforces. Offline (no `--from-chain`) is untouched.
+
+**Do not** treat `available = max(0, supply − borrow) < dust` with `supply ≥ dust` as this error.
+That is a **full** book. Capacity already returns 0 / `morpho-util-headroom`.
+
+### Locked message (screenshot contract)
+
+Helper `morphoDustBlockedMessage`. `formatWad(..., 18)` for supply and borrow.
+
+```
+Morpho market not currently enterable as of block <N>: supply <18-dec> DIEM, borrow <18-dec> DIEM (below this tool's 0.001 DIEM minimum probe). Curve depth was not read. Point-in-time seed, not a forecast, not advice.
+```
+
+`CliError.data` (JSON `--json` envelope `data`):
+
+```
+{
+  totalSupplyAssetsWei: string,  // decimal wei
+  totalBorrowAssetsWei: string,
+  dustFloorWei: string,          // "1000000000000000"
+  blockNumber: string
+}
+```
+
+MUST-NOT in `message`: `deploy`, `APY`, `will open`, `soon`, `agent`, `autonomous`, `dead`, `forever`.
+
+Do **not** say the *route* opens when Morpho fills. Curve was not read.
+
+### Order
+
+Check stays **above** the Curve `seedCurve` block (`fromChainSeed.ts` after the market read).
+Dust + empty Curve → Morpho error; `readFunctions` has `market` and does **not** contain
+`balances` / `convertToAssets` / `get_dy` / curve `getCode`.
+
+### Out of scope / known honesty debt
+
+- Curve leftover (both-legs-zero stays `== 0`).
+- SPEC006 search algorithm, exit codes, broadcast.
+- `monitor` / readiness `morpho_liquidity_empty` still keys `=== 0n`, so at 0.00052 they still
+  **pass** `morpho-market-liquidity`. Empty-loop screenshots are `loop sizing --from-chain` or
+  `loop capacity --from-chain` **only** — not `monitor` / `status` — until a later chip.
+- SPEC011 `diem yield` remains PARKED.
+- 100% util with `supply ≥ dust` can still hit Curve empty next (cliff). Out of this chip.
+
+### SPEC006 interaction
+
+`--from-chain` capacity/brief fail via the same seed: **error, no `capacityEquityDiem: 0`
+stand-in**, no `brief_runs` insert (SPEC006 §5.1 / §5.2). Offline `0/0` legs still produce
+capacity 0 / curve binding (unchanged).
+
+### Acceptance (add to §8)
+
+14. `totalSupplyAssets == 0` → same locked template, `FROM_CHAIN_SEED_BLOCKED`, no report.
+15. Live leftover `520023189765570` / any borrow, `seedCurve: true`, empty Curve fixture →
+    locked template (`toBe`), `data` wei+block, MUST-NOT greps, `readFunctions` has `market`
+    and omits `balances` / `convertToAssets` / `get_dy`.
+16. `totalSupplyAssets = MORPHO_DUST_WEI - 1` → blocked; `== MORPHO_DUST_WEI` borrow 0,
+    `seedCurve: false` → seed **returns**.
+17. `totalSupplyAssets = 6e18` → Morpho seed proceeds.
+18. `supply ≥ dust` and `supply − borrow < dust` (full book) → Morpho seed proceeds.
+19. Dust Morpho + empty Curve + `seedCurve: true` throws the Morpho template, not the Curve
+    empty-pool string.
+20. `explicitFlags.morphoSupplyDiem === true` + live leftover → seed **returns** (hypothetical).
+21. SPEC006: `buildFromChainSizingReport` / capacity prepare on dust (no Morpho flag) rejects
+    `FROM_CHAIN_SEED_BLOCKED` and returns no `capacityEquityDiem` / no report body.
 
 ## Open questions
 

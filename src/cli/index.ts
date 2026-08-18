@@ -717,6 +717,7 @@ async function prepareFromChainCapacityTemplate(input: {
     client,
     planningBlock,
     seedCurve,
+    enforceMorphoDust: !explicitFlags.morphoSupplyDiem,
   });
 
   const gridOptions: LoopSizingGridOptions = { ...options };

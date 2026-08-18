@@ -85,14 +85,15 @@ node dist/cli/index.js loop sizing --from-chain \
 
 Seeds `rateAtTarget`, Morpho supply/borrow, Curve legs, live `get_dy` exit slippage (when possible), and 7-day vault APY from SQLite. **Upgrades inputs, not the model.**
 
-**Fail-closed (no report):** drained Curve (0/0 legs), RPC down, wrong chain, empty Morpho supply, bad contract code, etc.
+**Fail-closed (no report):** Morpho supply &lt; 0.001 DIEM (checked first), drained Curve (0/0 legs), RPC down, wrong chain, bad contract code, etc.
 
 **Demotion (report continues, not a hard fail):** short vault APY window, unavailable `get_dy`, operator-typed vault APY. Verdict shows `— unverified seed`; JSON `authoritative: false`. A `candidate` with `authoritative: false` is **not** a verified pass.
 
-**Drained pool rehearsal** (explicit legs skip curve chain-seed; still seeds Morpho/rate):
+**Drained venue rehearsal** (hypothetical Morpho + Curve; default `--from-chain` refuses leftover Morpho):
 
 ```sh
 node dist/cli/index.js loop sizing --from-chain \
+  --morpho-supply-diem 6 --morpho-existing-borrow-diem 0 \
   --curve-diem-leg 5000 --curve-wstdiem-leg 5000 \
   --initial-diem 100 --target-leverage 1.5
 ```
@@ -217,7 +218,7 @@ Live state has at times shown **Curve DIEM/wstDIEM balances 0/0** and **tight Mo
 
 | Situation | Behavior |
 |---|---|
-| `loop sizing --from-chain` with empty pool | **No report** — `FROM_CHAIN_SEED_BLOCKED` |
+| `loop sizing --from-chain` with empty Curve **or** Morpho supply &lt; 0.001 DIEM | **No report** — `FROM_CHAIN_SEED_BLOCKED` (Morpho leftover is checked first) |
 | `monitor` empty Curve | CRITICAL readiness alert (infrastructure) |
 | `loop capacity` on 0/0 legs (explicit offline) | Capacity **0** / blocked, curve binding |
 | Rehearse with hypothetical depth | Pass `--curve-diem-leg` / `--curve-wstdiem-leg` (or totals) explicitly |

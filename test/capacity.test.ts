@@ -13,6 +13,7 @@ import {
   taxonomyFromBindingEdge,
   type ExitSlippageQuoter,
 } from "../src/loop/capacity.js";
+import { MORPHO_DUST_WEI } from "../src/loop/fromChainSeed.js";
 import {
   defaultSizingValues,
   positionCollateralForScenario,
@@ -40,6 +41,12 @@ function template(overrides: Partial<LoopSizingScenario> = {}): LoopSizingScenar
 }
 
 describe("SPEC006 capacity search", () => {
+  it("SPEC003 rev-4: MIN_PROBE_EQUITY stays a capacity export, not a Morpho import", () => {
+    // Same literal today; they may diverge. Do not alias the symbols.
+    expect(MIN_PROBE_EQUITY).toBe(10n ** 15n);
+    expect(MORPHO_DUST_WEI).toBe(10n ** 15n);
+  });
+
   it("zero-path: minProbe blocked + mid marginal → bindingConstraint marginal-band", async () => {
     // Large fixed gas blocks tiny equities on net_apy; a mid size clears gas into marginal
     // (HF proximity at 2× with min HF 1.7) without ever becoming candidate.

@@ -30,6 +30,47 @@ import { buildLoopSizingScenarios, type LoopSizingGridOptions } from "./sizingSc
 /** Structured fail-closed error code for every `--from-chain` seed failure. */
 const SEED_BLOCKED = "FROM_CHAIN_SEED_BLOCKED";
 
+/**
+ * Unwind leftover cutoff (0.001 DIEM). Round number above the verified 2026-08-18
+ * 86% book leftover (520023189765570 wei). NOT a Morpho protocol parameter and NOT
+ * `MIN_PROBE_EQUITY` (capacity search floor, equity) — same literal, different object;
+ * they may diverge. Capacity must not import this.
+ */
+export const MORPHO_DUST_WEI = 10n ** 15n;
+
+/** Locked SPEC003 rev-4 screenshot string. */
+export function morphoDustBlockedMessage(input: {
+  blockNumber: bigint;
+  totalSupplyAssets: bigint;
+  totalBorrowAssets: bigint;
+}): string {
+  return (
+    `Morpho market not currently enterable as of block ${input.blockNumber}: ` +
+    `supply ${formatWad(input.totalSupplyAssets, 18)} DIEM, ` +
+    `borrow ${formatWad(input.totalBorrowAssets, 18)} DIEM ` +
+    `(below this tool's 0.001 DIEM minimum probe). ` +
+    `Curve depth was not read. Point-in-time seed, not a forecast, not advice.`
+  );
+}
+
+export function morphoDustBlockedData(input: {
+  blockNumber: bigint;
+  totalSupplyAssets: bigint;
+  totalBorrowAssets: bigint;
+}): {
+  totalSupplyAssetsWei: string;
+  totalBorrowAssetsWei: string;
+  dustFloorWei: string;
+  blockNumber: string;
+} {
+  return {
+    totalSupplyAssetsWei: input.totalSupplyAssets.toString(),
+    totalBorrowAssetsWei: input.totalBorrowAssets.toString(),
+    dustFloorWei: MORPHO_DUST_WEI.toString(),
+    blockNumber: input.blockNumber.toString(),
+  };
+}
+
 const ZERO_ADDRESS = `0x${"0".repeat(40)}` as Address;
 
 const CURVE_POOL_DIEM_INDEX = 0n;
@@ -159,15 +200,18 @@ async function assertContractHasCode(
  * `rateAtTarget(marketId)` and `market(marketId)` BOTH pinned to that same block,
  * (c) derives `rateAtTargetApyBps = perSecWadToAprBps(rateAtTarget)`, (d) returns
  * `{ seeds, provenance }`. Throws a structured `CliError` and emits no report on: RPC
- * unavailable, `chainId !== 8453`, `marketId` null, any read revert, `totalSupplyAssets == 0`.
+ * unavailable, `chainId !== 8453`, `marketId` null, any read revert,
+ * `totalSupplyAssets < MORPHO_DUST_WEI` when `enforceMorphoDust` (default true).
  */
 export async function seedFromChain(input: {
   config: AppConfig;
   client: FromChainSeedClient;
   planningBlock?: bigint;
   seedCurve?: boolean;
+  /** Default true. False when `--morpho-supply-diem` is explicit (hypothetical). */
+  enforceMorphoDust?: boolean;
 }): Promise<FromChainSeedResult> {
-  const { config, client, planningBlock, seedCurve = false } = input;
+  const { config, client, planningBlock, seedCurve = false, enforceMorphoDust = true } = input;
 
   if (config.morpho.marketId === null) {
     throw new CliError(SEED_BLOCKED, "marketId is required to seed sizing inputs from chain");
@@ -225,8 +269,18 @@ export async function seedFromChain(input: {
   if (market === null) {
     throw new CliError(SEED_BLOCKED, "Morpho market returned an unsupported shape");
   }
-  if (market.totalSupplyAssets === 0n) {
-    throw new CliError(SEED_BLOCKED, "Morpho market has no DIEM supply assets; cannot size an empty market");
+  if (enforceMorphoDust && market.totalSupplyAssets < MORPHO_DUST_WEI) {
+    const dustInput = {
+      blockNumber,
+      totalSupplyAssets: market.totalSupplyAssets,
+      totalBorrowAssets: market.totalBorrowAssets,
+    };
+    throw new CliError(
+      SEED_BLOCKED,
+      morphoDustBlockedMessage(dustInput),
+      undefined,
+      morphoDustBlockedData(dustInput),
+    );
   }
 
   const warnings: string[] = [];
@@ -514,7 +568,13 @@ export async function buildFromChainSizingReport(input: {
   const curveSweptByPreset = options.preset === "liquidity-sweep";
   const seedCurve = !anyExplicitCurveFlag && !curveSweptByPreset;
 
-  const { seeds, provenance } = await seedFromChain({ config, client, planningBlock, seedCurve });
+  const { seeds, provenance } = await seedFromChain({
+    config,
+    client,
+    planningBlock,
+    seedCurve,
+    enforceMorphoDust: !explicitFlags.morphoSupplyDiem,
+  });
 
   const gridOptions: LoopSizingGridOptions = { ...options };
   const seededFields: SeedProvenance["seededFields"] = { ...provenance.seededFields };

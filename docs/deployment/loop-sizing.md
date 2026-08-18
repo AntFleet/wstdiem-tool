@@ -49,18 +49,19 @@ Add `--planning-block <n>` to pin the reads to a specific block instead of `late
 
 ### Fail-closed: it refuses to seed rather than seed garbage
 
-`--from-chain` emits **no report** and exits non-zero when a seed cannot be trusted. The live example today is the **drained Curve pool**: the DIEM/wstDIEM pool (`0x21c33a1B…`) currently holds zero on both legs, so the default command fails closed:
+`--from-chain` emits **no report** and exits non-zero when a seed cannot be trusted. The live example today is the **Morpho leftover book** (86% wstDIEM/DIEM, supply/borrow ≈ 0.00052 DIEM). That check runs **before** Curve, so the default command fails closed on Morpho rather than hiding the unwind behind empty Curve:
 
 ```
-FROM_CHAIN_SEED_BLOCKED: Curve pool has zero DIEM and wstDIEM depth; cannot seed an empty pool
+FROM_CHAIN_SEED_BLOCKED: Morpho market not currently enterable as of block 50114848: supply 0.000520023189765570 DIEM, borrow 0.000520023189765570 DIEM (below this tool's 0.001 DIEM minimum probe). Curve depth was not read. Point-in-time seed, not a forecast, not advice.
 ```
 
-This is intended — you cannot size a loop's exit against an empty pool, and the tool will not invent depth. Other fail-closed triggers: RPC unavailable, `chainId ≠ 8453`, `marketId` unset, any seed read reverting, a zero or codeless contract address, `rateAtTarget` read as 0 (uninitialized IRM), or Morpho `totalSupplyAssets == 0`.
+If Morpho supply is healthy and Curve is 0/0, you still get the Curve empty-pool error (`cannot seed an empty pool`). Other fail-closed triggers: RPC unavailable, `chainId ≠ 8453`, `marketId` unset, any seed read reverting, a zero or codeless contract address, or `rateAtTarget` read as 0 (uninitialized IRM).
 
-**To rehearse against a drained pool anyway** (hypothetical depth), supply the Curve legs explicitly. This marks the curve dimension as operator-supplied, skips Curve chain-seeding and the live `get_dy` quote, and still seeds `rateAtTarget` and Morpho from chain:
+**To rehearse against drained venues anyway** (hypothetical depth), pass explicit Morpho supply **and** Curve legs. Default `--from-chain` always refuses a leftover Morpho book.
 
 ```sh
 node dist/cli/index.js loop sizing --from-chain \
+  --morpho-supply-diem 6 --morpho-existing-borrow-diem 0 \
   --curve-diem-leg 5000 --curve-wstdiem-leg 5000 \
   --initial-diem 100 --target-leverage 1.5
 ```

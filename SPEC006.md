@@ -543,7 +543,8 @@ When `search.truncated`, append `search truncated`. When unbounded, use `≥ max
    stand-in for "could not read."
 2. **Drained pool — split:**
    - Offline / explicit legs `0/0` → capacity 0 / `blocked` / curve binding (AC1).
-   - `--from-chain` empty pool → existing SPEC003 seed **error**, no report (do not soft-zero).
+   - `--from-chain` empty **or dust** Morpho (`totalSupplyAssets < MORPHO_DUST_WEI`, SPEC003 rev-4)
+     **or** empty Curve (both legs zero) → existing SPEC003 seed **error**, no report (do not soft-zero).
 3. **Degraded seed → `authoritative: false`** + unverified token on rendered edge status (SPEC003 §6).
 4. **Offline refuse** without market inputs or escape hatch (§2.7).
 5. **No concurrent-flow model** — caveat only.

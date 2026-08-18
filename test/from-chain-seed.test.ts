@@ -6,6 +6,8 @@ import {
   loadVaultApyWindow,
   MIN_VAULT_APY_WINDOW_SAMPLES,
   seedFromChain,
+  MORPHO_DUST_WEI,
+  morphoDustBlockedMessage,
   type FromChainExplicitFlags,
   type FromChainSeedClient,
   type VaultApyWindowStore,
@@ -302,9 +304,161 @@ describe("loop sizing --from-chain (SPEC003 Part A)", () => {
     await expect(
       seedFromChain({
         config: baseConfig(),
-        client: new MockSeedClient({ marketSupply: 0n }),
+        client: new MockSeedClient({ marketSupply: 0n, marketBorrow: 0n, latestBlock: 99n }),
+      }),
+    ).rejects.toMatchObject({
+      code: "FROM_CHAIN_SEED_BLOCKED",
+      message: morphoDustBlockedMessage({
+        blockNumber: 99n,
+        totalSupplyAssets: 0n,
+        totalBorrowAssets: 0n,
+      }),
+    });
+  });
+
+  // SPEC003 rev-4 — Morpho leftover / dust floor.
+  const LIVE_DUST_WEI = 520023189765570n;
+  const DUST_FORBIDDEN = [
+    "deploy",
+    "APY",
+    "will open",
+    "soon",
+    "agent",
+    "autonomous",
+    "dead",
+    "forever",
+  ];
+
+  it("rev-4 AC15/19: live leftover blocks before any Curve read and uses the locked message", async () => {
+    const client = new MockSeedClient({
+      marketSupply: LIVE_DUST_WEI,
+      marketBorrow: LIVE_DUST_WEI,
+      latestBlock: 50114848n,
+      curveDiemBalance: 0n,
+      curveWstDiemBalance: 0n,
+    });
+    const expected = morphoDustBlockedMessage({
+      blockNumber: 50114848n,
+      totalSupplyAssets: LIVE_DUST_WEI,
+      totalBorrowAssets: LIVE_DUST_WEI,
+    });
+    await expect(seedFromChain({ config: baseConfig(), client, seedCurve: true })).rejects.toMatchObject({
+      code: "FROM_CHAIN_SEED_BLOCKED",
+      message:
+        "Morpho market not currently enterable as of block 50114848: supply 0.000520023189765570 DIEM, borrow 0.000520023189765570 DIEM (below this tool's 0.001 DIEM minimum probe). Curve depth was not read. Point-in-time seed, not a forecast, not advice.",
+      data: {
+        totalSupplyAssetsWei: LIVE_DUST_WEI.toString(),
+        totalBorrowAssetsWei: LIVE_DUST_WEI.toString(),
+        dustFloorWei: MORPHO_DUST_WEI.toString(),
+        blockNumber: "50114848",
+      },
+    });
+    expect(expected).toBe(
+      "Morpho market not currently enterable as of block 50114848: supply 0.000520023189765570 DIEM, borrow 0.000520023189765570 DIEM (below this tool's 0.001 DIEM minimum probe). Curve depth was not read. Point-in-time seed, not a forecast, not advice.",
+    );
+    expect(client.readFunctions).toContain("market");
+    expect(client.readFunctions).not.toContain("balances");
+    expect(client.readFunctions).not.toContain("convertToAssets");
+    expect(client.readFunctions).not.toContain("get_dy");
+    expect(expected).toContain("0.000520023189765570");
+    expect(expected).toContain("not currently enterable");
+    expect(expected).toContain("Curve depth was not read");
+    expect(expected).toContain("not a forecast");
+    for (const banned of DUST_FORBIDDEN) {
+      expect(expected.toLowerCase()).not.toContain(banned.toLowerCase());
+    }
+  });
+
+  it("rev-4 AC16: supply just below dust blocks; at dust with borrow 0 the Morpho seed returns", async () => {
+    await expect(
+      seedFromChain({
+        config: baseConfig(),
+        client: new MockSeedClient({
+          marketSupply: MORPHO_DUST_WEI - 1n,
+          marketBorrow: 0n,
+          latestBlock: 1n,
+        }),
+        seedCurve: false,
       }),
     ).rejects.toMatchObject({ code: "FROM_CHAIN_SEED_BLOCKED" });
+
+    const { seeds } = await seedFromChain({
+      config: baseConfig(),
+      client: new MockSeedClient({
+        marketSupply: MORPHO_DUST_WEI,
+        marketBorrow: 0n,
+      }),
+      seedCurve: false,
+    });
+    expect(seeds.morphoSupplyDiem).toBe(MORPHO_DUST_WEI);
+    expect(seeds.morphoExistingBorrowDiem).toBe(0n);
+  });
+
+  it("rev-4 AC17/18: pre-unwind supply and a full book still seed Morpho", async () => {
+    const healthy = await seedFromChain({
+      config: baseConfig(),
+      client: new MockSeedClient({ marketSupply: 6n * WAD, marketBorrow: 2n * WAD }),
+      seedCurve: false,
+    });
+    expect(healthy.seeds.morphoSupplyDiem).toBe(6n * WAD);
+
+    const full = await seedFromChain({
+      config: baseConfig(),
+      client: new MockSeedClient({
+        marketSupply: 2n * MORPHO_DUST_WEI,
+        marketBorrow: 2n * MORPHO_DUST_WEI - 1n,
+      }),
+      seedCurve: false,
+    });
+    expect(full.seeds.morphoSupplyDiem).toBe(2n * MORPHO_DUST_WEI);
+  });
+
+  it("rev-4 AC20: explicit morpho-supply flag skips the live leftover refuse", async () => {
+    const { seeds } = await seedFromChain({
+      config: baseConfig(),
+      client: new MockSeedClient({
+        marketSupply: LIVE_DUST_WEI,
+        marketBorrow: LIVE_DUST_WEI,
+      }),
+      seedCurve: false,
+      enforceMorphoDust: false,
+    });
+    expect(seeds.morphoSupplyDiem).toBe(LIVE_DUST_WEI);
+  });
+
+  it("rev-4 AC21: from-chain sizing report on leftover emits no report body", async () => {
+    await expect(
+      buildFromChainSizingReport({
+        config: baseConfig(),
+        client: new MockSeedClient({
+          marketSupply: LIVE_DUST_WEI,
+          marketBorrow: LIVE_DUST_WEI,
+          curveDiemBalance: 0n,
+          curveWstDiemBalance: 0n,
+        }),
+        options: { initialDiem: "100", targetLeverage: "1.5" },
+        explicitFlags: NO_EXPLICIT,
+      }),
+    ).rejects.toMatchObject({
+      code: "FROM_CHAIN_SEED_BLOCKED",
+      message: expect.stringContaining("not currently enterable"),
+    });
+  });
+
+  it("rev-4 AC21 flag-wins: explicit morpho supply still sizes against leftover live book", async () => {
+    const report = await buildFromChainSizingReport({
+      config: baseConfig(),
+      client: new MockSeedClient({
+        marketSupply: LIVE_DUST_WEI,
+        marketBorrow: LIVE_DUST_WEI,
+        curveDiemBalance: 1_000_000n * WAD,
+        curveWstDiemBalance: 1_000_000n * WAD,
+      }),
+      options: { initialDiem: "100", targetLeverage: "1.5", morphoSupplyDiem: "6" },
+      explicitFlags: { ...NO_EXPLICIT, morphoSupplyDiem: true },
+    });
+    expect(report.seedProvenance?.seededFields.morphoSupplyDiem).toBe("flag");
+    expect(report.results.length).toBeGreaterThan(0);
   });
 
   it("fails closed when marketId is null", async () => {
