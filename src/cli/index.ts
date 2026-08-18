@@ -41,7 +41,14 @@ import {
 import { inferenceVaultAbi } from "../abi/inferenceVault.js";
 import { buildLoopBasis, type MarketPriceSourceKind } from "../metrics/basis.js";
 import { collectVaultMetrics } from "../metrics/collector.js";
-import { buildLoopDemand, DEFAULT_VELOCITY_WINDOW_HOURS, type NavSample } from "../metrics/demand.js";
+import {
+  buildLoopDemand,
+  DEFAULT_VELOCITY_WINDOW_HOURS,
+  MAX_DEMAND_PROXY_WINDOW_HOURS,
+  MAX_WINDOW_HOURS,
+  demandLookbackStart,
+  type NavSample,
+} from "../metrics/demand.js";
 import {
   buildInferenceFlows,
   type AdapterLiveMeta,
@@ -1149,12 +1156,12 @@ addSizingSeedFlags(
 loop
   .command("demand")
   .description(
-    "NAV-ratchet yield velocity (demand proxy): short-window vault share-price growth + acceleration",
+    "NAV-ratchet yield velocity (demand proxy, 1..168h) or REALIZED NAV growth (169..840h)",
   )
   .option("--json", "emit JSON envelope")
   .option(
     "--window-hours <n>",
-    `configured window length in hours (integer 1..168; default ${DEFAULT_VELOCITY_WINDOW_HOURS})`,
+    `window length in hours (integer 1..${MAX_WINDOW_HOURS}; default ${DEFAULT_VELOCITY_WINDOW_HOURS}; 23d=552, 35d=840; 169+ is realized, not demand-proxy)`,
     String(DEFAULT_VELOCITY_WINDOW_HOURS),
   )
   .option(
@@ -1180,16 +1187,22 @@ loop
         options.windowHours ?? String(DEFAULT_VELOCITY_WINDOW_HOURS),
         "--window-hours",
       );
-      if (hours < 1 || hours > 168) {
-        throw new CliError("INVALID_INPUT", "--window-hours must be an integer from 1 to 168");
+      if (hours < 1 || hours > MAX_WINDOW_HOURS) {
+        throw new CliError(
+          "INVALID_INPUT",
+          `--window-hours must be an integer from 1 to ${MAX_WINDOW_HOURS} (hours; 23d=552, 35d=840)`,
+        );
+      }
+      if (options.flows && hours > MAX_DEMAND_PROXY_WINDOW_HOURS) {
+        throw new CliError(
+          "INVALID_INPUT",
+          "--flows is not valid with a realized window (--window-hours > 168)",
+        );
       }
       const windowSeconds = hours * 3600;
       const nowSeconds = Math.floor(Date.now() / 1000);
-      // Load samples from the earliest needed bound (prior start vs 7d reference).
-      const lookbackStart = Math.min(
-        nowSeconds - windowSeconds * 2,
-        nowSeconds - 7 * 24 * 3600,
-      );
+      // Do not rewrite: Math.min of past timestamps == now - max(2W, 7d).
+      const lookbackStart = demandLookbackStart(nowSeconds, windowSeconds);
 
       const store = new Storage(config.storage.sqlitePath);
       try {

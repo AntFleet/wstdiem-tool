@@ -234,11 +234,21 @@ These commands do **not** use the SPEC004 danger ladder (advisory `0`/`1` only).
 ### 6.1 Demand proxy — NAV-ratchet velocity
 
 ```sh
-node dist/cli/index.js loop demand              # default 72h window
+node dist/cli/index.js loop demand              # default 72h demand-proxy
 node dist/cli/index.js loop demand --window-hours 24 --json
+node dist/cli/index.js loop demand --window-hours 552 --from-chain   # 23d REALIZED
+node dist/cli/index.js loop demand --window-hours 840 --from-chain   # 35d REALIZED
 ```
 
-Short-window **NAV** growth (not totalAssets — deposits do not move NAV). Coincident proxy of inference demand, **not** AskSurplus itself and **not** a yield promise. Flat NAV ≠ “zero demand” (harvest lag). Needs SQLite samples from prior **`watch --once`** runs (`status` / `monitor` do not insert `metric_snapshots`).
+`--window-hours` is **hours** (1..840). `35` is 35 hours, not 35 days (23d=552, 35d=840).
+1..168 = demand-proxy (SPEC008 v1). 169..840 = **REALIZED NAV growth** (`authoritative` always no;
+not a forward yield). `--flows` is refused on realized windows.
+
+**1..168h** is the demand-proxy: short-window **NAV** growth (not totalAssets — deposits do not move NAV). Coincident proxy of inference demand, **not** AskSurplus itself and **not** a yield promise. Flat NAV ≠ “zero demand” (harvest lag).
+
+**169..840h** is a holding-period REALIZED NAV print, not a demand signal and not a forward yield. `authoritative` is always no.
+
+Needs SQLite samples from prior **`watch --once`** runs (`status` / `monitor` do not insert `metric_snapshots`).
 
 > **Keeper is intermittent — read `loop demand` accordingly (verified 2026-07-13).** The keeper does not run on a steady cadence (a 15-day outage Jun 20 – Jul 5, a catch-up burst Jul 11–13, then frozen ~48h). NAV is **lumpy**: a burst annualizes to an absurd rate; a freeze reads ~0. Neither is steady-state. Prefer a **conservative ~0.1 DIEM/day base rate**, require the window to span **≥1 catch-up event**, and frame bursts as *catch-up*, not acceleration.
 

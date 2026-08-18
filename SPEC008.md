@@ -2,7 +2,10 @@
 
 **Status: REVIEWED + LOCKED (2026-07-13).** Two-agent pre-code gate (technical critic REVISE + product
 analyst ACCEPT-WITH-RESERVATIONS) → fixes folded → focused confirmation ACCEPT-WITH-RESERVATIONS →
-residual Majors M1–M5 folded → LOCKED. Ready for implementation.
+residual Majors M1–M5 folded → LOCKED.
+
+**rev-2 (2026-08-18):** §1 / §3.2 / §4 / §5 / AC10 + the rev-2 section are REVIEWED + FOLDED.
+v1 1..168 demand-proxy behavior stays LOCKED.
 
 > **Forward spec** (authored before implementation; acceptance criteria = the tests to write).
 > **Conforms to** B-2 vault APY window patterns and SPEC001 A3 (decision-support only). **v1 = NAV
@@ -30,10 +33,13 @@ Today the only yield surface for sizing is B-2's **single lagging 7-day** window
 SPEC004 codes; brief attach (OQ-B = no); monitor alerts (OQ-D = no); X/funds/broadcast.
 
 **Lexicon (normative).**
-- Use **"NAV-ratchet yield velocity (demand proxy)"** in banners, table headers, paste lines.
-- Ban: bare column “Demand”, “AskSurplus demand is…”, “leading AskSurplus”, “realized APY you will
-  earn”, “demand is up”, “size larger”, “demand collapsed”.
-- vs AskSurplus: **coincident/lagging proxy** (never leading).
+- `windowKind === "demand-proxy"` (W ≤ 168h): **"NAV-ratchet yield velocity (demand proxy)"** in
+  banners, table headers, paste lines (v1, byte-stable).
+- `windowKind === "realized"` (W > 168h): **"REALIZED NAV growth"** only — never “demand proxy”.
+- Ban (both kinds): bare column “Demand”, “AskSurplus demand is…”, “leading AskSurplus”, “realized
+  APY you will earn”, “demand is up”, “size larger”, “demand collapsed”, `7-12`, `21%`, `56%`,
+  `will earn`, `marketed`.
+- vs AskSurplus: **coincident/lagging proxy** (never leading) — demand-proxy kind only.
 - vs B-2 7d: **shorter-window yield-accrual signal** (not “leading demand”).
 
 ## 2. Why NAV, not totalAssets (load-bearing)
@@ -97,8 +103,9 @@ priorEnd = currentStart
 priorStart = currentStart - W
 ```
 
-CLI `--window-hours <n>`: **integer** 1..168 (reuse strict integer parse). Default **72**.
-Outside → `INVALID_INPUT`.
+CLI `--window-hours <n>`: **integer** 1..840 (reuse strict integer parse). Default **72**.
+Outside → `INVALID_INPUT`. See **rev-2** for the 169..840 realized-window split.
+1..168 is unchanged demand-proxy behavior (old cap).
 
 When `windowSeconds ≤ 48h` (172_800): always push caveat `short-window-noisy` and force
 `authoritative: false` (§6).
@@ -234,9 +241,12 @@ interface DemandWindow {
   velocity: number | null;
 }
 
+type DemandWindowKind = "demand-proxy" | "realized";
+
 interface LoopDemandResult {
   nowSeconds: number;
   windowSeconds: number;
+  windowKind: DemandWindowKind; // derived in buildLoopDemand: W<=168h → demand-proxy else realized
   current: DemandWindow;
   prior: DemandWindow;
   reference7d: DemandWindow; // always materialize (status may be not-ok)
@@ -244,13 +254,13 @@ interface LoopDemandResult {
   accelerationGloss: string | null;
   creditInflowDiemCurrent: string | null;
   sampleSource: "sqlite" | "sqlite+live-tip";
-  // Paste safety
-  headlineLabel: "nav-ratchet-yield-velocity-bps-annualized-proxy";
-  pasteLine: string; // see exact template below
-  // Honesty
+  headlineLabel:
+    | "nav-ratchet-yield-velocity-bps-annualized-proxy" // demand-proxy
+    | "realized-nav-growth-bps-annualized-simple";      // realized
+  pasteLine: string;
   decisionSupportOnly: true;
   notAYieldPromise: true;
-  demandKind: "nav-ratchet-yield-velocity-proxy";
+  demandKind: "nav-ratchet-yield-velocity-proxy" | "realized-nav-growth";
   modelCaveats: string[];
   disclaimer: string;
   warnings: string[];
@@ -258,27 +268,38 @@ interface LoopDemandResult {
 }
 ```
 
-**`pasteLine` template (exact when current ok):**
+`windowKind = windowSeconds <= 168 * 3600 ? "demand-proxy" : "realized"` inside
+`buildLoopDemand` (not CLI-only).
+
+**`pasteLine` — demand-proxy (exact when current ok; v1, byte-stable):**
 
 > `NAV-ratchet yield velocity (demand proxy): {velocityBps} bps annualized simple over observed {observedHours}h span (configured window {configuredHours}h; window growth {windowGrowthBps} bps) — not AskSurplus demand; not a yield promise; decision-support only`
 
-- `observedHours = round(spanSeconds / 3600)` (from current window).
-- `configuredHours = windowSeconds / 3600`.
-- When current not ok: same skeleton with `n/a` for numeric slots.
+**`pasteLine` — realized (exact when current ok):**
 
-**`disclaimer` (fixed):**
+> `REALIZED NAV growth (annualized simple, not a forward yield): {velocityBps} bps ({pct}%) over observed {observedHours}h (configured {configuredHours}h; window growth {windowGrowthBps} bps; samples {sampleCount}) — not AskSurplus demand; not a yield promise; decision-support only`
+
+- `observedHours = round(spanSeconds / 3600)`.
+- `configuredHours = windowSeconds / 3600`.
+- `pct = (velocityBps / 100).toFixed(2)` (e.g. 566 → `5.66`). JSON stays `velocityBps` only.
+- Not-ok demand-proxy: v1 skeleton with `n/a` slots.
+- Not-ok realized: `REALIZED NAV growth (annualized simple, not a forward yield): n/a bps over observed n/a (configured {configuredHours}h; window growth n/a; samples {sampleCount}) — not AskSurplus demand; not a yield promise; decision-support only`
+
+**`disclaimer` — demand-proxy (v1, fixed):**
 
 > `"NAV-ratchet yield velocity is an on-chain coincident proxy of inference demand (vault share-price growth), not AskSurplus demand itself and not a yield promise. Short windows are noisy; harvest cadence is irregular; flat NAV is not zero AskSurplus activity. Deposits do not move NAV — this series isolates yield from flows. Decision-support only; the operator must decide out-of-band."`
 
-**`modelCaveats`:** `nav-not-total-assets`, `short-window-noisy` (when ≤48h), `irregular-harvest-cadence`,
-`proxy-not-asksurplus`, `simple-annualization-observed-span`, `requires-sqlite-history`,
-`spec008-v1-no-harvest-reconcile`, `flat-nav-not-zero-demand` (when applicable).
+**`disclaimer` — realized (fixed):**
+
+> `"REALIZED NAV growth is a holding-period share-price change annualized on the observed span, not a forward yield promise and not a demand signal. Harvest/keeper credits are lumpy; deposits do not move NAV. Decision-support only; the operator must decide out-of-band."`
+
+**`modelCaveats`:** v1 set, plus `realized-holding-period-not-demand-proxy` when realized.
 
 ## 5. CLI & integration
 
 ```text
 loop demand
-  --window-hours <n>   # integer 1..168; default 72
+  --window-hours <n>   # integer 1..840; default 72; 169..840 = realized (rev-2)
   --json
   --from-chain         # optional live tip append (memory only)
 ```
@@ -345,7 +366,8 @@ demoting warnings. 24h opt-in is always non-authoritative (≤48h rule).
 7. Prior missing → `accelerationBps === null` (not 0).
 8. JSON: nav strings; pasteLine present; honesty fields; no outcome/exitCode.
 9. Offline empty DB → exit 0, n/a; with samples → numbers; hermetic env.
-10. `--window-hours` 0 or 200 → INVALID_INPUT exit 1; non-integer rejected.
+10. `--window-hours` 0 or **841** → INVALID_INPUT exit 1; non-integer rejected. **200 is valid
+    (rev-2 realized).** 168 remains valid demand-proxy.
 11. Live tip uses convertToAssets; mismatch demotes; invalid tip skipped.
 12. Boundary: no double-count at windowStart; prior density ignores current samples.
 13. Ok+0 velocity → `flat-nav-not-zero-demand` warning.
@@ -377,3 +399,76 @@ demoting warnings. 24h opt-in is always non-authoritative (≤48h rule).
 |---|---|---|---|
 | Pre-code #1 | technical critic + product analyst | REVISE + AWR | Invalid sample filter; density=2 + min span 3600; default 72h; convertToAssets tip; prior density end-bound; invalid-nav status; authoritative predicate + demoting codes; pasteLine/windowGrowthBps; flat-zero gloss; accel gloss; credit predicate; no brief; ban list ACs |
 | Confirmation | focused critic | **ACCEPT-WITH-RESERVATIONS** | M1 density counts pre-start anchor; M2 navEnd→insufficient-samples + status order; M3 paste observed vs configured hours + authoritative min span coverage; M4 flat-nav not demoting; M5 flat text in warnings not accelerationGloss |
+
+## rev-2 — realized window (2026-08-18)
+
+**Status: REVIEWED + FOLDED (critic REVISE + analyst REVISE).** Amends §1 / §3.2 / §4 / §5 / AC10.
+Does **not** change NAV-only math, invalid-sample filter, default 72h, `--from-chain` tip,
+brief attach, or `exitCode.ts`. SPEC011 stays PARKED.
+
+### Split
+
+```
+MAX_DEMAND_PROXY_WINDOW_HOURS = 168
+MAX_WINDOW_HOURS              = 840   // 35 × 24 hours
+DEFAULT_VELOCITY_WINDOW_HOURS = 72    // unchanged
+```
+
+| hours | `windowKind` | Notes |
+|---|---|---|
+| 1..168 | `demand-proxy` | v1 paste/banner/disclaimer/`authoritative` §6 **byte-stable** |
+| 169..840 | `realized` | Holding-period print. **`authoritative` always false** |
+| else | — | `INVALID_INPUT` |
+
+Unit is **hours**. `35` = 35h demand-proxy. 23d = **552**, 35d = **840**. Help must say so.
+
+`--flows` + realized → `INVALID_INPUT` (mixed-kind screenshot). `--since` deferred.
+
+### Math / lookback
+
+`computeDemandWindow` unchanged. **Do not rewrite** CLI lookback:
+
+```
+lookbackStart = Math.min(now - 2W, now - 7d)   // == now - max(2W, 7d)
+```
+
+W=72 → lookback 168h. W=168 → 336h. W=840 → 1680h. Pass that start into
+`listNavSamplesForWindow` (no new LIMIT).
+
+### Realized honesty
+
+- `authoritative === false` always (arithmetic may be ok; the stamp is not a run-rate).
+- New disclaimer (do **not** lead with v1 “proxy of inference demand”).
+- Paste includes `samples {n}` + observed vs configured hours + bps and `(X.XX%)`.
+- `current.sampleCount < 4` → warning `sparse-realized-window` (does not change authoritative).
+- Entire human output (banner + table + paste) contains no `demand proxy`.
+- Table: headline `REALIZED NAV growth bps`; prior/accel/7d rows still render but labels drop
+  `(proxy)` (`Prior NAV growth bps`, `Acceleration`, `Reference 7d NAV growth`).
+- Demand-proxy §6 predicate is an **untouched branch** (`windowKind === "demand-proxy"` only).
+
+### Out of scope
+
+SPEC011; B-2 vault APY; `--since`; sqlite reset; compound APY field.
+
+### Acceptance (add)
+
+24. Default 72; 168 → `demand-proxy`, v1 paste **toBe** pinned fixture; banner contains
+    `demand proxy`; `authoritative` still requires prior (§6).
+25. 169 and 200 → `windowKind === "realized"`, `demandKind === "realized-nav-growth"`,
+    `authoritative === false`; **full stdout** starts from realized disclaimer / paste
+    `REALIZED NAV growth`; stdout contains no `demand proxy`.
+26. 552 and 840 accepted; 0, 841, non-integer → exit 1. **35 accepted** as 35h demand-proxy
+    (v1 paste, `short-window-noisy`).
+27. Realized + no pre-start anchor → `no-anchor`, null velocities.
+28. Realized + anchor + endpoint, span ≥ 3600 → current ok; prior may be not-ok;
+    `accelerationBps` null if prior not ok; `authoritative === false`.
+29. Realized 840h, 3 samples, 9d gap, span ≥ 7d, prior missing → current ok,
+    `sparse-realized-window`, **`authoritative === false`**, paste contains `samples 3`.
+    Demand-proxy 72h prior missing → `authoritative === false` (unchanged).
+30. Realized deposit-doubles-assets → velocity ≈ 0.
+31. Lookback: W=840 → `now-1680h`; W=72 → `now-168h`; W=168 → `now-336h`.
+32. Realized stdout+JSON strings: no `7-12`, `21%`, `56%`, `will earn`, `demand is up`,
+    bare `Demand`, `marketed`. `--help` names hours and `23d=552` / `35d=840`.
+33. `--flows` + `--window-hours 200` → INVALID_INPUT.
+34. 72h, prior ok, both spans = 24h, no demoting → `authoritative === true`, v1 paste.
+

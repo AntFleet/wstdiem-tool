@@ -832,9 +832,13 @@ export function renderLoopDemandTable(result: LoopDemandResult): string {
   const configuredHours = result.windowSeconds / 3600;
   const noise =
     result.windowSeconds <= 48 * 3600 ? " short-window-noisy." : "";
+  const kindLabel =
+    result.windowKind === "realized"
+      ? "REALIZED NAV growth"
+      : "NAV-ratchet yield velocity (demand proxy)";
   const banner =
     `${result.disclaimer}\n` +
-    `[${result.sampleSource}] NAV-ratchet yield velocity (demand proxy) · configured ${configuredHours}h · ` +
+    `[${result.sampleSource}] ${kindLabel} · configured ${configuredHours}h · ` +
     `authoritative ${result.authoritative ? "yes" : "no"}.${noise}\n` +
     result.pasteLine;
 
@@ -851,12 +855,16 @@ export function renderLoopDemandTable(result: LoopDemandResult): string {
     result.current.spanSeconds === null
       ? "n/a"
       : `${Math.round(result.current.spanSeconds / 3600)}h observed`;
+  const realized = result.windowKind === "realized";
   table.push(
-    ["NAV velocity (proxy) bps", `${fmtVel(result.current.velocityBps)} @ ${observedH} (configured ${configuredHours}h)`],
-    ["Window growth (non-annualized)", fmtGrowth(result.current.windowGrowthBps)],
-    ["Prior velocity (proxy) bps", fmtVel(result.prior.velocityBps)],
     [
-      "Acceleration (proxy)",
+      realized ? "REALIZED NAV growth bps" : "NAV velocity (proxy) bps",
+      `${fmtVel(result.current.velocityBps)} @ ${observedH} (configured ${configuredHours}h)`,
+    ],
+    ["Window growth (non-annualized)", fmtGrowth(result.current.windowGrowthBps)],
+    [realized ? "Prior NAV growth bps" : "Prior velocity (proxy) bps", fmtVel(result.prior.velocityBps)],
+    [
+      realized ? "Acceleration" : "Acceleration (proxy)",
       result.accelerationBps === null
         ? "n/a"
         : `${result.accelerationBps} bps${result.accelerationGloss ? ` (${result.accelerationGloss})` : ""}`,
@@ -864,7 +872,7 @@ export function renderLoopDemandTable(result: LoopDemandResult): string {
     ["Current window status", `${result.current.status} · samples ${result.current.sampleCount}`],
     ["Prior window status", `${result.prior.status} · samples ${result.prior.sampleCount}`],
     [
-      "Reference 7d velocity",
+      realized ? "Reference 7d NAV growth" : "Reference 7d velocity",
       result.reference7d.status === "ok"
         ? fmtVel(result.reference7d.velocityBps)
         : `n/a (${result.reference7d.status})`,
@@ -884,7 +892,19 @@ export function renderLoopDemandTable(result: LoopDemandResult): string {
     ["Warnings", result.warnings.length === 0 ? "none" : result.warnings.join("; ")],
   );
 
-  const ban = ["deploy up to", "AskSurplus demand is", "demand is up", "size larger", "demand collapsed"];
+  const ban = [
+    "deploy up to",
+    "AskSurplus demand is",
+    "demand is up",
+    "size larger",
+    "demand collapsed",
+    "7-12",
+    "will earn",
+    "marketed",
+  ];
+  if (result.windowKind === "realized") {
+    ban.push("demand proxy");
+  }
   const out = `${banner}\n${table.toString()}`;
   for (const phrase of ban) {
     if (out.toLowerCase().includes(phrase.toLowerCase())) {

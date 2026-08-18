@@ -4,8 +4,14 @@ import { ratio, SECONDS_PER_YEAR } from "./math.js";
 /** Default headline window: 72 hours (SPEC008 OQ-A). */
 export const DEFAULT_VELOCITY_WINDOW_HOURS = 72;
 export const DEFAULT_VELOCITY_WINDOW_SECONDS = DEFAULT_VELOCITY_WINDOW_HOURS * 3600;
+/** 1..this hours stay demand-proxy (SPEC008 v1). */
+export const MAX_DEMAND_PROXY_WINDOW_HOURS = 168;
+/** Absolute --window-hours cap (35d). 169..840 = realized. */
+export const MAX_WINDOW_HOURS = 840;
 /** Endpoint math minimum (not B-2's TWA floor of 4). */
 export const MIN_DEMAND_WINDOW_SAMPLES = 2;
+/** Realized density warning floor (non-demoting). */
+export const MIN_REALIZED_DENSE_SAMPLES = 4;
 /** Prevent dust-span annualization explosions. */
 export const MIN_SPAN_SECONDS = 3600;
 /** Windows at or below this force non-authoritative + short-window-noisy. */
@@ -39,9 +45,12 @@ export interface DemandWindow {
   velocity: number | null;
 }
 
+export type DemandWindowKind = "demand-proxy" | "realized";
+
 export interface LoopDemandResult {
   nowSeconds: number;
   windowSeconds: number;
+  windowKind: DemandWindowKind;
   current: DemandWindow;
   prior: DemandWindow;
   reference7d: DemandWindow;
@@ -49,11 +58,13 @@ export interface LoopDemandResult {
   accelerationGloss: string | null;
   creditInflowDiemCurrent: string | null;
   sampleSource: "sqlite" | "sqlite+live-tip";
-  headlineLabel: "nav-ratchet-yield-velocity-bps-annualized-proxy";
+  headlineLabel:
+    | "nav-ratchet-yield-velocity-bps-annualized-proxy"
+    | "realized-nav-growth-bps-annualized-simple";
   pasteLine: string;
   decisionSupportOnly: true;
   notAYieldPromise: true;
-  demandKind: "nav-ratchet-yield-velocity-proxy";
+  demandKind: "nav-ratchet-yield-velocity-proxy" | "realized-nav-growth";
   modelCaveats: string[];
   disclaimer: string;
   warnings: string[];
@@ -65,6 +76,19 @@ export const DEMAND_DISCLAIMER =
 
 export const DEMAND_KIND = "nav-ratchet-yield-velocity-proxy" as const;
 export const HEADLINE_LABEL = "nav-ratchet-yield-velocity-bps-annualized-proxy" as const;
+export const REALIZED_DEMAND_KIND = "realized-nav-growth" as const;
+export const REALIZED_HEADLINE_LABEL = "realized-nav-growth-bps-annualized-simple" as const;
+
+export const REALIZED_DISCLAIMER =
+  "REALIZED NAV growth is a holding-period share-price change annualized on the observed span, not a forward yield promise and not a demand signal. Harvest/keeper credits are lumpy; deposits do not move NAV. Decision-support only; the operator must decide out-of-band.";
+
+export function windowKindForSeconds(windowSeconds: number): DemandWindowKind {
+  return windowSeconds <= MAX_DEMAND_PROXY_WINDOW_HOURS * 3600 ? "demand-proxy" : "realized";
+}
+
+export function demandLookbackStart(nowSeconds: number, windowSeconds: number): number {
+  return Math.min(nowSeconds - windowSeconds * 2, nowSeconds - 7 * 24 * 3600);
+}
 
 const DEMOTING_CODES = new Set([
   "short-window-noisy",
@@ -248,8 +272,23 @@ export function accelerationGlossFor(
 function buildPasteLine(
   current: DemandWindow,
   windowSeconds: number,
+  windowKind: DemandWindowKind,
 ): string {
   const configuredHours = windowSeconds / 3600;
+  if (windowKind === "realized") {
+    if (current.status !== "ok" || current.velocityBps === null || current.spanSeconds === null) {
+      return (
+        `REALIZED NAV growth (annualized simple, not a forward yield): n/a bps over observed n/a ` +
+        `(configured ${configuredHours}h; window growth n/a; samples ${current.sampleCount}) — not AskSurplus demand; not a yield promise; decision-support only`
+      );
+    }
+    const observedHours = Math.round(current.spanSeconds / 3600);
+    const pct = (current.velocityBps / 100).toFixed(2);
+    return (
+      `REALIZED NAV growth (annualized simple, not a forward yield): ${current.velocityBps} bps (${pct}%) over observed ${observedHours}h ` +
+      `(configured ${configuredHours}h; window growth ${current.windowGrowthBps} bps; samples ${current.sampleCount}) — not AskSurplus demand; not a yield promise; decision-support only`
+    );
+  }
   if (current.status !== "ok" || current.velocityBps === null || current.spanSeconds === null) {
     return (
       `NAV-ratchet yield velocity (demand proxy): n/a bps annualized simple over observed n/a span ` +
@@ -296,6 +335,7 @@ export function buildLoopDemand(input: BuildLoopDemandInput): LoopDemandResult {
     extraWarnings = [],
   } = input;
 
+  const windowKind = windowKindForSeconds(windowSeconds);
   const currentStart = nowSeconds - windowSeconds;
   const priorStart = currentStart - windowSeconds;
 
@@ -316,6 +356,12 @@ export function buildLoopDemand(input: BuildLoopDemandInput): LoopDemandResult {
     "requires-sqlite-history",
     "spec008-v1-no-harvest-reconcile",
   ]);
+  if (windowKind === "realized") {
+    modelCaveats.add("realized-holding-period-not-demand-proxy");
+    if (current.status === "ok" && current.sampleCount < MIN_REALIZED_DENSE_SAMPLES) {
+      warnings.push("sparse-realized-window");
+    }
+  }
 
   if (windowSeconds <= SHORT_WINDOW_NOISY_SECONDS) {
     warnings.push("short-window-noisy");
@@ -376,18 +422,21 @@ export function buildLoopDemand(input: BuildLoopDemandInput): LoopDemandResult {
   );
 
   const authoritative =
-    current.status === "ok" &&
-    prior.status === "ok" &&
-    windowSeconds > SHORT_WINDOW_NOISY_SECONDS &&
-    current.spanSeconds !== null &&
-    prior.spanSeconds !== null &&
-    current.spanSeconds >= minAuthoritativeSpan &&
-    prior.spanSeconds >= minAuthoritativeSpan &&
-    !demotingHit;
+    windowKind === "realized"
+      ? false
+      : current.status === "ok" &&
+        prior.status === "ok" &&
+        windowSeconds > SHORT_WINDOW_NOISY_SECONDS &&
+        current.spanSeconds !== null &&
+        prior.spanSeconds !== null &&
+        current.spanSeconds >= minAuthoritativeSpan &&
+        prior.spanSeconds >= minAuthoritativeSpan &&
+        !demotingHit;
 
   return {
     nowSeconds,
     windowSeconds,
+    windowKind,
     current,
     prior,
     reference7d,
@@ -395,13 +444,13 @@ export function buildLoopDemand(input: BuildLoopDemandInput): LoopDemandResult {
     accelerationGloss,
     creditInflowDiemCurrent,
     sampleSource,
-    headlineLabel: HEADLINE_LABEL,
-    pasteLine: buildPasteLine(current, windowSeconds),
+    headlineLabel: windowKind === "realized" ? REALIZED_HEADLINE_LABEL : HEADLINE_LABEL,
+    pasteLine: buildPasteLine(current, windowSeconds, windowKind),
     decisionSupportOnly: true,
     notAYieldPromise: true,
-    demandKind: DEMAND_KIND,
+    demandKind: windowKind === "realized" ? REALIZED_DEMAND_KIND : DEMAND_KIND,
     modelCaveats: [...modelCaveats],
-    disclaimer: DEMAND_DISCLAIMER,
+    disclaimer: windowKind === "realized" ? REALIZED_DISCLAIMER : DEMAND_DISCLAIMER,
     warnings,
     authoritative,
   };

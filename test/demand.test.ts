@@ -4,13 +4,15 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { stringifyJson } from "../src/cli/output.js";
+import { renderLoopDemandTable, stringifyJson } from "../src/cli/output.js";
 import {
   buildLoopDemand,
   computeDemandWindow,
   countDemandSamples,
   DEFAULT_VELOCITY_WINDOW_HOURS,
+  demandLookbackStart,
   isValidNavSample,
+  MAX_WINDOW_HOURS,
   MIN_SPAN_SECONDS,
   navGrowthFraction,
   type NavSample,
@@ -344,11 +346,165 @@ describe("SPEC008 loop demand CLI", () => {
     await expect(
       execFileAsync(
         "node",
-        ["dist/cli/index.js", "--config", configPath, "loop", "demand", "--window-hours", "200"],
+        ["dist/cli/index.js", "--config", configPath, "loop", "demand", "--window-hours", "841"],
         { env: offlineEnv(), cwd: process.cwd() },
       ),
     ).rejects.toMatchObject({ code: 1 });
+
+    const realizedEmpty = await execFileAsync(
+      "node",
+      ["dist/cli/index.js", "--config", configPath, "loop", "demand", "--window-hours", "200", "--json"],
+      { env: offlineEnv(), cwd: process.cwd() },
+    );
+    const realizedEnv = JSON.parse(realizedEmpty.stdout);
+    expect(realizedEnv.ok).toBe(true);
+    expect(realizedEnv.data.windowKind).toBe("realized");
+    expect(realizedEnv.data.authoritative).toBe(false);
+
+    await expect(
+      execFileAsync(
+        "node",
+        [
+          "dist/cli/index.js",
+          "--config",
+          configPath,
+          "loop",
+          "demand",
+          "--window-hours",
+          "200",
+          "--flows",
+        ],
+        { env: offlineEnv(), cwd: process.cwd() },
+      ),
+    ).rejects.toMatchObject({ code: 1 });
+
+    const help = await execFileAsync(
+      "node",
+      ["dist/cli/index.js", "loop", "demand", "--help"],
+      { env: offlineEnv(), cwd: process.cwd() },
+    );
+    expect(help.stdout).toContain("23d=552");
+    expect(help.stdout).toContain("35d=840");
+    expect(help.stdout.toLowerCase()).toContain("hours");
+
+    const h35 = await execFileAsync(
+      "node",
+      ["dist/cli/index.js", "--config", configPath, "loop", "demand", "--window-hours", "35", "--json"],
+      { env: offlineEnv(), cwd: process.cwd() },
+    );
+    expect(JSON.parse(h35.stdout).data.windowKind).toBe("demand-proxy");
+
+    const h840 = await execFileAsync(
+      "node",
+      ["dist/cli/index.js", "--config", configPath, "loop", "demand", "--window-hours", "840", "--json"],
+      { env: offlineEnv(), cwd: process.cwd() },
+    );
+    expect(JSON.parse(h840.stdout).data.windowKind).toBe("realized");
+    expect(JSON.parse(h840.stdout).data.authoritative).toBe(false);
   },
     30_000,
   );
+
+  it("rev-2 AC24/34: 72h and 168h stay demand-proxy; 72h 24h-span prior-ok is authoritative", () => {
+    const now = 10_000_000;
+    const W = 72 * 3600;
+    const nav0 = WAD;
+    const nav1 = WAD + 10n ** 15n;
+    const nav2 = nav1 + 10n ** 15n;
+    const samples = [
+      sample(now - 2 * W, nav0),
+      sample(now - W, nav1),
+      sample(now, nav2),
+    ];
+    const result = buildLoopDemand({ samples, nowSeconds: now, windowSeconds: W });
+    expect(result.windowKind).toBe("demand-proxy");
+    expect(result.demandKind).toBe("nav-ratchet-yield-velocity-proxy");
+    expect(result.pasteLine).toBe(
+      `NAV-ratchet yield velocity (demand proxy): ${result.current.velocityBps} bps annualized simple over observed ${Math.round((result.current.spanSeconds as number) / 3600)}h span (configured window 72h; window growth ${result.current.windowGrowthBps} bps) — not AskSurplus demand; not a yield promise; decision-support only`,
+    );
+    expect(result.authoritative).toBe(true);
+
+    const w168 = 168 * 3600;
+    const thin168 = buildLoopDemand({
+      samples: [sample(now - 48 * 3600, nav0), sample(now, nav1)],
+      nowSeconds: now,
+      windowSeconds: w168,
+    });
+    expect(thin168.windowKind).toBe("demand-proxy");
+    expect(thin168.authoritative).toBe(false);
+  });
+
+  it("rev-2 AC25/28/29: 169h+ is realized, never authoritative, sparse warning", () => {
+    const now = 10_000_000;
+    const W = 840 * 3600;
+    const samples = [
+      sample(now - W, WAD),
+      sample(now - 9 * 86400, WAD + 10n ** 15n),
+      sample(now, WAD + 2n * 10n ** 15n),
+    ];
+    const result = buildLoopDemand({ samples, nowSeconds: now, windowSeconds: W });
+    expect(result.windowKind).toBe("realized");
+    expect(result.demandKind).toBe("realized-nav-growth");
+    expect(result.headlineLabel).toBe("realized-nav-growth-bps-annualized-simple");
+    expect(result.authoritative).toBe(false);
+    expect(result.current.status).toBe("ok");
+    expect(result.warnings).toContain("sparse-realized-window");
+    expect(result.pasteLine.startsWith("REALIZED NAV growth")).toBe(true);
+    expect(result.pasteLine).toContain(`samples ${result.current.sampleCount}`);
+    expect(result.pasteLine.toLowerCase()).not.toContain("demand proxy");
+    expect(result.disclaimer.toLowerCase()).not.toContain("demand proxy");
+    expect(result.disclaimer.startsWith("REALIZED NAV growth")).toBe(true);
+
+    const human = renderLoopDemandTable(result);
+    expect(human.toLowerCase()).not.toContain("demand proxy");
+    expect(human).toContain("REALIZED NAV growth");
+    for (const banned of ["7-12", "will earn", "marketed", "demand is up"]) {
+      expect(human.toLowerCase()).not.toContain(banned);
+    }
+  });
+
+  it("rev-2 AC26/32 help: 35h is demand-proxy; 552/840 realized; lookback algebra", () => {
+    expect(MAX_WINDOW_HOURS).toBe(840);
+    const now = 50_000_000;
+    const h35 = buildLoopDemand({
+      samples: [sample(now - 40 * 3600, WAD), sample(now, WAD + 10n ** 15n)],
+      nowSeconds: now,
+      windowSeconds: 35 * 3600,
+    });
+    expect(h35.windowKind).toBe("demand-proxy");
+    expect(h35.warnings.some((w) => w.includes("short-window-noisy"))).toBe(true);
+
+    expect(demandLookbackStart(now, 72 * 3600)).toBe(now - 168 * 3600);
+    expect(demandLookbackStart(now, 168 * 3600)).toBe(now - 336 * 3600);
+    expect(demandLookbackStart(now, 840 * 3600)).toBe(now - 1680 * 3600);
+  });
+
+  it("rev-2 AC27: realized with no anchor does not fabricate bps", () => {
+    const now = 8_000_000;
+    const result = buildLoopDemand({
+      samples: [sample(now - 1000, WAD + 1n)],
+      nowSeconds: now,
+      windowSeconds: 552 * 3600,
+    });
+    expect(result.windowKind).toBe("realized");
+    expect(result.current.status).toBe("no-anchor");
+    expect(result.current.velocityBps).toBeNull();
+    expect(result.authoritative).toBe(false);
+  });
+
+  it("rev-2 AC30: realized deposit-doubles-assets still NAV-only ~0", () => {
+    const now = 9_000_000;
+    const W = 200 * 3600;
+    const result = buildLoopDemand({
+      samples: [
+        sample(now - W - 3600, WAD, 100n * WAD),
+        sample(now, WAD, 200n * WAD),
+      ],
+      nowSeconds: now,
+      windowSeconds: W,
+    });
+    expect(result.windowKind).toBe("realized");
+    expect(result.current.status).toBe("ok");
+    expect(result.current.velocityBps).toBe(0);
+  });
 });

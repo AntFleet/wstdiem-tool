@@ -445,7 +445,13 @@ revert-vs-transport isolation (`Promise.allSettled`), wallet `balanceOf`/`conver
 **SHIPPED @89dd85d** on `main` (ff from `feature/spec010-core`): core impl `6bdadf3` + auditor C/H/M close-out
 `89dd85d`. Three-lane Codex re-audit CLEAN (0 C/H/M). Build clean; suite **374/374**.
 
-## Phase 12 — SPEC003 rev-4 (Morpho leftover / dust floor) — IN PROGRESS (2026-08-18)
+## Phase 13 — SPEC008 rev-2 (realized window 169..840h) — IN PROGRESS (2026-08-18)
+
+`--window-hours` cap 168 → 840. 1..168 stays demand-proxy (byte-stable). 169..840 is
+`windowKind=realized`: REALIZED NAV growth paste/disclaimer, `authoritative` always false,
+`--flows` rejected. Unit is hours (23d=552, 35d=840). SPEC011 stays PARKED.
+
+## Phase 12 — SPEC003 rev-4 (Morpho leftover / dust floor) — SHIPPED @085087a (2026-08-18)
 
 `--from-chain` treats Morpho `totalSupplyAssets < 10^15` (0.001 DIEM) as **not currently
 enterable**: `FROM_CHAIN_SEED_BLOCKED` **before** any Curve read, locked screenshot string,
