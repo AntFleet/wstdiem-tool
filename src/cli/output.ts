@@ -1162,7 +1162,7 @@ export function renderDiemLedgerTable(result: DiemLedgerResult): string {
   const lines = [result.banner, result.disclaimer, `Window ${result.windowHours}h. Not advice.`];
 
   const util = result.utilization;
-  const utilization = new Table({ head: ["Capacity utilization", "Value"], wordWrap: true });
+  const utilization = new Table({ head: ["Venice credit utilization", "Value"], wordWrap: true });
   const ratioCell =
     util.status === "ok" && util.ratioBps !== null
       ? `${(util.ratioBps / 100).toFixed(2)}% (${util.ratioBps} bps)`
@@ -1185,10 +1185,10 @@ export function renderDiemLedgerTable(result: DiemLedgerResult): string {
     ["Estimated Venice USD/day if spent", util.estimatedVeniceUsdPerDay ?? "n/a"],
     ["Venice semantics", util.veniceCreditSemantics],
     [
-      "Tier 2 USDC settled as-reported (NOT inference demand)",
+      "Tier 2 SettlementReceived USDC (as-reported, not external demand)",
       formatUsdcRaw(util.tier2Context.windowUsdcSettledAsReported),
     ],
-    ["Tier 2 YieldRouted DIEM (context)", formatDiemWad(util.tier2Context.windowDiemFromYieldRouted)],
+    ["Tier 2 YieldRouted DIEM (context, not external demand)", formatDiemWad(util.tier2Context.windowDiemFromYieldRouted)],
     ["Unrouted USDC (state fact, not demand)", formatUsdcRaw(util.tier2Context.unroutedUsdc)],
   );
   lines.push(utilization.toString());

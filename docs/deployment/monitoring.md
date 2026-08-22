@@ -2,6 +2,8 @@
 
 > **Start here for the full operator on-ramp:** [operator-runbook.md](./operator-runbook.md)
 > (sizing → monitor exit codes → liquidation → exit rehearsal → intelligence commands).
+>
+> **Terminology:** [resource-ladder.md](./resource-ladder.md) — DIEM, Venice credit, wstDIEM NAV, trust tiers, loop spread, keeper bounds, sizing candidates.
 
 Use the monitor command for a one-shot live dashboard of wstDIEM vault supply/assets, Curve liquidity, Morpho liquidity, deployed executor status, owner position, Morpho authorization, and live liquidation readout (SPEC005).
 
@@ -202,4 +204,4 @@ Prefer the same stable `--config` for write (`sample-tick`) and read (`loop dema
 | No secrets in repo/plist | `BASE_RPC_URL` from `.env` / environment only. |
 | Exit codes | Do not `set -e` around raw `watch --once` in a custom scheduler — map `0/10/20/30` so the schedule continues. |
 | Empty pool | Expected; demand series is pool-independent. |
-| Ledger liveness | `loop ledger` classifies sampling/event age as fresh/stale/lagging/unavailable. A silent `DIEMCredited` window is not proof of no demand — keeper/`routeYield` is lumpy. |
+| Ledger liveness | `loop ledger` classifies sampling/event age as fresh/stale/lagging/unavailable. Venice credit utilization is capacity-if-spent vs Tier 1 `DIEMCredited`; `SettlementReceived` / `YieldRouted` are Tier 2. A silent `DIEMCredited` window is not proof of no demand — keeper/`routeYield` is lumpy. See [resource-ladder.md](./resource-ladder.md). |

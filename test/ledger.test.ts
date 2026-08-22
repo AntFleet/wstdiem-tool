@@ -582,7 +582,12 @@ describe("buildDiemLedger JSON", () => {
 
     const rendered = renderDiemLedgerTable(result);
     expect(rendered).toMatch(/Decision-support only/i);
+    expect(rendered).toMatch(/Venice credit utilization/i);
     expect(rendered).toMatch(/Tier 1/);
+    expect(rendered).toMatch(/SettlementReceived/);
+    expect(rendered).toMatch(/YieldRouted/);
+    expect(rendered).toMatch(/not external demand/);
+    expect(rendered).toMatch(/\$0 token yield if unused/);
     expect(rendered).toMatch(/not proof of no demand|lumpy/i);
     expect(rendered.toLowerCase()).not.toContain("inference volume");
     expect(rendered).toMatch(/6-dec raw/);

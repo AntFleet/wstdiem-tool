@@ -5,6 +5,11 @@
 This roadmap re-establishes a **spec → implementation → verification** discipline for the
 operator CLI. It is grounded in a read-only build audit (2026-07-11) of the as-built tree.
 
+**Canonical terms (2026-08-22):** [docs/deployment/resource-ladder.md](docs/deployment/resource-ladder.md).
+DIEM / Venice credit / rebase-free wstDIEM NAV / `DIEMCredited` (Tier 1) /
+`SettlementReceived`/`YieldRouted` (Tier 2) / loop spread / keeper signed envelope / sizing candidate.
+Locked CLI paste strings in shipped SPECs stay byte-stable; new operator copy must not contradict the ladder.
+
 ## Context (why a refresh, not a rewrite)
 
 The tool is healthy underneath: `typecheck` / `lint` / `build` are clean and **124/125 tests
@@ -392,7 +397,8 @@ never used as market. Two-agent gate + confirmation residuals folded → LOCKED.
 ## Phase 9 — SPEC008 (NAV-ratchet yield velocity / demand proxy) — SHIPPED (2026-07-13)
 
 `SPEC008.md` adds **`loop demand`**: short-window **NAV-only** yield velocity + prior-window acceleration as an
-on-chain coincident **demand proxy** (not AskSurplus, not a yield promise). Default window **72h**; invalid
+on-chain coincident **demand proxy** (not AskSurplus, not a yield promise; unused Venice credit is `$0` token yield;
+flat NAV is not zero demand). Default window **72h**; invalid
 sample filter (empty watch ticks write WAD nav); live tip prefers `convertToAssets`; paste-safe framing;
 `windowGrowthBps` non-annualized; no brief attach; no monitor alerts; `exitCode.ts` untouched.
 
@@ -406,8 +412,8 @@ assets=0/nav=0 sentinels. typecheck/lint/build clean; **300/300** green.
 ## Phase 10 — SPEC009 (attributable inference-demand tracker; SPEC008 refinement) — SHIPPED @36797fa (2026-07-13)
 
 `SPEC009.md` refines SPEC008's NAV-velocity proxy into the **attributable** signal: ingest the on-chain events by
-which inference USDC becomes wstDIEM yield — `InferenceVault.DIEMCredited(adapter, amount)` (per-venue, Tier-1) +
-the adapters' `SettlementReceived`/`YieldRouted` — and report per-adapter USDC settled + DIEM credited, plus the
+which inference USDC becomes wstDIEM NAV — `InferenceVault.DIEMCredited(adapter, amount)` (per-venue, Tier-1) +
+the adapters' `SettlementReceived`/`YieldRouted` (Tier 2 context, not external-demand proof) — and report per-adapter USDC settled + DIEM credited, plus the
 honesty headline: **`inferenceSharePct`** (inference-attributable ÷ realized yield), which honestly reports a low
 share early (base-staking + protocol-seeded yield dominates while bootstrapping — expected) and grows with adoption.
 `loop demand --flows`; read-only, decision-support. Source of truth: `Liquid-Protocol-Ops/liquid-protocol-v0`

@@ -24,7 +24,7 @@ export const DEFAULT_LEDGER_WINDOW_HOURS = 72;
 
 export const LEDGER_BANNER =
   "DIEM resource ledger. Decision-support only; not advice; not a yield promise. " +
-  "Capacity is Venice API credit if spent ($0 token yield if unused).";
+  "Capacity is Venice credit if spent ($0 token yield if unused).";
 
 export const LEDGER_DISCLAIMER =
   "Decision-support only; not investment advice; not a yield promise. " +
@@ -321,7 +321,7 @@ export function ownerHeadlineAmount(owner: LedgerLiveState["owner"] | undefined)
 }
 
 /**
- * Utilization = daily Tier-1 DIEMCredited / vault-staked DIEM daily Venice capacity.
+ * Utilization = daily Tier-1 DIEMCredited / vault-staked DIEM daily Venice credit capacity.
  * Units must both be 18-dec DIEM. Settled USDC is never the numerator.
  */
 export function computeCapacityUtilization(input: {

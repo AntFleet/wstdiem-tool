@@ -7,16 +7,23 @@ residual Majors M1–M5 folded → LOCKED.
 **rev-2 (2026-08-18):** §1 / §3.2 / §4 / §5 / AC10 + the rev-2 section are REVIEWED + FOLDED.
 v1 1..168 demand-proxy behavior stays LOCKED.
 
+**Canonical terms (2026-08-22).** Locked CLI paste strings in this spec stay byte-stable.
+Operator prose uses [docs/deployment/resource-ladder.md](docs/deployment/resource-ladder.md):
+wstDIEM is rebase-free (NAV / `convertToAssets`, not wallet rebasing); Venice credit is `$0` token yield if unused;
+`DIEMCredited` is Tier 1; `SettlementReceived` / `YieldRouted` are Tier 2, not external-demand proof;
+a quiet credit window is not zero demand; `loop demand` is decision-support only, not broadcast or protection.
+
 > **Forward spec** (authored before implementation; acceptance criteria = the tests to write).
 > **Conforms to** B-2 vault APY window patterns and SPEC001 A3 (decision-support only). **v1 = NAV
 > velocity from stored samples** — self-contained. Harvest event reconciliation is **v2 deferred**.
 
 ## 1. Problem & scope
 
-wstDIEM yield is demand-driven real yield downstream of DIEM inference demand (AskSurplus). This tool
-cannot read AskSurplus — and does not need to: the vault's **NAV ratchet** is the on-chain
-**coincident** proxy (never “leading AskSurplus demand”). Yield accrues into NAV; deposits/withdrawals
-change supply and total assets but **not** NAV.
+wstDIEM value is demand-driven NAV growth downstream of monetized Venice credit / inference routing
+(AskSurplus). Unused Venice credit is `$0` token yield. This tool cannot read AskSurplus — and does
+not need to: the vault's **NAV ratchet** is the on-chain **coincident** proxy (never “leading AskSurplus
+demand”). wstDIEM is rebase-free: value accrues into NAV / `convertToAssets`; deposits/withdrawals
+change supply and total assets but **not** NAV. Flat NAV is not zero demand (harvest / `routeYield` lag).
 
 Today the only yield surface for sizing is B-2's **single lagging 7-day** window. There is no
 **shorter-window NAV growth rate** or **acceleration** for the intelligence layer.

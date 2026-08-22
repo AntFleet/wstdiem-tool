@@ -82,4 +82,4 @@ The simulator uses a conservative linear depth-share model for Curve, a simple s
 
 The borrow model is **instantaneous**: it prices the rate at the loop's post-draw utilization for a supplied `rateAtTarget`, but does **not** model the multi-day `rateAtTarget` adaptation (it drifts up under sustained high utilization and down when idle). Pass the current on-chain `rateAtTarget`, and treat sustained-high-utilization scenarios as understated. APR is simple-annualized (not compounded), so effective APY is marginally higher.
 
-Treat blocked scenarios as hard blockers for the given assumptions. Treat `candidate` scenarios as candidates for deeper fork/live validation, not approval to broadcast.
+Treat blocked scenarios as hard blockers for the given assumptions. Treat `candidate` scenarios as **sizing candidates**: decision-support under model assumptions, not permission to deploy, not automated protection, not investment advice. See [resource-ladder.md](./resource-ladder.md).

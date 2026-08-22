@@ -11,6 +11,11 @@ Author: 2026-07-16. Rev-2: 2026-08-18.
 > find the “best” yield. It prints each route with a tier tag. The vault number is **REALIZED NAV
 > growth** (SPEC008 rev-2), never a forward yield promise.
 
+**Canonical terms (2026-08-22).** [docs/deployment/resource-ladder.md](docs/deployment/resource-ladder.md).
+Venice credit is `$1/day per DIEM` only if spent; `$0` token yield if unused. wstDIEM is rebase-free
+(NAV / `convertToAssets`). Loop spread is modeled/realized NAV minus Morpho borrow and execution costs —
+not a coupon. This command does not broadcast or protect a position.
+
 ## 0. Rev-2 fold (must remain true in the body)
 
 | # | Finding | Fold |
