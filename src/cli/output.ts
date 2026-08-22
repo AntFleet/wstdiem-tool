@@ -6,6 +6,7 @@ import type { LoopCapacityResult } from "../loop/capacity.js";
 import type { LoopBasisResult } from "../metrics/basis.js";
 import type { LoopDemandResult } from "../metrics/demand.js";
 import type { DiemYieldResult } from "../metrics/diemYield.js";
+import type { DiemLedgerResult, LedgerBucket } from "../metrics/ledger.js";
 import type { InferenceFlowsResult } from "../metrics/flows.js";
 import type { LoopReadinessResult } from "../loop/readiness.js";
 import type { LoopSizingReport, LoopSizingResult } from "../loop/sizing.js";
@@ -1083,6 +1084,167 @@ export function renderLoopBasisTable(result: LoopBasisResult): string {
   for (const phrase of ban) {
     if (out.toLowerCase().includes(phrase.toLowerCase())) {
       throw new Error(`renderLoopBasisTable produced banned phrase: ${phrase}`);
+    }
+  }
+  return out;
+}
+
+function formatUsdcRaw(amount: string | null): string {
+  return amount === null ? "n/a" : `${amount} (6-dec raw)`;
+}
+
+function formatDiemWad(amount: string | null): string {
+  if (amount === null) {
+    return "n/a";
+  }
+  try {
+    return `${formatWad(BigInt(amount))} DIEM`;
+  } catch {
+    return amount;
+  }
+}
+
+function formatOwnerBucket(bucket: LedgerBucket): string {
+  const extras = bucket.extras;
+  const parts: string[] = [];
+  if (extras.walletWstDiem !== null && extras.walletWstDiem !== undefined) {
+    try {
+      parts.push(`wallet ${formatWad(BigInt(extras.walletWstDiem))} wstDIEM`);
+    } catch {
+      parts.push(`wallet ${extras.walletWstDiem} wstDIEM`);
+    }
+  }
+  if (extras.walletValueDiem !== null && extras.walletValueDiem !== undefined) {
+    parts.push(`wallet ≈ ${formatDiemWad(extras.walletValueDiem)}`);
+  }
+  if (extras.collateralWstDiem === "unread") {
+    parts.push("Morpho collateral unread");
+  } else if (extras.collateralWstDiem !== null && extras.collateralWstDiem !== undefined) {
+    try {
+      parts.push(`Morpho collateral ${formatWad(BigInt(extras.collateralWstDiem))} wstDIEM`);
+    } catch {
+      parts.push(`Morpho collateral ${extras.collateralWstDiem} wstDIEM`);
+    }
+  }
+  if (extras.borrowedDiem === "unread") {
+    parts.push("Morpho debt unread");
+  } else if (extras.borrowedDiem !== null && extras.borrowedDiem !== undefined) {
+    parts.push(`Morpho debt ${formatDiemWad(extras.borrowedDiem)}`);
+  }
+  if (parts.length > 0) {
+    return parts.join("; ");
+  }
+  return bucket.amount === null ? "n/a" : bucket.amount;
+}
+
+function formatLedgerAmount(bucket: LedgerBucket): string {
+  if (bucket.id === "owner-position") {
+    return formatOwnerBucket(bucket);
+  }
+  if (bucket.amount === null) {
+    return "n/a";
+  }
+  if (bucket.unit === "USDC") {
+    return formatUsdcRaw(bucket.amount);
+  }
+  if (bucket.unit === "mixed") {
+    return bucket.amount;
+  }
+  try {
+    return `${formatWad(BigInt(bucket.amount))} ${bucket.unit}`;
+  } catch {
+    return `${bucket.amount} ${bucket.unit}`;
+  }
+}
+
+/** DIEM resource ledger: utilization, buckets, liveness. Decision-support only. */
+export function renderDiemLedgerTable(result: DiemLedgerResult): string {
+  const lines = [result.banner, result.disclaimer, `Window ${result.windowHours}h. Not advice.`];
+
+  const util = result.utilization;
+  const utilization = new Table({ head: ["Capacity utilization", "Value"], wordWrap: true });
+  const ratioCell =
+    util.status === "ok" && util.ratioBps !== null
+      ? `${(util.ratioBps / 100).toFixed(2)}% (${util.ratioBps} bps)`
+      : `${util.status}${util.reason !== null ? ` (${util.reason})` : ""}`;
+  const dailyCredited =
+    util.numeratorDailyDiem === null ? "n/a" : `${formatWad(BigInt(util.numeratorDailyDiem))} DIEM/day`;
+  const dailyCap =
+    util.denominatorDailyDiem === null
+      ? "n/a"
+      : `${formatWad(BigInt(util.denominatorDailyDiem))} DIEM/day Venice credit if spent`;
+  utilization.push(
+    ["Status", util.status],
+    ["Ratio (Tier-1 daily credited / staked-DIEM capacity)", ratioCell],
+    ["Numerator (Tier 1 DIEMCredited, daily)", dailyCredited],
+    ["Window DIEM credited (Tier 1)", `${formatWad(BigInt(util.windowDiemCredited))} DIEM`],
+    [
+      "Denominator (vault-staked DIEM daily capacity)",
+      `${dailyCap}${util.denominatorOrigin !== null ? ` [${util.denominatorOrigin}]` : ""}`,
+    ],
+    ["Estimated Venice USD/day if spent", util.estimatedVeniceUsdPerDay ?? "n/a"],
+    ["Venice semantics", util.veniceCreditSemantics],
+    [
+      "Tier 2 USDC settled as-reported (NOT inference demand)",
+      formatUsdcRaw(util.tier2Context.windowUsdcSettledAsReported),
+    ],
+    ["Tier 2 YieldRouted DIEM (context)", formatDiemWad(util.tier2Context.windowDiemFromYieldRouted)],
+    ["Unrouted USDC (state fact, not demand)", formatUsdcRaw(util.tier2Context.unroutedUsdc)],
+  );
+  lines.push(utilization.toString());
+
+  const buckets = new Table({
+    head: ["Bucket", "Status", "Amount", "Purpose / note"],
+    wordWrap: true,
+  });
+  for (const b of result.buckets) {
+    buckets.push([
+      b.label,
+      b.status,
+      formatLedgerAmount(b),
+      [b.purpose, b.trustLabel, b.reason].filter((part) => part !== null && part.length > 0).join(" · "),
+    ]);
+  }
+  lines.push("");
+  lines.push("── Where the DIEM is ──");
+  lines.push(buckets.toString());
+
+  const live = new Table({ head: ["Liveness", "Status", "Age (s)", "Reason"], wordWrap: true });
+  const rows: Array<[string, (typeof result.liveness)[keyof typeof result.liveness]]> = [
+    ["Vault sample", result.liveness.vaultSample],
+    ["Last DIEMCredited", result.liveness.lastDiemCredited],
+    ["Last YieldRouted", result.liveness.lastYieldRouted],
+    ["Last SettlementReceived", result.liveness.lastSettlementReceived],
+    ["SQLite sampling", result.liveness.sqliteSampling],
+    ["RPC block header", result.liveness.rpcBlock],
+    ["get_dy quote", result.liveness.getDyQuote],
+    ["Keeper / harvest cadence", result.liveness.keeperHarvestCadence],
+    ["Credit cadence", result.liveness.creditCadence],
+  ];
+  for (const [label, state] of rows) {
+    live.push([label, state.status, state.ageSeconds === null ? "n/a" : String(state.ageSeconds), state.reason]);
+  }
+  lines.push("");
+  lines.push("── Liveness / lag ──");
+  lines.push(live.toString());
+
+  if (result.caveats.length > 0) {
+    lines.push(`Caveats: ${result.caveats.join("; ")}`);
+  }
+
+  const out = lines.join("\n");
+  const ban = [
+    "inference demand is",
+    "inference volume",
+    "demand collapsed",
+    "demand is up",
+    "recommended",
+    "opportunity",
+    "buy now",
+  ];
+  for (const phrase of ban) {
+    if (out.toLowerCase().includes(phrase.toLowerCase())) {
+      throw new Error(`renderDiemLedgerTable produced banned phrase: ${phrase}`);
     }
   }
   return out;

@@ -180,6 +180,7 @@ tail -f ~/.wstdiem/logs/sample-tick.log
 ```sh
 node dist/cli/index.js --config config.sampling.example.yaml loop demand
 node dist/cli/index.js --config config.sampling.example.yaml loop brief
+node dist/cli/index.js --config config.sampling.example.yaml loop ledger
 ```
 
 SPEC008 window math (default 72h):
@@ -191,7 +192,7 @@ SPEC008 window math (default 72h):
 | `span-too-short` / `insufficient-samples` | Anchor exists but endpoints lack span or density. |
 | `ok` with velocity `n/a` or `0` | Math ran; flat NAV stays honest — not a fake demand number. |
 
-Prefer the same stable `--config` for write (`sample-tick`) and read (`loop demand` / `loop brief`).
+Prefer the same stable `--config` for write (`sample-tick`) and read (`loop demand` / `loop brief` / `loop ledger`). `loop ledger` uses the same snapshots plus `inference_credit` / `inference_settlement` / `harvest_events` for freshness; a missing series is `unavailable`, never a fabricated utilization ratio.
 
 ### Guardrails
 
@@ -201,3 +202,4 @@ Prefer the same stable `--config` for write (`sample-tick`) and read (`loop dema
 | No secrets in repo/plist | `BASE_RPC_URL` from `.env` / environment only. |
 | Exit codes | Do not `set -e` around raw `watch --once` in a custom scheduler — map `0/10/20/30` so the schedule continues. |
 | Empty pool | Expected; demand series is pool-independent. |
+| Ledger liveness | `loop ledger` classifies sampling/event age as fresh/stale/lagging/unavailable. A silent `DIEMCredited` window is not proof of no demand — keeper/`routeYield` is lumpy. |

@@ -25,6 +25,7 @@ This runbook is the public on-ramp. Deeper detail lives in:
 | Max equity still “candidate” | `loop capacity` | Last-candidate absorption bound |
 | Daily capital brief | `loop brief --from-chain` | Capacity + net APY + Δ vs last run |
 | Yield velocity (demand proxy) | `loop demand` | NAV-ratchet only; not AskSurplus — needs sampling series ([monitoring.md](./monitoring.md#sampling-cadence--starting-the-demand-series)) |
+| DIEM capacity / location / liveness | `loop ledger` | Venice credit utilization, resource buckets, lag states — decision-support only |
 | Start / keep demand series | `./scripts/sample-tick.sh` (launchd 6h) | Writes `metric_snapshots` via `watch --once` |
 | Market vs NAV basis | `loop basis --market-price …` | Operator-supplied market; dual discount framing |
 | Exit rehearsal | `loop simulate --action exit --live` | Dry-run; no broadcast |
@@ -265,6 +266,26 @@ Loop leftover prints the Morpho refuse and **does not** invent a 1.5× APY. Mark
 audit footer only when the vault window is ok. `--window-hours 72` is rejected (demand-proxy
 belongs on `loop demand`).
 
+### 6.1c DIEM resource ledger — capacity, location, liveness
+
+```sh
+node dist/cli/index.js loop ledger
+node dist/cli/index.js loop ledger --window-hours 72 --json
+node dist/cli/index.js loop ledger --owner 0x…
+```
+
+Decision-support only; not advice; not a yield promise. Three blocks:
+
+1. **Capacity utilization.** Numerator is Tier-1 `DIEMCredited` in the window, expressed as a daily rate. Denominator is vault-staked DIEM (estimated Venice daily credit capacity). Venice is **$1/day per DIEM only if that credit is spent** — unused credit is $0 token yield. If the denominator cannot be read, status is `n/a` with a reason, never a fabricated ratio. Settled USDC / `YieldRouted` is **Tier 2 context** (SPEC009), never the utilization numerator, and never labeled inference demand.
+2. **Where the DIEM is.** Explicit buckets: vault assets / wstDIEM supply / NAV, window `DIEMCredited` and `WstDIEMCredited`, unrouted adapter USDC, Morpho **market supply** (loan-token DIEM, not borrower collateral) / debt / available borrow, Curve DIEM and wstDIEM legs, owner position if configured (wallet vs pledged wstDIEM vs borrowed DIEM are separate). Missing data is `unavailable` or `not_configured` — buckets are not omitted.
+3. **Liveness / lag.** Each of vault sample (age of the observation actually used for vault TVL), last `DIEMCredited`, last `YieldRouted` / `SettlementReceived`, SQLite sampling, RPC block header (not `loop sizing --from-chain`), `get_dy` (not queried here), keeper/harvest, and credit cadence is `fresh` / `stale` / `lagging` / `unavailable` / `unknown` / `not_configured`, with `ageSeconds` when known. JSON `utilization.denominatorOrigin` is `live` or `sqlite`.
+
+**Do not read a flat credit window as no demand.** `routeYield` / keeper cadence is lumpy and operator-triggered. Zero recent `DIEMCredited` with unrouted USDC (or missing cadence) is `ambiguous`, not 0% utilization-as-demand.
+
+Live RPC reads are fail-soft per bucket (unlike `loop sizing --from-chain`, which fail-closes on leftover Morpho or a drained Curve). `--json` includes `decisionSupportOnly`, `notAdvice`, `notAYieldPromise`, trust labels, and liveness `{ status, ageSeconds, reason }`.
+
+Needs the same SQLite series as `loop demand` for sampling/event freshness (`watch --once` / `sample-tick`).
+
 ### 6.2 Basis — secondary market vs NAV
 
 ```sh
@@ -281,8 +302,9 @@ node dist/cli/index.js loop basis --market-price 0.97 --json
 2. **Danger page:** `monitor` on a short cron with the §2.3 recipe + dead-man’s-switch.
 3. **Size / capacity:** `loop sizing --from-chain` and `loop capacity --from-chain` before any capital plan; treat only `candidate` + `authoritative: true` as verified under the model.
 4. **Brief:** `loop brief --from-chain` for recurring deltas (same template fingerprint).
-5. **Before leverage changes out-of-band:** `loop simulate --action exit --live` (and readiness/proof when bringing up an executor).
-6. **Never** treat nominal `0` or a sizing `candidate` as automated protection or permission to broadcast.
+5. **Ledger:** `loop ledger` for Venice credit utilization, DIEM location buckets, and keeper/sampling lag — decision-support only; a flat credit window is not proof of no demand.
+6. **Before leverage changes out-of-band:** `loop simulate --action exit --live` (and readiness/proof when bringing up an executor).
+7. **Never** treat nominal `0` or a sizing `candidate` as automated protection or permission to broadcast.
 
 ---
 
@@ -290,7 +312,7 @@ node dist/cli/index.js loop basis --market-price 0.97 --json
 
 - The tool **holds no position** and **takes no protective action**.
 - Broadcast stays disabled pending [audit-gate.md](./audit-gate.md).
-- `candidate` / capacity / brief / demand / basis are **decision-support**, not investment advice.
+- `candidate` / capacity / brief / demand / ledger / basis are **decision-support**, not investment advice.
 - Gate **confirmed danger** on `monitor` exit **30**, not on vault-only commands.
 - Large capital still needs independent diligence, fork proofs, and operational ownership of out-of-band actions.
 

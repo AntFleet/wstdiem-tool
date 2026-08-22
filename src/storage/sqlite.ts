@@ -427,6 +427,84 @@ export class Storage {
     }));
   }
 
+  getLatestMetricSnapshotMeta(): {
+    timestamp: number;
+    blockNumber: bigint;
+    nav: bigint;
+    totalAssetsDiem: bigint;
+    totalSupply: bigint;
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT timestamp, block_number, nav, vault_total_assets_diem, total_supply_diem
+         FROM metric_snapshots
+         WHERE nav != '0'
+           AND vault_total_assets_diem != '0'
+         ORDER BY timestamp DESC, id DESC
+         LIMIT 1`,
+      )
+      .get() as
+      | {
+          timestamp: number;
+          block_number: number;
+          nav: string;
+          vault_total_assets_diem: string;
+          total_supply_diem: string;
+        }
+      | undefined;
+    if (row === undefined) {
+      return null;
+    }
+    const nav = BigInt(row.nav);
+    const totalAssetsDiem = BigInt(row.vault_total_assets_diem);
+    if (nav <= 0n || totalAssetsDiem <= 0n) {
+      return null;
+    }
+    return {
+      timestamp: row.timestamp,
+      blockNumber: BigInt(row.block_number),
+      nav,
+      totalAssetsDiem,
+      totalSupply: BigInt(row.total_supply_diem ?? "0"),
+    };
+  }
+
+  getLatestHarvestTimestamp(): number | null {
+    const row = this.db.prepare("SELECT MAX(timestamp) AS ts FROM harvest_events").get() as
+      | { ts: number | null }
+      | undefined;
+    return row?.ts ?? null;
+  }
+
+  getLatestCreditEventTimestamp(): number | null {
+    const row = this.db.prepare("SELECT MAX(timestamp) AS ts FROM credit_events").get() as
+      | { ts: number | null }
+      | undefined;
+    return row?.ts ?? null;
+  }
+
+  getLatestInferenceCreditTimestamp(kind?: StoredInferenceCredit["kind"]): number | null {
+    const row =
+      kind === undefined
+        ? (this.db.prepare("SELECT MAX(ts) AS ts FROM inference_credit").get() as { ts: number | null } | undefined)
+        : (this.db
+            .prepare("SELECT MAX(ts) AS ts FROM inference_credit WHERE kind = ?")
+            .get(kind) as { ts: number | null } | undefined);
+    return row?.ts ?? null;
+  }
+
+  getLatestInferenceSettlementTimestamp(kind?: StoredInferenceSettlement["kind"]): number | null {
+    const row =
+      kind === undefined
+        ? (this.db.prepare("SELECT MAX(ts) AS ts FROM inference_settlement").get() as
+            | { ts: number | null }
+            | undefined)
+        : (this.db
+            .prepare("SELECT MAX(ts) AS ts FROM inference_settlement WHERE kind = ?")
+            .get(kind) as { ts: number | null } | undefined);
+    return row?.ts ?? null;
+  }
+
   /** Earliest inference event block (credit or settlement) — window first-seen bound. */
   getInferenceFirstSeenBlock(): bigint | null {
     const credit = this.db

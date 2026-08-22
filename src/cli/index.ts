@@ -60,7 +60,13 @@ import {
   type AdapterLiveMeta,
   type InferenceFlowsResult,
 } from "../metrics/flows.js";
+import {
+  buildDiemLedger,
+  collectLedgerLiveState,
+  DEFAULT_LEDGER_WINDOW_HOURS,
+} from "../metrics/ledger.js";
 import { formatWad, parseDecimalToUnits, WAD } from "../metrics/math.js";
+import { readBestRpcBlockStatus } from "../contracts/rpc.js";
 import { erc20BalanceOfAbi } from "../abi/erc20.js";
 import { inferenceAdapterReadAbis } from "../abi/inferenceAdapter.js";
 import { evaluateReadinessAlerts } from "../monitor/readinessAlerts.js";
@@ -78,6 +84,7 @@ import {
   renderLoopCapacityTable,
   renderLoopBasisTable,
   renderDiemYieldTable,
+  renderDiemLedgerTable,
   renderLoopDemandTable,
   renderLoopDemandWithFlows,
   renderLoopReadinessTable,
@@ -1448,6 +1455,96 @@ loop
           return { ...result, flows };
         }
         return renderLoopDemandWithFlows(result, flows);
+      } finally {
+        store.close();
+      }
+    });
+  });
+
+loop
+  .command("ledger")
+  .description(
+    "DIEM resource ledger: Venice capacity utilization, location buckets, and liveness (decision-support only)",
+  )
+  .option("--json", "emit JSON envelope")
+  .option(
+    "--window-hours <n>",
+    `window length in hours (integer 1..${MAX_WINDOW_HOURS}; default ${DEFAULT_LEDGER_WINDOW_HOURS})`,
+    String(DEFAULT_LEDGER_WINDOW_HOURS),
+  )
+  .option("--owner <address>", "position owner override")
+  .action(async function (this: Command) {
+    await runAction(this, "loop ledger", async (config) => {
+      const options = this.opts<{ windowHours?: string; owner?: string; json?: boolean }>();
+      const wantsJson = this.optsWithGlobals<GlobalOptions>().json;
+      const hours = parseStrictInteger(
+        options.windowHours ?? String(DEFAULT_LEDGER_WINDOW_HOURS),
+        "--window-hours",
+      );
+      if (hours < 1 || hours > MAX_WINDOW_HOURS) {
+        throw new CliError(
+          "INVALID_INPUT",
+          `--window-hours must be an integer from 1 to ${MAX_WINDOW_HOURS}`,
+        );
+      }
+      if (options.owner !== undefined) {
+        config = { ...config, position: { owner: parseAddress(options.owner, "--owner") } };
+      }
+
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const store = new Storage(config.storage.sqlitePath);
+      try {
+        const lookback = nowSeconds - hours * 3600 * 2;
+        const credits = store.listInferenceCreditsSince(lookback);
+        const settlements = store.listInferenceSettlementsSince(lookback);
+        const rpcConfigured =
+          config.rpc.primaryUrl !== null || config.rpc.fallbackUrls.length > 0;
+
+        let live = null;
+        let rpcHeaderTimestamp: number | null = null;
+        if (rpcConfigured) {
+          try {
+            const block = await readBestRpcBlockStatus(config);
+            rpcHeaderTimestamp = block.blockTimestamp;
+            try {
+              const client = await createViemLoopSimulationClient(config);
+              if (client !== null) {
+                live = await collectLedgerLiveState({
+                  config,
+                  client,
+                  blockTimestamp: block.blockTimestamp,
+                  pinBlock: block.blockNumber,
+                });
+              }
+            } catch {
+              live = null;
+            }
+          } catch {
+            live = null;
+          }
+        }
+
+        const result = buildDiemLedger({
+          nowSeconds,
+          windowHours: hours,
+          credits,
+          settlements,
+          latestSnapshot: store.getLatestMetricSnapshotMeta(),
+          lastHarvestAt: store.getLatestHarvestTimestamp(),
+          lastCreditEventAt: store.getLatestCreditEventTimestamp(),
+          lastDiemCreditedAt: store.getLatestInferenceCreditTimestamp("DIEMCredited"),
+          lastYieldRoutedAt: store.getLatestInferenceSettlementTimestamp("YieldRouted"),
+          lastSettlementReceivedAt: store.getLatestInferenceSettlementTimestamp("SettlementReceived"),
+          firstSeenBlock: store.getInferenceFirstSeenBlock(),
+          creditUsdPerDiemPerDay: config.diemYield.creditUsdPerDiemPerDay,
+          configAdapters: config.contracts.venueAdapters ?? [],
+          live,
+          rpcConfigured,
+          rpcHeaderTimestamp,
+          keeperFreshSeconds: config.thresholds.harvestSilenceWarnDays * 24 * 3600,
+          keeperStaleSeconds: config.thresholds.harvestSilenceCriticalDays * 24 * 3600,
+        });
+        return wantsJson ? result : renderDiemLedgerTable(result);
       } finally {
         store.close();
       }
