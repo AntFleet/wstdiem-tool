@@ -475,7 +475,7 @@ execution:
   maxSlippageBps: 300
   maxCurvePriceImpactBps: 100
   exitRepayBufferBps: 200
-  maxBaseApyStalenessBlocks: 7200
+  maxBaseApyStalenessBlocks: 72000 # 4h at 200ms blocks
   transactionDeadlineSeconds: 300
 ```
 

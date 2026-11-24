@@ -567,7 +567,7 @@ describe("SPEC009 §7.7–7.9 backfill M3/M4/M5 + reorg", () => {
     };
   }
 
-  it("M4: existing cursor → near-tip fromBlock (no 302k lookback)", () => {
+  it("M4: existing cursor → near-tip fromBlock (no 7-day lookback)", () => {
     const storage = new MemoryStorage();
     storage.setMeta("lastProcessedBlock", "1000000");
     const range = resolveBackfillRange({
