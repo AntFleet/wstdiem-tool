@@ -5,9 +5,16 @@ ACCEPT-WITH-RESERVATIONS) → fixes folded → confirmation pass (M2/M3/M4/M5 ve
 surgical Majors: `S_start` had no data path, two-residual mismatch, undefined tolerance) → fixed → LOCKED. Ready for
 implementation.
 
+**Canonical terms (2026-08-22).** Locked CLI paste strings stay byte-stable.
+Operator prose uses [docs/deployment/resource-ladder.md](docs/deployment/resource-ladder.md).
+`DIEMCredited` is Tier 1 (utilization numerator for `loop ledger`); `SettlementReceived` / `YieldRouted`
+are Tier 2 context, never “inference demand” and never proof demand is external. Zero recent
+`DIEMCredited` is not zero demand. Venice credit is `$0` token yield if unused. wstDIEM is rebase-free
+(NAV / `convertToAssets`). `loop demand --flows` is decision-support only.
+
 > The shipped SPEC008 (`loop demand`) measures **NAV-ratchet velocity** — a lagging aggregate that CANNOT separate
 > inference revenue from base DIEM-staking. This unit reads the **direct, attributable, on-chain events** by which
-> inference USDC becomes wstDIEM yield, so the operator can **quantify the inference share with receipts** and track
+> inference USDC becomes wstDIEM NAV (Tier 1 `DIEMCredited`), so the operator can **quantify the inference share with receipts** and track
 > it growing as the protocol scales — honest attribution, not amplification. Read-only, decision-support (SPEC001 A3).
 
 ## 1. Problem & scope

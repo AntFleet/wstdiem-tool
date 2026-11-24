@@ -7,6 +7,7 @@ This runbook is the public on-ramp. Deeper detail lives in:
 
 | Topic | Doc |
 |---|---|
+| Resource ladder (canonical terms) | [resource-ladder.md](./resource-ladder.md) |
 | Scheduler exit codes + alerts | [monitoring.md](./monitoring.md) |
 | Sizing engine + `--from-chain` | [loop-sizing.md](./loop-sizing.md) |
 | Live readiness + full-unwind proof | [live-readiness.md](./live-readiness.md) |
@@ -245,7 +246,7 @@ node dist/cli/index.js loop demand --window-hours 840 --from-chain   # 35d REALI
 1..168 = demand-proxy (SPEC008 v1). 169..840 = **REALIZED NAV growth** (`authoritative` always no;
 not a forward yield). `--flows` is refused on realized windows.
 
-**1..168h** is the demand-proxy: short-window **NAV** growth (not totalAssets — deposits do not move NAV). Coincident proxy of inference demand, **not** AskSurplus itself and **not** a yield promise. Flat NAV ≠ “zero demand” (harvest lag).
+**1..168h** is the demand-proxy: short-window **NAV** growth (not totalAssets — deposits do not move NAV). Coincident proxy of inference demand, **not** AskSurplus itself and **not** a yield promise. Flat NAV ≠ “zero demand” (harvest lag). Unused Venice credit is `$0` token yield. Terms: [resource-ladder.md](./resource-ladder.md).
 
 **169..840h** is a holding-period REALIZED NAV print, not a demand signal and not a forward yield. `authoritative` is always no.
 
@@ -274,9 +275,9 @@ node dist/cli/index.js loop ledger --window-hours 72 --json
 node dist/cli/index.js loop ledger --owner 0x…
 ```
 
-Decision-support only; not advice; not a yield promise. Three blocks:
+Decision-support only; not advice; not a yield promise. Terms: [resource-ladder.md](./resource-ladder.md). Three blocks:
 
-1. **Capacity utilization.** Numerator is Tier-1 `DIEMCredited` in the window, expressed as a daily rate. Denominator is vault-staked DIEM (estimated Venice daily credit capacity). Venice is **$1/day per DIEM only if that credit is spent** — unused credit is $0 token yield. If the denominator cannot be read, status is `n/a` with a reason, never a fabricated ratio. Settled USDC / `YieldRouted` is **Tier 2 context** (SPEC009), never the utilization numerator, and never labeled inference demand.
+1. **Venice credit utilization.** Credit capacity *if spent* versus Tier 1 credited evidence. Numerator is Tier-1 `DIEMCredited` in the window, expressed as a daily rate. Denominator is vault-staked DIEM (estimated Venice daily credit capacity). Venice is **$1/day per DIEM only if that credit is spent** — unused credit is $0 token yield. If the denominator cannot be read, status is `n/a` with a reason, never a fabricated ratio. `SettlementReceived` / `YieldRouted` is **Tier 2 context** (SPEC009), never the utilization numerator, and never labeled inference demand or external demand.
 2. **Where the DIEM is.** Explicit buckets: vault assets / wstDIEM supply / NAV, window `DIEMCredited` and `WstDIEMCredited`, unrouted adapter USDC, Morpho **market supply** (loan-token DIEM, not borrower collateral) / debt / available borrow, Curve DIEM and wstDIEM legs, owner position if configured (wallet vs pledged wstDIEM vs borrowed DIEM are separate). Missing data is `unavailable` or `not_configured` — buckets are not omitted.
 3. **Liveness / lag.** Each of vault sample (age of the observation actually used for vault TVL), last `DIEMCredited`, last `YieldRouted` / `SettlementReceived`, SQLite sampling, RPC block header (not `loop sizing --from-chain`), `get_dy` (not queried here), keeper/harvest, and credit cadence is `fresh` / `stale` / `lagging` / `unavailable` / `unknown` / `not_configured`, with `ageSeconds` when known. JSON `utilization.denominatorOrigin` is `live` or `sqlite`.
 

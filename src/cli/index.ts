@@ -1464,7 +1464,7 @@ loop
 loop
   .command("ledger")
   .description(
-    "DIEM resource ledger: Venice capacity utilization, location buckets, and liveness (decision-support only)",
+    "DIEM resource ledger: Venice credit utilization, location buckets, and liveness (decision-support only)",
   )
   .option("--json", "emit JSON envelope")
   .option(
