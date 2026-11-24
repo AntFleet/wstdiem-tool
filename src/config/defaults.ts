@@ -110,7 +110,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     maxSlippageBps: 300,
     maxCurvePriceImpactBps: 100,
     exitRepayBufferBps: 200,
-    maxBaseApyStalenessBlocks: 7_200,
+    maxBaseApyStalenessBlocks: 72_000, // 4h at Base's 200ms blocks
     transactionDeadlineSeconds: 300,
   },
 };

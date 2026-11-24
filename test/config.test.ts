@@ -35,7 +35,7 @@ describe("config loading", () => {
     expect(config.morpho.marketId).toBe("0xdd6b9f10bf69445ebba0626ef54042af628cdf65dda98ff68df4d235d4d56c76");
     expect(config.morpho.lltvWad).toBe("860000000000000000");
     expect(config.execution.exitRepayBufferBps).toBe(200);
-    expect(config.execution.maxBaseApyStalenessBlocks).toBe(7_200);
+    expect(config.execution.maxBaseApyStalenessBlocks).toBe(72_000);
     expect(config.flashLoan).toMatchObject({
       provider: "uniswap-v3",
       factory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
@@ -96,7 +96,7 @@ describe("config loading", () => {
             maxSlippageBps: 301,
             maxCurvePriceImpactBps: 100,
             exitRepayBufferBps: 200,
-            maxBaseApyStalenessBlocks: 7_200,
+            maxBaseApyStalenessBlocks: 72_000,
             transactionDeadlineSeconds: 300,
           },
         },
@@ -138,7 +138,7 @@ describe("config loading", () => {
             maxSlippageBps: 100,
             maxCurvePriceImpactBps: 100,
             exitRepayBufferBps: 200,
-            maxBaseApyStalenessBlocks: 7_200,
+            maxBaseApyStalenessBlocks: 72_000,
             transactionDeadlineSeconds: 300,
           },
         },

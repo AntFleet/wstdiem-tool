@@ -13,8 +13,12 @@ import type {
   StoredInferenceSettlement,
 } from "../types/domain.js";
 
-export const REORG_SAFETY_OVERLAP_BLOCKS = 20n;
-export const INITIAL_BACKFILL_LOOKBACK_BLOCKS = 302_400n;
+// Base produces a block every ~200ms (it was 2s until early Nov 2026). Windows
+// below are sized in seconds and converted, so a block-time change is one edit.
+export const BASE_BLOCK_TIME_MS = 200n;
+const blocksFor = (seconds: bigint): bigint => (seconds * 1000n) / BASE_BLOCK_TIME_MS;
+export const REORG_SAFETY_OVERLAP_BLOCKS = blocksFor(40n); // ~40s
+export const INITIAL_BACKFILL_LOOKBACK_BLOCKS = blocksFor(7n * 24n * 60n * 60n); // 7 days
 
 const TRANSFER_TOPIC = toEventHash("Transfer(address,address,uint256)");
 const HARVEST_TOPICS = new Set<Hex>([

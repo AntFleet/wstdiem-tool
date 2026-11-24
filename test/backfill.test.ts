@@ -11,6 +11,7 @@ import {
   type BackfillLog,
   type BackfillStorage,
 } from "../src/metrics/backfill.js";
+import { MAX_GET_LOGS_RANGE_BLOCKS, splitBlockRange } from "../src/contracts/backfillClient.js";
 import { WAD } from "../src/metrics/math.js";
 import type { Address, AppConfig, Hex, StoredCreditEvent, StoredHarvestEvent } from "../src/types/domain.js";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
@@ -239,12 +240,12 @@ describe("credit and harvest event backfill", () => {
       config: completeConfig(),
       client: new MemoryBackfillClient([], {}),
       storage,
-      finalizedBlock: 400_000n,
+      finalizedBlock: 4_000_000n,
     });
 
-    expect(result.fromBlock).toBe(400_000n - INITIAL_BACKFILL_LOOKBACK_BLOCKS);
-    expect(result.toBlock).toBe(400_000n);
-    expect(storage.getMeta("lastProcessedBlock")).toBe("400000");
+    expect(result.fromBlock).toBe(4_000_000n - INITIAL_BACKFILL_LOOKBACK_BLOCKS);
+    expect(result.toBlock).toBe(4_000_000n);
+    expect(storage.getMeta("lastProcessedBlock")).toBe("4000000");
   });
 
   it("does not double-count a VVV harvest when the same transaction has a canonical DIEM transfer", async () => {
@@ -414,5 +415,26 @@ describe("credit and harvest event backfill", () => {
       }),
     ).rejects.toThrow(/sqlite busy/);
     expect(writeFailureStorage.getMeta("lastProcessedBlock")).toBeNull();
+  });
+});
+
+describe("splitBlockRange", () => {
+  it("splits a range into inclusive chunks no wider than the cap", () => {
+    expect(splitBlockRange(0n, 120_000n)).toEqual([
+      { fromBlock: 0n, toBlock: 49_999n },
+      { fromBlock: 50_000n, toBlock: 99_999n },
+      { fromBlock: 100_000n, toBlock: 120_000n },
+    ]);
+  });
+
+  it("returns one chunk for a single block and none for an empty range", () => {
+    expect(splitBlockRange(7n, 7n)).toEqual([{ fromBlock: 7n, toBlock: 7n }]);
+    expect(splitBlockRange(8n, 7n)).toEqual([]);
+  });
+
+  it("covers the default 7-day lookback within the cap", () => {
+    const ranges = splitBlockRange(0n, INITIAL_BACKFILL_LOOKBACK_BLOCKS - 1n);
+    expect(ranges.every((r) => r.toBlock - r.fromBlock + 1n <= MAX_GET_LOGS_RANGE_BLOCKS)).toBe(true);
+    expect(ranges.at(-1)?.toBlock).toBe(INITIAL_BACKFILL_LOOKBACK_BLOCKS - 1n);
   });
 });
